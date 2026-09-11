@@ -2,9 +2,15 @@ import { useEffect, useMemo, useState } from 'react';
 import Sidebar from '@/panels/Sidebar';
 import AIDock from '@/panels/AIDock';
 import ProjectFileTree from '@/panels/ProjectFileTree';
+import AssetsView from '@/panels/AssetsView';
+import AppRail, { type AppView } from '@/components/AppRail';
+import ProjectTopBar from '@/components/ProjectTopBar';
+import SettingsModal from '@/panels/SettingsModal';
+import { ASSET_SESSION_JUMP_EVENT } from '@/panels/DownloadsModal';
 import ScheduledTaskRunner from '@/components/ScheduledTaskRunner';
 import BackgroundJobRunner from '@/components/BackgroundJobRunner';
 import StatusBar from '@/components/StatusBar';
+import { cn } from '@/lib/cn';
 import { primeCliRuntime } from '@/lib/cliConfig';
 import { primeCliUpdateStatus } from '@/lib/cliUpdateStatus';
 import {
@@ -37,9 +43,12 @@ function subscribeStartupStorageMigration(
 }
 
 /**
- * Top-level chat layout:
- *   left  : Sidebar
- *   center: AIDock full-height chat surface
+ * Top-level layout (Autocode-style):
+ *   rail  : AppRail — 智能终端 / 资产 navigation on top, settings on bottom
+ *   top   : ProjectTopBar — the project list lives at the top of the window
+ *   main  : per-view content. The 智能终端 view (session panel + chat +
+ *           project/session files) stays mounted while the 资产 view is
+ *           shown, so chat/composer/file state survives view switches.
  *
  * App.tsx is the consumer of all import contracts.
  */
@@ -47,6 +56,15 @@ export default function App() {
   const initHistory = useStore((s) => s.initHistory);
   const startupMigration = useStartupStorageMigration();
   useActiveChannelProfile();
+  const [activeView, setActiveView] = useState<AppView>('terminal');
+  const [settingsOpen, setSettingsOpen] = useState(false);
+
+  // "跳到资产所在会话" from the asset view lands in the smart terminal.
+  useEffect(() => {
+    const onJump = () => setActiveView('terminal');
+    window.addEventListener(ASSET_SESSION_JUMP_EVENT, onJump);
+    return () => window.removeEventListener(ASSET_SESSION_JUMP_EVENT, onJump);
+  }, []);
 
   useEffect(() => {
     if (!startupMigration.done) return;
@@ -75,17 +93,46 @@ export default function App() {
       <ScheduledTaskRunner />
       <BackgroundJobRunner />
       <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
-        <div className="hidden md:block">
-          <Sidebar />
-        </div>
-        <main className="flex min-h-0 min-w-0 flex-1 flex-col">
-          <AIDock layout="chat" />
-        </main>
-        <div className="hidden lg:block">
-          <ProjectFileTree />
+        <AppRail
+          activeView={activeView}
+          onViewChange={setActiveView}
+          onOpenSettings={() => setSettingsOpen(true)}
+        />
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+          <ProjectTopBar />
+          <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
+            {/* 智能终端视图：会话面板 + 会话界面 + 项目/会话文件。
+                切到资产时保持挂载（仅隐藏），保留聊天与文件状态。 */}
+            <section
+              className={cn(
+                'min-w-0 flex-1',
+                activeView === 'terminal' ? 'flex overflow-hidden' : 'hidden',
+              )}
+            >
+              <div className={activeView === 'terminal' ? 'hidden md:block' : 'hidden'}>
+                <Sidebar />
+              </div>
+              <main className="flex min-h-0 min-w-0 flex-1 flex-col">
+                <AIDock layout="chat" />
+              </main>
+              <div className={activeView === 'terminal' ? 'hidden lg:block' : 'hidden'}>
+                <ProjectFileTree />
+              </div>
+            </section>
+            {/* 资产视图 */}
+            <section
+              className={cn(
+                'min-w-0 flex-1',
+                activeView === 'assets' ? 'block overflow-hidden' : 'hidden',
+              )}
+            >
+              <AssetsView />
+            </section>
+          </div>
         </div>
       </div>
       <StatusBar />
+      {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
       <StartupStorageMigrationOverlay progress={startupMigration.progress} />
     </div>
   );

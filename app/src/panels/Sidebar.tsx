@@ -1,15 +1,8 @@
-import {
-  useState,
-  useCallback,
-  useEffect,
-  useMemo,
-  useSyncExternalStore,
-} from 'react';
+import { useState, useCallback, useEffect, useMemo } from 'react';
 import {
   AlarmClock,
   ChevronDown,
   ChevronRight,
-  Download,
   FolderOpen,
   MoreHorizontal,
   Pencil,
@@ -21,29 +14,13 @@ import {
   X,
 } from 'lucide-react';
 import StatusIndicator, { type StatusTone } from '@/components/StatusIndicator';
-import WorkspaceListSelect from '@/components/WorkspaceListSelect';
-import RemoteWorkspaceDialog from '@/components/RemoteWorkspaceDialog';
 import RemoteWorkspaceStatusBadge, {
   remoteWorkspaceConnectionDotClassName,
   remoteWorkspaceConnectionLabel,
 } from '@/components/RemoteWorkspaceStatusBadge';
 import { cn } from '@/lib/cn';
-import {
-  getCliUpdateSnapshot,
-  subscribeCliUpdateStatus,
-} from '@/lib/cliUpdateStatus';
-import { pickFolder } from '@/lib/folderPicker';
-import {
-  getRemoteWorkspace,
-  isRemoteWorkspacePath,
-  remoteWorkspaceIdFromPath,
-  type RemoteWorkspaceConfig,
-} from '@/lib/remoteWorkspace';
-import {
-  REMOTE_WORKSPACE_STATUS_CHECK_INTERVAL_MS,
-  checkRemoteWorkspaceConnection,
-  type RemoteWorkspaceConnectionState,
-} from '@/lib/remoteWorkspaceStatus';
+import { isRemoteWorkspacePath } from '@/lib/remoteWorkspace';
+import useRemoteWorkspaceStates from '@/hooks/useRemoteWorkspaceStates';
 import {
   uniqueWorkspaceHistory,
   workspacePathKey,
@@ -70,30 +47,25 @@ import {
 import {
   openWorkspaceDirectory,
   scanProjectEnvironment,
-  listCachedAssets,
-  tauriAvailable,
   type ProjectEnvironmentScan,
 } from '@/lib/tauri';
 import { useResizableWidth } from '@/lib/useResizableWidth';
 import { useAutoHideScroll } from '@/hooks/useAutoHideScroll';
 import { t } from '@/lib/i18n';
-import {
-  assetMatchesWorkspace,
-  getAssets,
-  subscribeAssets,
-  mergeCachedAssetsFromDisk,
-} from '@/lib/downloadRegistry';
-import SettingsModal from './SettingsModal';
 import ProjectSettingsModal from './ProjectSettingsModal';
 import ScheduledTaskDialog from './ScheduledTaskDialog';
-import DownloadsModal from './DownloadsModal';
 
 /**
- * CONTRACT: default export, no props. Left session rail.
+ * CONTRACT: default export. Session panel inside the smart-terminal view.
  *
  * Top  : primary action — "+ New Session".
- * Bottom: session history list, sourced from the store; clicking switches the
- *         active session context.
+ * Body : history/automation tabs, session search, and the session history
+ *        list, sourced from the store; clicking switches the active session
+ *        context.
+ *
+ * The brand, project switcher, settings and asset-center entries moved to the
+ * app rail / top project bar (see components/AppRail.tsx and
+ * components/ProjectTopBar.tsx); this panel only manages sessions.
  *
  * Mirrors design.html §06 "Left · 会话栏".
  */
@@ -342,9 +314,6 @@ function sessionVisibleInTab(session: Session, tab: SidebarTab): boolean {
   return tab === 'history' || session.favorite === true;
 }
 
-const sidebarTextButtonClassName =
-  'group flex w-full items-center gap-3 rounded-sm px-3 py-2 text-left text-sm text-fg-dim transition-colors hover:text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/60 disabled:cursor-not-allowed disabled:opacity-40';
-
 const sidebarPrimaryButtonClassName =
   'group flex w-full items-center gap-3 rounded-md border border-border bg-accent/5 px-3 py-2 text-left text-sm font-medium text-fg transition-colors hover:border-accent/30 hover:bg-accent/10 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/60 disabled:cursor-not-allowed disabled:opacity-40';
 
@@ -434,11 +403,7 @@ export default function Sidebar({
   const selectSession = useStore((s) => s.selectSession);
   const deleteSession = useStore((s) => s.deleteSession);
   const deleteWorkspaceHistory = useStore((s) => s.deleteWorkspaceHistory);
-  const assets = useSyncExternalStore(subscribeAssets, getAssets);
-  const cliUpdate = useSyncExternalStore(
-    subscribeCliUpdateStatus,
-    getCliUpdateSnapshot,
-  );
+  const remoteConnectionStates = useRemoteWorkspaceStates(workspaces);
   const renameWorkflowSession = useStore((s) => s.renameWorkflowSession);
   const setWorkflowFavoriteSession = useStore(
     (s) => s.setWorkflowFavoriteSession,
@@ -446,15 +411,10 @@ export default function Sidebar({
   const setWorkflowScheduledTaskSession = useStore(
     (s) => s.setWorkflowScheduledTaskSession,
   );
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [downloadsOpen, setDownloadsOpen] = useState(false);
   const [projectSettingsWorkspace, setProjectSettingsWorkspace] =
     useState<WorkspaceSummary | null>(null);
   const [projectScanCache, setProjectScanCache] = useState<
     Record<string, ProjectScanCacheEntry>
-  >({});
-  const [remoteConnectionStates, setRemoteConnectionStates] = useState<
-    Record<string, RemoteWorkspaceConnectionState>
   >({});
   const [workspaceLimits, setWorkspaceLimits] = useState<Record<string, number>>({});
   const [collapsedWorkspaces, setCollapsedWorkspaces] = useState<
@@ -467,116 +427,6 @@ export default function Sidebar({
     query: string;
     ids: Set<string>;
   } | null>(null);
-  const scopedAssets = useMemo(
-    () =>
-      assets.filter((asset) =>
-        assetMatchesWorkspace(asset, activeWorkspaceId),
-      ),
-    [activeWorkspaceId, assets],
-  );
-  const assetTotalCount = scopedAssets.length;
-  const assetActiveCount = scopedAssets.filter(
-    (asset) => asset.status === 'pending',
-  ).length;
-  const remoteWorkspaceTargets = useMemo(
-    () =>
-      workspaces
-        .filter((workspace) => isRemoteWorkspacePath(workspace.path))
-        .map((workspace) => ({
-          workspaceId: workspace.id,
-          path: workspace.path,
-        })),
-    [workspaces],
-  );
-
-  // Keep the asset-center badge fresh even when its modal is closed. The
-  // registry is otherwise only hydrated from disk when DownloadsModal mounts,
-  // which is why the count used to read 0 until the panel was opened. We poll
-  // on a relaxed interval (not real-time, but no longer indefinitely stale).
-  const assetBadgeCwd = useMemo(() => {
-    const activeWorkspace = activeWorkspaceId
-      ? workspaces.find((workspace) => workspace.id === activeWorkspaceId)
-      : null;
-    return activeWorkspace?.path?.trim() || null;
-  }, [activeWorkspaceId, workspaces]);
-
-  useEffect(() => {
-    if (!tauriAvailable()) return;
-    let cancelled = false;
-    const refresh = () => {
-      void listCachedAssets(assetBadgeCwd)
-        .then((files) => {
-          if (!cancelled) mergeCachedAssetsFromDisk(files);
-        })
-        .catch(() => {});
-    };
-    refresh();
-    const timer = window.setInterval(refresh, 15000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, [assetBadgeCwd]);
-
-  useEffect(() => {
-    if (remoteWorkspaceTargets.length === 0) {
-      setRemoteConnectionStates({});
-      return;
-    }
-
-    let cancelled = false;
-    const controller = new AbortController();
-    const targetIds = new Set(
-      remoteWorkspaceTargets.map((target) => target.workspaceId),
-    );
-
-    setRemoteConnectionStates((prev) => {
-      const next: Record<string, RemoteWorkspaceConnectionState> = {};
-      for (const target of remoteWorkspaceTargets) {
-        next[target.workspaceId] =
-          prev[target.workspaceId] ?? {
-            status: 'checking',
-            checkedAt: Date.now(),
-          };
-      }
-      return next;
-    });
-
-    const refresh = () => {
-      for (const target of remoteWorkspaceTargets) {
-        void checkRemoteWorkspaceConnection(target.path, controller.signal)
-          .then((result) => {
-            if (cancelled || !targetIds.has(target.workspaceId)) return;
-            setRemoteConnectionStates((prev) => ({
-              ...prev,
-              [target.workspaceId]: result,
-            }));
-          })
-          .catch((err) => {
-            if (cancelled || !targetIds.has(target.workspaceId)) return;
-            setRemoteConnectionStates((prev) => ({
-              ...prev,
-              [target.workspaceId]: {
-                status: 'failed',
-                detail: err instanceof Error ? err.message : String(err),
-                checkedAt: Date.now(),
-              },
-            }));
-          });
-      }
-    };
-
-    refresh();
-    const timer = window.setInterval(
-      refresh,
-      REMOTE_WORKSPACE_STATUS_CHECK_INTERVAL_MS,
-    );
-    return () => {
-      cancelled = true;
-      controller.abort();
-      window.clearInterval(timer);
-    };
-  }, [remoteWorkspaceTargets]);
 
   // ── Context menu for session actions ─────────────────────────────────────
   type MenuState =
@@ -614,9 +464,6 @@ export default function Sidebar({
   } | null>(null);
   const [workspaceRemoveConfirm, setWorkspaceRemoveConfirm] =
     useState<WorkspaceSummary | null>(null);
-  const [remoteDialog, setRemoteDialog] = useState<{
-    existing: RemoteWorkspaceConfig | null;
-  } | null>(null);
 
   const menuDeleteProtectionReason = useMemo(() => {
     if (!menu) return null;
@@ -1016,49 +863,6 @@ export default function Sidebar({
     [],
   );
 
-  const handleBrowseLocalWorkspace = useCallback(async () => {
-    const path = await pickFolder(t(locale, 'workspace.chooseFolder'));
-    if (!path) return;
-    const key = workspacePathKey(path);
-    const existing = useStore
-      .getState()
-      .workspaces.find(
-        (workspace) =>
-          workspace.path && workspacePathKey(workspace.path) === key,
-      );
-    if (existing) {
-      window.alert(
-        t(locale, 'workspaceList.alreadyExists').replace(
-          '{name}',
-          existing.name,
-        ),
-      );
-    }
-    setWorkspace(path);
-  }, [locale, setWorkspace]);
-
-  // Open the cloud-project dialog. With a path, edits that existing remote
-  // project; without one, creates a new remote project.
-  const handleOpenRemoteDialog = useCallback((existingPath?: string) => {
-    const id = existingPath ? remoteWorkspaceIdFromPath(existingPath) : '';
-    setRemoteDialog({ existing: id ? getRemoteWorkspace(id) : null });
-  }, []);
-
-  // After saving a remote project, register/select it like any workspace; its
-  // synthetic remote://<id> path flows through the normal selection path.
-  const handleRemoteSaved = useCallback(
-    (remotePath: string, config: RemoteWorkspaceConfig) => {
-      setWorkspace(remotePath);
-      void historyStore
-        .resolveWorkspaceByPath(remotePath)
-        .then((ws) => historyStore.renameWorkspace(ws.id, config.label))
-        .catch(() => {
-          /* naming is best-effort */
-        });
-    },
-    [setWorkspace],
-  );
-
   const loadMoreWorkspace = useCallback((workspaceId: string) => {
     setWorkspaceLimits((prev) => ({
       ...prev,
@@ -1424,30 +1228,6 @@ export default function Sidebar({
       >
         <div className="h-full w-0.5 bg-transparent transition-colors group-hover:bg-accent/40" />
       </div>
-
-      {/* Brand */}
-      <div className="flex items-center gap-2 px-4 pt-4 pb-1">
-        <span className="text-accent-2">◆</span>
-        <span className="text-sm font-semibold tracking-tight text-fg">
-          UltraGameStudio
-        </span>
-      </div>
-
-      {!projectScoped && (
-        <div className="px-3 pt-1 pb-0.5">
-          <WorkspaceListSelect
-            workspaces={workspaces}
-            activeWorkspaceId={selectedWorkspaceId}
-            locale={locale}
-            onSelect={setWorkspace}
-            onBrowseLocal={() => {
-              void handleBrowseLocalWorkspace();
-            }}
-            onAddRemote={handleOpenRemoteDialog}
-            remoteConnectionStates={remoteConnectionStates}
-          />
-        </div>
-      )}
 
       {/* Primary actions */}
       <div className="mt-1 flex flex-col gap-1 border-t border-border-soft px-3 pb-2 pt-2">
@@ -2130,67 +1910,6 @@ export default function Sidebar({
         </div>
       </div>
 
-      <div className="flex flex-col gap-1 p-3">
-        <button
-          type="button"
-          onClick={() => setSettingsOpen(true)}
-          title={t(locale, 'settings.openHint')}
-          className={cn(sidebarTextButtonClassName, 'relative')}
-        >
-          <span className="relative shrink-0">
-            <SettingsGlyph
-              size={17}
-              className="text-fg-faint group-hover:text-fg"
-              aria-hidden="true"
-            />
-            {cliUpdate.hasUnseenUpdate && (
-              <span
-                className="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-[#ef4444] ring-2 ring-panel"
-                aria-hidden="true"
-              />
-            )}
-          </span>
-          <span>{t(locale, 'settings.open')}</span>
-          {cliUpdate.hasUnseenUpdate && (
-            <span className="sr-only">{t(locale, 'settings.cliUpdate.badgeHint')}</span>
-          )}
-        </button>
-        <button
-          type="button"
-          onClick={() => setDownloadsOpen(true)}
-          title={t(locale, 'downloads.openHint')}
-          className={sidebarTextButtonClassName}
-        >
-          <Download
-            size={17}
-            className="shrink-0 text-fg-faint group-hover:text-fg"
-            aria-hidden="true"
-          />
-          <span className="min-w-0 flex-1 truncate">{t(locale, 'downloads.open')}</span>
-          <span
-            className={`ml-auto shrink-0 rounded border px-1.5 py-0.5 font-mono text-[10px] leading-none ${
-              assetActiveCount > 0
-                ? 'border-accent/40 bg-accent/10 text-accent'
-                : 'border-border-soft bg-panel-2 text-fg-faint'
-            }`}
-          >
-            {assetTotalCount} {t(locale, 'downloads.countUnit')} ·{' '}
-            {assetActiveCount} {t(locale, 'downloads.activeShort')}
-          </span>
-        </button>
-      </div>
-
-      {settingsOpen && (
-        <SettingsModal onClose={() => setSettingsOpen(false)} />
-      )}
-
-      {downloadsOpen && (
-        <DownloadsModal
-          locale={locale}
-          onClose={() => setDownloadsOpen(false)}
-        />
-      )}
-
       {projectSettingsWorkspace && (
         <ProjectSettingsModal
           workspace={projectSettingsWorkspace}
@@ -2243,14 +1962,6 @@ export default function Sidebar({
           locale={locale}
           onCancel={handleCancelRemoveWorkspaceHistory}
           onConfirm={handleConfirmRemoveWorkspaceHistory}
-        />
-      )}
-      {remoteDialog && (
-        <RemoteWorkspaceDialog
-          locale={locale}
-          existing={remoteDialog.existing}
-          onClose={() => setRemoteDialog(null)}
-          onSaved={handleRemoteSaved}
         />
       )}
       {scheduleDialog && (

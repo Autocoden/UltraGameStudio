@@ -62,7 +62,7 @@ import VideoPlayer from '@/components/ai/VideoPlayer';
  * progress" and "ready" sections.
  */
 
-const ASSET_SESSION_JUMP_EVENT = 'ugs:asset-session-jump';
+export const ASSET_SESSION_JUMP_EVENT = 'ugs:asset-session-jump';
 const INITIAL_RENDERED_ASSETS = 40;
 const RENDER_ASSET_PAGE_SIZE = 40;
 const ACTIVE_ASSET_MESSAGE_LINK_WINDOW_MS = 2 * 60 * 60 * 1000;
@@ -586,12 +586,18 @@ function AssetSection({
   );
 }
 
-export default function DownloadsModal({
+/**
+ * The asset-hub body: header (title, clear-finished, search) + scrollable
+ * asset sections. Reused by the DownloadsModal overlay and by the full-page
+ * 资产 view (see panels/AssetsView.tsx). With `onClose` the header also gets
+ * a close button and Escape dismisses it.
+ */
+export function AssetCenterContent({
   locale,
   onClose,
 }: {
   locale: Locale;
-  onClose: () => void;
+  onClose?: () => void;
 }) {
   const assets = useSyncExternalStore(subscribeAssets, getAssets);
   const selectSession = useStore((s) => s.selectSession);
@@ -634,6 +640,7 @@ export default function DownloadsModal({
   );
 
   useEffect(() => {
+    if (!onClose) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') onClose();
     };
@@ -730,7 +737,7 @@ export default function DownloadsModal({
           },
         }),
       );
-      onClose();
+      onClose?.();
     },
     [activeSessionId, activeWorkspaceId, historyWorkspaceIds, messages, onClose, selectSession],
   );
@@ -763,6 +770,116 @@ export default function DownloadsModal({
   const noMatch = !isEmpty && filtered.length === 0;
 
   return (
+    <>
+      <div className="shrink-0 border-b border-border-soft bg-bg-alt px-5 py-4">
+        <div className="flex items-center gap-3">
+          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-accent text-bg">
+            <Boxes size={18} strokeWidth={2.2} />
+          </span>
+          <div className="min-w-0 flex-1">
+            <h2
+              id="downloads-title"
+              className="text-base font-semibold text-fg"
+            >
+              {t(locale, 'downloads.title')}
+            </h2>
+            <p className="mt-1 text-xs leading-relaxed text-fg-faint">
+              {t(locale, 'downloads.subtitle')}
+            </p>
+          </div>
+          {finishedAll.length > 0 && (
+            <button
+              type="button"
+              onClick={() =>
+                clearFinishedAssets((entry) =>
+                  assetMatchesWorkspace(entry, activeWorkspaceId),
+                )
+              }
+              className="shrink-0 rounded-md border border-border bg-panel-2 px-2.5 py-1.5 text-xs text-fg-dim transition-colors hover:border-rose-400 hover:text-rose-300"
+            >
+              {t(locale, 'downloads.clearFinished')}
+            </button>
+          )}
+          {onClose && (
+            <button
+              type="button"
+              onClick={onClose}
+              title={t(locale, 'common.close')}
+              aria-label={t(locale, 'common.close')}
+              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border bg-panel-2 text-fg-faint transition-colors hover:border-accent hover:text-fg"
+            >
+              <X size={15} strokeWidth={2.2} />
+            </button>
+          )}
+        </div>
+
+        {!isEmpty && (
+          <div className="mt-3">
+            <input
+              type="text"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder={t(locale, 'downloads.searchPlaceholder')}
+              className="w-full rounded-md border border-border-soft bg-panel-2 px-3 py-1.5 text-sm text-fg placeholder:text-fg-faint focus:border-accent focus:outline-none"
+            />
+          </div>
+        )}
+      </div>
+
+      <div ref={scrollRootRef} className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+        {isEmpty ? (
+          <div className="flex flex-col items-center justify-center gap-2 py-12 text-center text-sm text-fg-faint">
+            <Boxes
+              size={28}
+              className="text-fg-faint/60"
+              aria-hidden="true"
+            />
+            <span>{t(locale, 'downloads.empty')}</span>
+          </div>
+        ) : noMatch ? (
+          <div className="flex flex-col items-center justify-center gap-2 py-12 text-center text-sm text-fg-faint">
+            <span>{t(locale, 'downloads.noMatch')}</span>
+          </div>
+        ) : (
+          <div className="flex flex-col gap-5">
+            {active.length > 0 && (
+              <AssetSection
+                title={t(locale, 'downloads.active')}
+                count={active.length}
+                countClassName="text-accent"
+                entries={active}
+                locale={locale}
+                scrollRootRef={scrollRootRef}
+                onJumpToSession={handleJumpToSession}
+              />
+            )}
+
+            {finished.length > 0 && (
+              <AssetSection
+                title={t(locale, 'downloads.completed')}
+                count={finished.length}
+                countClassName="text-fg-dim"
+                entries={finished}
+                locale={locale}
+                scrollRootRef={scrollRootRef}
+                onJumpToSession={handleJumpToSession}
+              />
+            )}
+          </div>
+        )}
+      </div>
+    </>
+  );
+}
+
+export default function DownloadsModal({
+  locale,
+  onClose,
+}: {
+  locale: Locale;
+  onClose: () => void;
+}) {
+  return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 sm:p-6"
       onClick={onClose}
@@ -774,101 +891,7 @@ export default function DownloadsModal({
         className="flex max-h-[calc(100vh-2.5rem)] w-[calc(100vw-2.5rem)] max-w-[720px] flex-col overflow-hidden rounded-lg border border-border bg-panel shadow-2xl"
         onClick={(event) => event.stopPropagation()}
       >
-        <div className="shrink-0 border-b border-border-soft bg-bg-alt px-5 py-4">
-          <div className="flex items-center gap-3">
-            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-accent text-bg">
-              <Boxes size={18} strokeWidth={2.2} />
-            </span>
-            <div className="min-w-0 flex-1">
-              <h2
-                id="downloads-title"
-                className="text-base font-semibold text-fg"
-              >
-                {t(locale, 'downloads.title')}
-              </h2>
-              <p className="mt-1 text-xs leading-relaxed text-fg-faint">
-                {t(locale, 'downloads.subtitle')}
-              </p>
-            </div>
-            {finishedAll.length > 0 && (
-              <button
-                type="button"
-                onClick={() =>
-                  clearFinishedAssets((entry) =>
-                    assetMatchesWorkspace(entry, activeWorkspaceId),
-                  )
-                }
-                className="shrink-0 rounded-md border border-border bg-panel-2 px-2.5 py-1.5 text-xs text-fg-dim transition-colors hover:border-rose-400 hover:text-rose-300"
-              >
-                {t(locale, 'downloads.clearFinished')}
-              </button>
-            )}
-            <button
-              type="button"
-              onClick={onClose}
-              title={t(locale, 'common.close')}
-              aria-label={t(locale, 'common.close')}
-              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border bg-panel-2 text-fg-faint transition-colors hover:border-accent hover:text-fg"
-            >
-              <X size={15} strokeWidth={2.2} />
-            </button>
-          </div>
-
-          {!isEmpty && (
-            <div className="mt-3">
-              <input
-                type="text"
-                value={query}
-                onChange={(event) => setQuery(event.target.value)}
-                placeholder={t(locale, 'downloads.searchPlaceholder')}
-                className="w-full rounded-md border border-border-soft bg-panel-2 px-3 py-1.5 text-sm text-fg placeholder:text-fg-faint focus:border-accent focus:outline-none"
-              />
-            </div>
-          )}
-        </div>
-
-        <div ref={scrollRootRef} className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
-          {isEmpty ? (
-            <div className="flex flex-col items-center justify-center gap-2 py-12 text-center text-sm text-fg-faint">
-              <Boxes
-                size={28}
-                className="text-fg-faint/60"
-                aria-hidden="true"
-              />
-              <span>{t(locale, 'downloads.empty')}</span>
-            </div>
-          ) : noMatch ? (
-            <div className="flex flex-col items-center justify-center gap-2 py-12 text-center text-sm text-fg-faint">
-              <span>{t(locale, 'downloads.noMatch')}</span>
-            </div>
-          ) : (
-            <div className="flex flex-col gap-5">
-              {active.length > 0 && (
-                <AssetSection
-                  title={t(locale, 'downloads.active')}
-                  count={active.length}
-                  countClassName="text-accent"
-                  entries={active}
-                  locale={locale}
-                  scrollRootRef={scrollRootRef}
-                  onJumpToSession={handleJumpToSession}
-                />
-              )}
-
-              {finished.length > 0 && (
-                <AssetSection
-                  title={t(locale, 'downloads.completed')}
-                  count={finished.length}
-                  countClassName="text-fg-dim"
-                  entries={finished}
-                  locale={locale}
-                  scrollRootRef={scrollRootRef}
-                  onJumpToSession={handleJumpToSession}
-                />
-              )}
-            </div>
-          )}
-        </div>
+        <AssetCenterContent locale={locale} onClose={onClose} />
       </div>
     </div>
   );
