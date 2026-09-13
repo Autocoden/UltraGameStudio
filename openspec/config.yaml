@@ -1,0 +1,42 @@
+schema: spec-driven
+
+# Project context (optional)
+# This is shown to AI when creating artifacts.
+context: |
+  UltraGameStudio 是一个面向游戏开发的 AI coding agent（Claude Code / Codex / Gemini 风格），能够理解游戏引擎概念并生成图像、3D 模型、音频、骨骼绑定等全套游戏资产。
+
+  技术栈与结构：
+  - app/ —— 主桌面应用：React 18 + TypeScript 5.6 + Vite 前端，Tauri 2 (Rust) 壳在 app/src-tauri/
+  - app/src/runtime/ —— 自研 agent workflow harness（DAG 执行、共识验收、动态规划），前端与 CLI 共享
+  - app/cli/ —— headless CLI（bin 名 ugs），与 GUI 共享同一 runtime 契约，禁止 import react/zustand/tauri
+  - backend/ —— Node.js 云执行后端（多租户、容器隔离、SSE 回传）
+  - packages/protocol —— 共享协议
+  - 测试：vitest（app/ 下 `npm run test`，jsdom 环境），测试文件与源码同目录（*.test.ts）
+
+  约定：
+  - Conventional Commits（feat/fix/chore...）
+  - 中英双语：README 多语言，代码注释与 UI 文案以中文为主
+  - agent 节点派生物写入工作区 .ultragamestudio/ 子目录
+  - 版本号以 app/package.json 与 app/version.txt 为准
+
+# Per-artifact rules (optional)
+# Add custom rules for specific artifacts.
+# Example:
+#   rules:
+#     proposal:
+#       - Keep proposals under 500 words
+#       - Always include a "Non-goals" section
+#     tasks:
+#       - Break tasks into chunks of max 2 hours
+
+# Per-operation guidance (optional)
+# Add advisory guidance for how apply and archive work should be conducted.
+# This is separate from artifact rules above.
+# Example:
+#   operations:
+#     apply:
+#       guidance:
+#         - Keep test summaries concise
+#     archive:
+#       guidance:
+#         - Summarize the archive outcome before finishing
