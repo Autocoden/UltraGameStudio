@@ -1,8 +1,18 @@
-import { useEffect, useMemo, useSyncExternalStore } from 'react';
-import { Boxes, Settings as SettingsGlyph, Terminal } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useSyncExternalStore } from 'react';
+import {
+  Boxes,
+  KanbanSquare,
+  Settings as SettingsGlyph,
+  Terminal,
+} from 'lucide-react';
 import { cn } from '@/lib/cn';
 import { t } from '@/lib/i18n';
 import { useStore } from '@/store/useStore';
+import {
+  boardKeyFor,
+  getBoardTasks,
+  subscribeTasks,
+} from '@/lib/taskBoard';
 import {
   getCliUpdateSnapshot,
   subscribeCliUpdateStatus,
@@ -18,13 +28,14 @@ import { listCachedAssets, tauriAvailable } from '@/lib/tauri';
 /**
  * CONTRACT: default export, no slots. Far-left icon rail, full height.
  *
- * Top   : primary views — 智能终端 (sessions/chat/files) and 资产 (asset hub).
+ * Top   : primary views — 任务看板 (task board), 智能终端 (sessions/chat/files)
+ *         and 资产 (asset hub).
  * Bottom: settings gear (opens the global settings modal at App level).
  *
  * Mirrors the Autocode-style app rail: navigation is icon+label, the active
  * view is highlighted with the accent tint.
  */
-export type AppView = 'terminal' | 'assets';
+export type AppView = 'board' | 'terminal' | 'assets';
 
 export default function AppRail({
   activeView,
@@ -53,6 +64,20 @@ export default function AppRail({
       : null;
     return activeWorkspace?.path?.trim() || null;
   }, [activeWorkspaceId, workspaces]);
+  const composerWorkspace = useStore((s) => s.composer.workspace);
+
+  // 任务看板 badge: in-progress card count of the board matching the active
+  // workspace (same key derivation as TaskBoardView, incl. the composer
+  // fallback), kept fresh while the board view is closed.
+  const boardKey = useMemo(
+    () => boardKeyFor(assetBadgeCwd || composerWorkspace.trim() || null),
+    [assetBadgeCwd, composerWorkspace],
+  );
+  const boardCards = useSyncExternalStore(
+    subscribeTasks,
+    useCallback(() => getBoardTasks(boardKey), [boardKey]),
+  );
+  const boardDoingCount = boardCards.filter((card) => card.status === 'in_progress').length;
 
   useEffect(() => {
     if (!tauriAvailable()) return;
@@ -91,6 +116,13 @@ export default function AppRail({
     badge?: number;
     badgeTone: 'active' | 'total';
   }[] = [
+    {
+      view: 'board',
+      label: t(locale, 'rail.board'),
+      icon: KanbanSquare,
+      badge: boardDoingCount,
+      badgeTone: 'active',
+    },
     {
       view: 'terminal',
       label: t(locale, 'rail.terminal'),

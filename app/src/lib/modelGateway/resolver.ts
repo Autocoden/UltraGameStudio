@@ -559,6 +559,18 @@ export function selectionFromKey(key: string): GatewaySelection | null {
   });
 }
 
+/**
+ * ZCode's provider speaks the Anthropic protocol (`{base}/v1/messages`), but a
+ * zcode channel authored in the app is typically the GLM/Z.ai chat-completions
+ * base (`…/api/paas/v4`). The same hosts expose the Anthropic protocol at
+ * `…/api/anthropic`, so translate the known pairing; other hosts pass through.
+ */
+export function zcodeAnthropicBaseUrl(baseUrl: string | undefined): string {
+  const trimmed = baseUrl?.trim();
+  if (!trimmed) return '';
+  return trimmed.includes('/paas/v4') ? trimmed.replace('/paas/v4', '/anthropic') : trimmed;
+}
+
 export function gatewayRouteEnv(
   route: Pick<
     ResolvedGatewayRoute,
@@ -584,6 +596,17 @@ export function gatewayRouteEnv(
     if (route.apiKey) env.DEEPSEEK_API_KEY = route.apiKey;
     if (route.baseUrl) env.DEEPSEEK_BASE_URL = route.baseUrl;
     if (route.model) env.UGS_DSH_MODEL = route.model;
+  } else if (route.adapter === 'zcode') {
+    // ZCode reads provider + model + key exclusively from
+    // ~/.zcode/cli/config.json; the Rust host merges ZCODE_* into that file
+    // before spawning (ensure_zcode_user_config). Key off the ADAPTER, not
+    // the channel transport: a direct-transport zcode channel forced through
+    // the CLI (board task runner / project-MCP sessions) would otherwise only
+    // receive OPENAI_* and fail with "channel provided no key".
+    if (route.apiKey) env.ZCODE_API_KEY = route.apiKey;
+    const zcodeBase = zcodeAnthropicBaseUrl(route.baseUrl);
+    if (zcodeBase) env.ZCODE_BASE_URL = zcodeBase;
+    if (route.model) env.ZCODE_MODEL = route.model;
   } else if (route.transport === 'anthropic') {
     if (route.apiKey) {
       env.ANTHROPIC_API_KEY = route.apiKey;
@@ -613,16 +636,6 @@ export function gatewayRouteEnv(
     } else if (route.adapter === 'codex') {
       if (route.apiKey) env.OPENAI_API_KEY = route.apiKey;
       if (route.baseUrl) env.OPENAI_BASE_URL = route.baseUrl;
-    } else if (route.adapter === 'zcode') {
-      // ZCode reads its provider + model from `~/.zcode/cli/config.json`
-      // (provider.zai + model.main), never from env vars directly. The Rust
-      // host merges the channel's key/base url/model into that config file
-      // before spawning (see `ensure_zcode_user_config` in lib.rs), so carry
-      // them through dedicated env vars here — a channel configured with a key
-      // must not silently run without it.
-      if (route.apiKey) env.ZCODE_API_KEY = route.apiKey;
-      if (route.baseUrl) env.ZCODE_BASE_URL = route.baseUrl;
-      if (route.model) env.ZCODE_MODEL = route.model;
     } else if (route.adapter === 'kimi') {
       // Kimi Code CLI (>= 0.38) synthesises an in-memory provider/model from
       // env vars instead of requiring `/login` or a hand-written config.toml.

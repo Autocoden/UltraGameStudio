@@ -6,6 +6,7 @@ import AssetsView from '@/panels/AssetsView';
 import AppRail, { type AppView } from '@/components/AppRail';
 import ProjectTopBar from '@/components/ProjectTopBar';
 import SettingsModal from '@/panels/SettingsModal';
+import TaskBoardView from '@/panels/TaskBoardView';
 import { ASSET_SESSION_JUMP_EVENT } from '@/panels/DownloadsModal';
 import ScheduledTaskRunner from '@/components/ScheduledTaskRunner';
 import BackgroundJobRunner from '@/components/BackgroundJobRunner';
@@ -44,11 +45,11 @@ function subscribeStartupStorageMigration(
 
 /**
  * Top-level layout (Autocode-style):
- *   rail  : AppRail — 智能终端 / 资产 navigation on top, settings on bottom
+ *   rail  : AppRail — 任务看板 / 智能终端 / 资产 navigation on top, settings on bottom
  *   top   : ProjectTopBar — the project list lives at the top of the window
- *   main  : per-view content. The 智能终端 view (session panel + chat +
- *           project/session files) stays mounted while the 资产 view is
- *           shown, so chat/composer/file state survives view switches.
+ *   main  : per-view content. The 任务看板 and 智能终端 views (session panel +
+ *           chat + project/session files) stay mounted while other views are
+ *           shown, so board/chat/composer/file state survives view switches.
  *
  * App.tsx is the consumer of all import contracts.
  */
@@ -101,6 +102,15 @@ export default function App() {
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           <ProjectTopBar />
           <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
+            {/* 任务看板视图：与终端/资产一样保持挂载（仅隐藏），保留看板滚动与输入状态。 */}
+            <section
+              className={cn(
+                'min-w-0 flex-1',
+                activeView === 'board' ? 'flex overflow-hidden' : 'hidden',
+              )}
+            >
+              <TaskBoardView />
+            </section>
             {/* 智能终端视图：会话面板 + 会话界面 + 项目/会话文件。
                 切到资产时保持挂载（仅隐藏），保留聊天与文件状态。 */}
             <section

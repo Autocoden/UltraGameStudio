@@ -415,6 +415,39 @@ describe('model gateway compatibility', () => {
     });
   });
 
+  it('exports zcode CLI env even when the selected channel is direct-compatible', () => {
+    // Board task execution forces a direct-transport zcode channel through the
+    // zcode CLI; the spawn must receive adapter-native ZCODE_* vars (the Rust
+    // host merges them into ~/.zcode/cli/config.json), never just OPENAI_*.
+    const env = gatewayRouteEnv({
+      adapter: 'zcode',
+      transport: 'openai-compatible',
+      apiKey: 'zcode-key',
+      baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
+      model: 'glm-5.3-flash',
+    });
+    expect(env).toMatchObject({
+      ZCODE_API_KEY: 'zcode-key',
+      // The zcode provider posts {base}/v1/messages (Anthropic protocol), so
+      // the chat-completions base is translated to the Anthropic endpoint.
+      ZCODE_BASE_URL: 'https://open.bigmodel.cn/api/anthropic',
+      ZCODE_MODEL: 'glm-5.3-flash',
+    });
+    expect(env).not.toHaveProperty('OPENAI_API_KEY');
+  });
+
+  it('passes non-GLM zcode base urls through unchanged', () => {
+    expect(
+      gatewayRouteEnv({
+        adapter: 'zcode',
+        transport: 'cli',
+        apiKey: 'k',
+        baseUrl: 'https://api.z.ai/api/anthropic',
+        model: 'glm-5.3-flash',
+      })?.ZCODE_BASE_URL,
+    ).toBe('https://api.z.ai/api/anthropic');
+  });
+
   it('exports deepseek-harness env when a direct channel falls back to CLI', () => {
     expect(
       gatewayRouteEnv({
