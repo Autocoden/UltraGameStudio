@@ -15,11 +15,13 @@ import {
   saveRemoteWorkspace,
 } from '@/lib/remoteWorkspace';
 import { resetSecureStorageForTests } from '@/lib/secureStorage';
+import { sessionChangesCacheKey } from '@/lib/sessionChanges';
 import type { WorkspaceTreeEntry } from '@/lib/tauri';
 import { defaultComposer, samplePromptGroups } from '@/store/sampleSessions';
 import { useStore } from '@/store/useStore';
 import AIDock from './AIDock';
 import ProjectFileTree from './ProjectFileTree';
+import { requestProjectRightPanelToggle } from './projectRightPanelEvents';
 
 type NativeDragDropEvent = {
   payload:
@@ -217,6 +219,7 @@ async function renderProjectDragHarness(): Promise<{
       </>,
     );
   });
+  await act(async () => requestProjectRightPanelToggle());
   for (let i = 0; i < 3; i += 1) {
     await act(async () => {
       await new Promise((resolve) => window.setTimeout(resolve, 0));
@@ -800,43 +803,8 @@ describe('AIDock project file drag', () => {
     }
   });
 
-  it('shows persisted session change counts in the session files tab', async () => {
+  it('shows confirmed session change counts in the session files tab', async () => {
     window.localStorage.setItem('ultragamestudio.projectRightPanelTab.v1', 'session');
-    window.localStorage.setItem(
-      'ultragamestudio.sessionChanges.v5:v5:ws_project_file_drag:s_project_file_drag:E:/UltraGameStudio',
-      JSON.stringify({
-        rootPath: 'E:/UltraGameStudio',
-        generatedAtMs: 50,
-        source: 'snapshot',
-        truncated: false,
-        files: [
-          {
-            path: 'app/src/ProjectFileTree.tsx',
-            oldPath: null,
-            status: 'modified',
-            binary: false,
-            truncated: false,
-            lines: [],
-          },
-          {
-            path: 'app/src/new.ts',
-            oldPath: null,
-            status: 'added',
-            binary: false,
-            truncated: false,
-            lines: [],
-          },
-          {
-            path: 'app/src/gone.ts',
-            oldPath: null,
-            status: 'deleted',
-            binary: false,
-            truncated: false,
-            lines: [],
-          },
-        ],
-      }),
-    );
     resetStore({ withWorkspace: true });
     useStore.setState({
       messages: [
@@ -844,6 +812,15 @@ describe('AIDock project file drag', () => {
           id: 'assistant-session-files',
           role: 'assistant',
           createdAt: 25,
+          fileChanges: {
+            source: 'agent',
+            rootPath: useStore.getState().composer.workspace,
+            files: [
+              { path: 'app/src/ProjectFileTree.tsx', status: 'modified' },
+              { path: 'app/src/new.ts', status: 'added' },
+              { path: 'app/src/gone.ts', status: 'deleted' },
+            ],
+          },
           text:
             encodeToolPatch({
               id: 'project-file-tree',
@@ -883,11 +860,16 @@ describe('AIDock project file drag', () => {
   });
 
   it('collects a P4 session file to the pending list from the context menu', async () => {
+    resetStore({ withWorkspace: true });
+    const workspaceRoot = useStore.getState().composer.workspace;
+    const filePath = `${workspaceRoot}/app/src/ProjectFileTree.tsx`;
     window.localStorage.setItem('ultragamestudio.projectRightPanelTab.v1', 'session');
     window.localStorage.setItem(
-      'ultragamestudio.sessionChanges.v5:v5:ws_project_file_drag:s_project_file_drag:E:/UltraGameStudio',
+      `ultragamestudio.sessionChanges.v5:${sessionChangesCacheKey(
+        'ws_project_file_drag', 's_project_file_drag', workspaceRoot,
+      )}`,
       JSON.stringify({
-        rootPath: 'E:/UltraGameStudio',
+        rootPath: workspaceRoot,
         generatedAtMs: 50,
         source: 'p4',
         truncated: false,
@@ -903,7 +885,6 @@ describe('AIDock project file drag', () => {
         ],
       }),
     );
-    resetStore({ withWorkspace: true });
     useStore.setState({
       messages: [
         {
@@ -927,7 +908,8 @@ describe('AIDock project file drag', () => {
       await waitForExpect(() => {
         source = Array.from(
           view.container.querySelectorAll<HTMLButtonElement>('button[title]'),
-        ).find((candidate) => candidate.title === 'app/src/ProjectFileTree.tsx');
+        ).find((candidate) => candidate.title.replace(/\\/g, '/') === filePath.replace(/\\/g, '/') &&
+          !candidate.closest('[data-ugs-edited-files]'));
         expect(source).toBeTruthy();
       });
 
@@ -953,8 +935,8 @@ describe('AIDock project file drag', () => {
 
       await waitForExpect(() => {
         expect(tauriMocks.collectWorkspacePathsToP4PendingList).toHaveBeenCalledWith(
-          'E:\\UltraGameStudio',
-          ['app/src/ProjectFileTree.tsx'],
+          workspaceRoot,
+          [filePath],
         );
         expect(alertSpy).toHaveBeenCalledWith(
           '已收集到 P4 pending list：1 个新打开，1 个已处理。',

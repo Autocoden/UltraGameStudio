@@ -214,7 +214,7 @@ export default function KnowledgeBaseSettings({
         </p>
       )}
       {remoteWorkspace && (
-        <p className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+        <p className="rounded-md border border-status-warning/40 bg-status-warning/10 px-3 py-2 text-xs text-status-warning">
           {t(locale, 'settings.knowledgeBase.remoteUnsupported')}
         </p>
       )}
@@ -309,7 +309,7 @@ export default function KnowledgeBaseSettings({
                   type="button"
                   title={t(locale, 'settings.knowledgeBase.removeSource')}
                   onClick={() => removeSource(source.id)}
-                  className="rounded p-1 text-fg-faint transition-colors hover:bg-bg-soft hover:text-rose-400"
+                  className="rounded p-1 text-fg-faint transition-colors hover:bg-bg-soft hover:text-status-error"
                 >
                   <Trash2 size={14} />
                 </button>
@@ -356,7 +356,7 @@ export default function KnowledgeBaseSettings({
         </div>
 
         {stale && (
-          <p className="text-[11px] text-amber-200">
+          <p className="text-[11px] text-status-warning">
             {t(locale, 'settings.knowledgeBase.stale')}
           </p>
         )}

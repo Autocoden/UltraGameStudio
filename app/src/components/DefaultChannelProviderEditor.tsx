@@ -473,7 +473,7 @@ export function DefaultChannelProviderEditor({
           </div>
 
           {errors.duplicate && (
-            <p className="mt-3 text-[11px] leading-relaxed text-rose-300">
+            <p className="mt-3 text-[11px] leading-relaxed text-status-error">
               {errors.duplicate}
             </p>
           )}
@@ -488,7 +488,7 @@ export function DefaultChannelProviderEditor({
 
         <div className="shrink-0 border-t border-border-soft bg-bg-alt px-5 py-3">
           {saveError && (
-            <p className="mb-2 text-[11px] leading-relaxed text-rose-300">
+            <p className="mb-2 text-[11px] leading-relaxed text-status-error">
               {saveError}
             </p>
           )}
@@ -497,7 +497,7 @@ export function DefaultChannelProviderEditor({
               <button
                 type="button"
                 onClick={onDelete}
-                className="inline-flex items-center gap-1.5 rounded border border-rose-500/40 bg-rose-500/10 px-3 py-1.5 text-xs text-rose-300 transition-colors hover:bg-rose-500/20"
+                className="inline-flex items-center gap-1.5 rounded border border-status-error/40 bg-status-error/10 px-3 py-1.5 text-xs text-status-error transition-colors hover:bg-status-error/20"
               >
                 <Trash2 size={13} strokeWidth={2.2} />
                 {t(locale, 'settings.models.delete')}
@@ -536,13 +536,13 @@ function StatusBadge({
   const styles =
     state === 'direct'
       ? {
-          pill: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300',
-          dot: 'bg-emerald-400',
+          pill: 'border-status-success/40 bg-status-success/10 text-status-success',
+          dot: 'bg-status-success',
         }
       : state === 'unavailable'
         ? {
-            pill: 'border-rose-500/40 bg-rose-500/10 text-rose-300',
-            dot: 'bg-rose-400',
+            pill: 'border-status-error/40 bg-status-error/10 text-status-error',
+            dot: 'bg-status-error',
           }
         : {
             pill: 'border-border bg-panel text-fg-faint',
@@ -611,14 +611,14 @@ function TextField({
         className={cn(
           'w-full rounded border border-border bg-bg px-2 py-1.5 text-xs text-fg outline-none transition-colors focus:border-accent',
           mono && 'font-mono',
-          error && 'border-rose-500/60',
+          error && 'border-status-error/60',
         )}
       />
       {description && (
         <p className="text-[11px] leading-relaxed text-fg-faint">{description}</p>
       )}
       {error && (
-        <p className="text-[11px] leading-relaxed text-rose-300">{error}</p>
+        <p className="text-[11px] leading-relaxed text-status-error">{error}</p>
       )}
     </label>
   );
@@ -725,7 +725,7 @@ function ModelTextField({
                   onClick={() => onRemoveModel(model)}
                   title={deleteLabel}
                   aria-label={deleteLabel}
-                  className="flex h-4 w-4 items-center justify-center rounded text-fg-faint transition-colors hover:bg-rose-500/15 hover:text-rose-300"
+                  className="flex h-4 w-4 items-center justify-center rounded text-fg-faint transition-colors hover:bg-status-error/15 hover:text-status-error"
                 >
                   <X size={11} strokeWidth={2.4} />
                 </button>
@@ -738,7 +738,7 @@ function ModelTextField({
         <p className="text-[11px] leading-relaxed text-fg-faint">{description}</p>
       )}
       {error && (
-        <p className="text-[11px] leading-relaxed text-amber-300">{error}</p>
+        <p className="text-[11px] leading-relaxed text-status-warning">{error}</p>
       )}
     </label>
   );

@@ -491,12 +491,16 @@ function BlueprintCanvasInner() {
     const style =
       readOnlyReason === 'running'
         ? {
-            background: 'rgba(55, 194, 168, 0.12)',
+            // Derived from the token instead of a literal rgba(): the old value was
+            // a hardcoded sample of the default theme's success color and ignored
+            // the active preset.
+            background: 'color-mix(in oklab, var(--accent-2) 12%, transparent)',
             borderColor: 'var(--accent-2)',
             color: 'var(--accent-2)',
           }
         : {
-            background: 'rgba(77, 163, 255, 0.12)',
+            background:
+              'color-mix(in oklab, var(--status-ai-edit) 12%, transparent)',
             borderColor: 'var(--status-ai-edit)',
             color: 'var(--status-ai-edit)',
           };

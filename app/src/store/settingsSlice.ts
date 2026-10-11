@@ -12,14 +12,18 @@ import {
 } from '@/lib/appearance';
 import { loadAppearance, saveAppearance } from '@/lib/appearanceStorage';
 import {
+  loadAssetCenterEnabled,
   loadComposerToolButtonsVisible,
+  loadComposerHintRowVisible,
   loadGameExpertSettings,
   loadLocale,
   loadPersonalInstructionsByModel,
   loadPromptAutoTranslate,
   loadThinkingLevelOverrides,
   loadThinkingLevelsEnabled,
+  saveAssetCenterEnabled,
   saveComposerToolButtonsVisible,
+  saveComposerHintRowVisible,
   saveGameExpertSettings,
   saveLocale,
   savePersonalInstructionsByModel,
@@ -57,6 +61,8 @@ type SimpleSettingsPersist = {
   promptAutoTranslate: boolean;
   composerToolButtonsVisible: boolean;
   thinkingLevelsEnabled: boolean;
+  composerHintRowVisible: boolean;
+  assetCenterEnabled: boolean;
   thinkingLevelOverrides: string;
   gameExpertSettings: GameExpertSettings;
   appearance: AppearanceSettings;
@@ -75,6 +81,14 @@ const settingsPersist = definePersistedFields<SimpleSettingsPersist>({
   thinkingLevelsEnabled: {
     load: loadThinkingLevelsEnabled,
     save: saveThinkingLevelsEnabled,
+  },
+  composerHintRowVisible: {
+    load: loadComposerHintRowVisible,
+    save: saveComposerHintRowVisible,
+  },
+  assetCenterEnabled: {
+    load: loadAssetCenterEnabled,
+    save: saveAssetCenterEnabled,
   },
   thinkingLevelOverrides: {
     load: loadThinkingLevelOverrides,
@@ -100,6 +114,8 @@ export type SettingsSlice = Pick<
   | 'promptAutoTranslate'
   | 'composerToolButtonsVisible'
   | 'thinkingLevelsEnabled'
+  | 'composerHintRowVisible'
+  | 'assetCenterEnabled'
   | 'thinkingLevelOverrides'
   | 'personalInstructionsByModel'
   | 'personalInstructions'
@@ -109,6 +125,8 @@ export type SettingsSlice = Pick<
   | 'setPromptAutoTranslate'
   | 'setComposerToolButtonsVisible'
   | 'setThinkingLevelsEnabled'
+  | 'setComposerHintRowVisible'
+  | 'setAssetCenterEnabled'
   | 'setThinkingLevelOverrides'
   | 'setPersonalInstructions'
   | 'setGameExpertSettings'
@@ -124,6 +142,8 @@ export type SettingsSliceSeeds = Pick<
   | 'promptAutoTranslate'
   | 'composerToolButtonsVisible'
   | 'thinkingLevelsEnabled'
+  | 'composerHintRowVisible'
+  | 'assetCenterEnabled'
   | 'thinkingLevelOverrides'
   | 'personalInstructionsByModel'
   | 'personalInstructions'
@@ -182,6 +202,8 @@ export function loadSettingsSliceSeeds(
     promptAutoTranslate: simple.promptAutoTranslate,
     composerToolButtonsVisible: simple.composerToolButtonsVisible,
     thinkingLevelsEnabled: simple.thinkingLevelsEnabled,
+    composerHintRowVisible: simple.composerHintRowVisible,
+    assetCenterEnabled: simple.assetCenterEnabled,
     thinkingLevelOverrides: simple.thinkingLevelOverrides,
     personalInstructionsByModel,
     personalInstructions,
@@ -200,6 +222,8 @@ export function createSettingsSlice(
     promptAutoTranslate: seeds.promptAutoTranslate,
     composerToolButtonsVisible: seeds.composerToolButtonsVisible,
     thinkingLevelsEnabled: seeds.thinkingLevelsEnabled,
+    composerHintRowVisible: seeds.composerHintRowVisible,
+    assetCenterEnabled: seeds.assetCenterEnabled,
     thinkingLevelOverrides: seeds.thinkingLevelOverrides,
     personalInstructionsByModel: seeds.personalInstructionsByModel,
     personalInstructions: seeds.personalInstructions,
@@ -224,6 +248,16 @@ export function createSettingsSlice(
     setThinkingLevelsEnabled: (enabled) => {
       set({ thinkingLevelsEnabled: enabled });
       settingsPersist.thinkingLevelsEnabled.save(enabled);
+    },
+
+    setComposerHintRowVisible: (visible) => {
+      set({ composerHintRowVisible: visible });
+      settingsPersist.composerHintRowVisible.save(visible);
+    },
+
+    setAssetCenterEnabled: (enabled) => {
+      set({ assetCenterEnabled: enabled });
+      settingsPersist.assetCenterEnabled.save(enabled);
     },
 
     setThinkingLevelOverrides: (raw) => {

@@ -240,6 +240,22 @@ fn yaml_flow_map(entries: &[(String, Option<String>)]) -> String {
         .join(", ")
 }
 
+/// 按 UGS composer 权限档位给出 dsh 的 `DSH_PERMISSION_MODE` 值。
+///
+/// dsh base profile 里 `sandbox-policy.mode` 与 `approval.policy` 都直接读
+/// `DSH_PERMISSION_MODE` 环境变量（其 cordis.patch.yml 明示这是"explicit
+/// deployment override"）：不设则任何 CLI 模式都钉在 workspace-write + ask。
+/// 所以正确接法是在 spawn dsh 前注入该变量，而不是去覆盖 `permission` 插件的
+/// config（那是 UI 会话内切换 preset 用的，headless 无需也不应触碰）。
+/// 映射与 codex/claude 分支的权限翻译保持一致：缺省按 `full` 处理。
+pub fn dsh_permission_mode(permission: Option<&str>) -> &'static str {
+    match permission.unwrap_or("full") {
+        "readonly" => "read-only",
+        "ask" => "workspace-write",
+        _ => "danger-full-access",
+    }
+}
+
 /// 带思考计划的 [`ugs_patch_yaml`]。计划只影响「档位怎么写进 sidecar 覆盖层」：
 /// - `dsh-pi-ai`：把手声明的模型条目补上 `reasoningEfforts` + `compat`，
 ///   route 级补 `reasoning`，让第三方兼容网关也有真实可用的档位；
@@ -442,9 +458,16 @@ fn is_official_deepseek(base_url: &str) -> bool {
 /// 第三方分支只能在 patch 里手工声明模型条目，UGS 拿不到网关侧的模态元数据，
 /// 因此按 id 命名保守判定：只有名字里明确标注视觉能力的模型才声明 `image`，
 /// 其余保持纯文本，避免给纯文本模型虚报图片能力后请求被网关 400。
+///
+/// `deepseek-flash`（V4.1-Flash）是官方原生多模态模型，官方渠道
+/// `deepseek-v4-flash-vision-exp` 已于 2026-09 下线、由它接替，按名字判定
+/// 会漏掉，这里显式补上。
 fn model_declares_image_input(model: &str) -> bool {
     let id = model.to_ascii_lowercase();
-    id.contains("vision") || id.contains("-vl") || id.starts_with("vl")
+    id.contains("vision")
+        || id.contains("-vl")
+        || id.starts_with("vl")
+        || id == "deepseek-flash"
 }
 
 /// 把任意字符串编为 YAML 双引号标量，转义反斜杠、双引号与全部控制字符。
@@ -952,6 +975,26 @@ fn tool_call_patch(event: &serde_json::Value) -> Option<serde_json::Value> {
         .unwrap_or("");
     let args = serde_json::from_str::<serde_json::Value>(args_raw).ok();
     let subject = tool_subject_from_args(args.as_ref());
+    let file_changes = args.as_ref().and_then(|value| {
+        let normalized = name.to_ascii_lowercase().replace('_', "");
+        if !matches!(normalized.as_str(), "edit" | "editfile" | "strreplace" | "multiedit") {
+            return None;
+        }
+        let path = value.get("file_path").or_else(|| value.get("path"))?.as_str()?;
+        let old = value.get("old_string")?.as_str()?;
+        let new = value.get("new_string")?.as_str()?;
+        if old == new { return None; }
+        if value.get("replace_all").and_then(|value| value.as_bool()) == Some(true) {
+            return None;
+        }
+        let (lines, truncated) = crate::diff_text_lines(old, new);
+        if truncated { return None; }
+        Some(serde_json::json!([{
+            "path": path,
+            "added": lines.iter().filter(|line| matches!(line.kind.as_str(), "added" | "replacedAdded")).count(),
+            "deleted": lines.iter().filter(|line| matches!(line.kind.as_str(), "deleted" | "replacedDeleted")).count(),
+        }]))
+    });
     let args = args.map(|value| clamp_json_strings(&value, 600));
     // Moon Add: update_goal 是 dsh harness 内部的目标管理工具，不是面向用户
     // 的调用。标记 ephemeral 让它只在流式期间短暂可见，最终消息持久化时被
@@ -963,6 +1006,9 @@ fn tool_call_patch(event: &serde_json::Value) -> Option<serde_json::Value> {
         "status": "running",
         "args": args,
     });
+    if let Some(file_changes) = file_changes {
+        patch["fileChanges"] = file_changes;
+    }
     if name == "update_goal" {
         patch["ephemeral"] = serde_json::Value::Bool(true);
     }
@@ -1104,6 +1150,20 @@ mod tests {
         assert_eq!(patch["result"], "OK 42 lines");
         assert_eq!(patch["truncated"], false);
         assert!(event_sets_received(&ev));
+    }
+
+    #[test]
+    fn edit_file_counts_survive_argument_clipping() {
+        let ev = serde_json::json!({ "data": {
+            "name": "edit", "callId": "edit1", "arguments": serde_json::json!({
+                "file_path": "src/app.ts",
+                "old_string": "old\n".repeat(200), "new_string": "new\n".repeat(300)
+            }).to_string()
+        }});
+        let patch = tool_call_patch(&ev).unwrap();
+        assert_eq!(patch["fileChanges"][0]["added"], 300);
+        assert_eq!(patch["fileChanges"][0]["deleted"], 200);
+        assert!(patch["args"]["new_string"].as_str().unwrap().contains("已截断"));
     }
 
     #[test]
@@ -1253,6 +1313,19 @@ mod tests {
         // 无 model/baseURL 时不应生成对应 patch 行，保持 dsh 默认行为。
         assert!(!yaml.contains("agent-default-model"));
         assert!(!yaml.contains("llm-deepseek"));
+    }
+
+    /// dsh 权限档必须经 DSH_PERMISSION_MODE 环境变量下发（dsh base profile 的
+    /// sandbox-policy/approval 读它）；不设则 dsh 永远落在 workspace-write+ask，
+    /// composer 选「完全访问」也照样弹审批。
+    #[test]
+    fn dsh_permission_mode_maps_composer_tiers() {
+        assert_eq!(dsh_permission_mode(Some("full")), "danger-full-access");
+        assert_eq!(dsh_permission_mode(None), "danger-full-access");
+        assert_eq!(dsh_permission_mode(Some("readonly")), "read-only");
+        assert_eq!(dsh_permission_mode(Some("ask")), "workspace-write");
+        // 未知档位与缺省一致，按 full 处理，避免静默降级成 ask。
+        assert_eq!(dsh_permission_mode(Some("bogus")), "danger-full-access");
     }
 
     #[test]

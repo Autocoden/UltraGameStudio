@@ -291,6 +291,14 @@ function pathsFromEvent(event: ToolEvent): string[] {
   const out: string[] = [];
 
   collectStructuredPaths(event.args, out);
+  collectStructuredPaths(event.fileChanges, out);
+  if (typeof event.args === 'string') out.push(...pathsFromPatchText(event.args));
+  if (event.args && typeof event.args === 'object') {
+    const args = event.args as Record<string, unknown>;
+    for (const key of ['patch', 'input', 'patch_text', 'patchText']) {
+      if (typeof args[key] === 'string') out.push(...pathsFromPatchText(args[key]));
+    }
+  }
   if (out.length === 0) out.push(...pathsFromResult(event.result));
 
   // Fall back to the one-line subject (only for tools whose subject is a path,
@@ -349,6 +357,20 @@ export function extractSessionFiles(
 
   for (const message of messages) {
     if (message.role !== 'assistant') continue;
+    for (const file of message.fileChanges?.files ?? []) {
+      const key = dedupeKey(file.path);
+      if (!key || isIgnored?.(file.path)) continue;
+      const existing = byKey.get(key);
+      byKey.set(key, {
+        path: file.path,
+        basename: basenameOf(file.path),
+        action: 'edited',
+        changeStatus: file.status,
+        touchCount: (existing?.touchCount ?? 0) + 1,
+        lastTouchedAt: message.completedAt ?? message.createdAt,
+        seq: existing?.seq ?? seq++,
+      });
+    }
     if (!hasToolSentinel(message.text)) continue;
 
     const { patches } = extractToolSentinels(message.text);

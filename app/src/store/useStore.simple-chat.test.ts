@@ -29,6 +29,15 @@ const gatewayMocks = vi.hoisted(() => ({
   resolveCliGatewayRoute: vi.fn(),
 }));
 
+const skillLearningMocks = vi.hoisted(() => ({
+  beginSkillLearningTurn: vi.fn(),
+}));
+
+vi.mock('@/lib/skillLearningDesktop', async (importOriginal) => ({
+  ...await importOriginal<typeof import('@/lib/skillLearningDesktop')>(),
+  beginSkillLearningTurn: skillLearningMocks.beginSkillLearningTurn,
+}));
+
 const tauriMocks = vi.hoisted(() => ({
   aiEditViaCli: vi.fn(),
   aiCliSteerSupported: vi.fn(
@@ -40,6 +49,8 @@ const tauriMocks = vi.hoisted(() => ({
   isTauri: vi.fn(() => false),
   previewLocalFile: vi.fn(),
   tauriAvailable: vi.fn(() => false),
+  ensureWorkspaceChangesBaseline: vi.fn(async () => ({ rootPath: 'E:/project', generatedAtMs: 1, fileCount: 1, truncated: false })),
+  listWorkspaceChanges: vi.fn(async () => ({ rootPath: 'E:/project', generatedAtMs: 2, files: [], truncated: false })),
 }));
 
 const notificationMocks = vi.hoisted(() => ({
@@ -73,6 +84,8 @@ vi.mock('@/lib/tauri', async () => {
     isTauri: tauriMocks.isTauri,
     previewLocalFile: tauriMocks.previewLocalFile,
     tauriAvailable: tauriMocks.tauriAvailable,
+    ensureWorkspaceChangesBaseline: tauriMocks.ensureWorkspaceChangesBaseline,
+    listWorkspaceChanges: tauriMocks.listWorkspaceChanges,
   };
 });
 
@@ -198,6 +211,7 @@ async function waitFor(
 
 afterEach(async () => {
   __resetSimpleChatRuntimeForTests();
+  skillLearningMocks.beginSkillLearningTurn.mockReset();
   gatewayMocks.completeGatewayText.mockReset();
   gatewayMocks.resolveDirectGatewayRoute.mockReset();
   gatewayMocks.resolveCliGatewayRoute.mockReset();
@@ -224,6 +238,299 @@ afterEach(async () => {
 });
 
 describe('simple-workflow chat mode', () => {
+  it('persists learning states only to the frozen source session after navigation', async () => {
+    resetStore(simpleBlueprint('Learning source'));
+    mockDirectRoute();
+    const source = await historyStore.createSession({
+      workspaceId: '__default__', id: 'learning-source', isWorkflow: false, messages: [],
+    });
+    const other = await historyStore.createSession({
+      workspaceId: '__default__', id: 'learning-other', isWorkflow: false,
+      messages: [{ id: 'other-user', role: 'user', text: 'Other session.', createdAt: 1 }],
+    });
+    useStore.setState({ historyReady: true, activeWorkspaceId: source.workspaceId, activeSessionId: source.id });
+    tauriMocks.tauriAvailable.mockReturnValue(true);
+    let callback: ((state: import('@/runtime/skills/types').SkillReviewState) => void) | undefined;
+    let reviewOrigin: import('@/runtime/skills/types').SkillOrigin | undefined;
+    const finish = vi.fn(async () => {
+      callback?.({ status: 'queued', origin: reviewOrigin! });
+      const result = { origin: reviewOrigin!, status: 'applied' as const, batchId: 'source-batch',
+        lesson: 'Read the manifest before selecting packages.', operationsApplied: 1,
+        changes: [], riskReasons: [], rollbackId: 'source-rollback' };
+      callback?.({ status: result.status, origin: result.origin, result });
+      return result;
+    });
+    skillLearningMocks.beginSkillLearningTurn.mockImplementation((options) => {
+      // Only the unavailable skill transport is mocked; history uses real localStorage.
+      tauriMocks.tauriAvailable.mockReturnValue(false);
+      callback = options.onState;
+      reviewOrigin = { ...options.origin, runId: 'independent-source-review' };
+      return { origin: options.origin, loadContext: async () => ({
+        prompt: options.prompt, loadedSkills: [], catalogRevision: 'source-catalog',
+      }), onTool: vi.fn(), finish };
+    });
+    gatewayMocks.completeGatewayText.mockImplementation(async () => {
+      useStore.setState({ activeSessionId: other.id, messages: other.messages });
+      await historyStore.appendMessage(source.workspaceId, source.id, {
+        id: 'source-next', role: 'user', text: 'A later source message.', createdAt: 2,
+      });
+      return 'Task verified.';
+    });
+    expect(useStore.getState().sendPrompt('Check dependencies.')).toBe(true);
+    await waitFor(() => finish.mock.calls.length === 1, 'learning finish');
+    expect(callback).toBeTypeOf('function');
+    await waitFor(async () => !!(await historyStore.getSession(source.workspaceId, source.id))?.messages
+      .find((message) => message.skillLearning?.status === 'applied'), 'persisted source learning state');
+    const persisted = await historyStore.getSession(source.workspaceId, source.id);
+    const cards = persisted!.messages.filter((message) => message.skillLearning);
+    expect(cards).toHaveLength(1);
+    expect(cards[0]).toMatchObject({ role: 'assistant', localOnly: true,
+      skillLearning: { origin: reviewOrigin, status: 'applied', result: { batchId: 'source-batch' } } });
+    expect(persisted?.messages.some((message) => message.id === 'source-next')).toBe(true);
+    expect(persisted?.messages.find((message) => message.role === 'user' && message.text === 'Check dependencies.'))
+      .toMatchObject({ skillContext: {
+        origin: skillLearningMocks.beginSkillLearningTurn.mock.calls[0][0].origin,
+        loadedSkills: [], catalogRevision: 'source-catalog',
+      } });
+    expect(useStore.getState().messages).toEqual(other.messages);
+    expect((await historyStore.getSession(other.workspaceId, other.id))?.messages).toEqual(other.messages);
+  });
+
+  it('enqueues the new session record before an immediate first message', async () => {
+    resetStore(simpleBlueprint('Immediate session send'));
+    mockDirectRoute();
+    const order: string[] = [];
+    const workspace = { id: 'workspace-immediate-source', path: '', name: 'Unbound', updatedAt: 1, sessionCount: 0 };
+    useStore.setState({ historyReady: true, activeWorkspaceId: workspace.id, workspaces: [workspace], sessions: [], sessionTree: { [workspace.id]: [] } });
+    const create = vi.spyOn(historyStore, 'createSession').mockImplementation(async (input) => {
+      order.push('create');
+      return { id: input.id!, workspaceId: input.workspaceId, title: input.title ?? 'Unbound', isWorkflow: false, createdAt: 1, updatedAt: 1, messages: [] };
+    });
+    const append = vi.spyOn(historyStore, 'appendMessage').mockImplementation(async () => { order.push('append'); });
+    const patchConfig = vi.spyOn(historyStore, 'patchConfig').mockResolvedValue({} as never);
+    gatewayMocks.completeGatewayText.mockResolvedValue('Complete.');
+    try {
+      useStore.getState().newSession();
+      useStore.getState().sendPrompt('First message.');
+      await waitFor(() => !useStore.getState().aiStreaming, 'immediate first turn');
+      expect(order.slice(0, 2)).toEqual(['create', 'append']);
+    } finally {
+      create.mockRestore(); append.mockRestore(); patchConfig.mockRestore();
+    }
+  });
+
+  it('waits for the optimistic session to persist before binding the skill host', async () => {
+    resetStore(simpleBlueprint('Persistent skill source'));
+    mockDirectRoute();
+    const workspace = { id: 'workspace-skill-source', path: 'E:/skill-source', name: 'Skill source', updatedAt: 1, sessionCount: 0 };
+    useStore.setState({ historyReady: true, activeWorkspaceId: workspace.id, workspaces: [workspace], sessions: [], sessionTree: { [workspace.id]: [] } });
+    let persistSession!: () => void;
+    const persisted = new Promise<void>((resolve) => { persistSession = resolve; });
+    let createdSessionId = '';
+    const create = vi.spyOn(historyStore, 'createSession').mockImplementation(async (input) => {
+      createdSessionId = input.id!;
+      await persisted;
+      return { id: input.id!, workspaceId: input.workspaceId, title: input.title ?? 'Skill source', isWorkflow: false, createdAt: 1, updatedAt: 1, messages: [] };
+    });
+    const getSession = vi.spyOn(historyStore, 'getSession').mockImplementation(async (workspaceId, sessionId) => {
+      expect(workspaceId).toBe(workspace.id);
+      expect(sessionId).toBe(createdSessionId);
+      await persisted;
+      return { id: sessionId, workspaceId, title: 'Skill source', isWorkflow: false, createdAt: 1, updatedAt: 1, messages: [] };
+    });
+    const patchConfig = vi.spyOn(historyStore, 'patchConfig').mockResolvedValue({} as never);
+    const finish = vi.fn();
+    let hostBound = false;
+    skillLearningMocks.beginSkillLearningTurn.mockImplementation((options) => ({
+      loadContext: async () => {
+        if (!options.ready) throw new Error('missing persisted skill-source barrier');
+        await options.ready;
+        hostBound = true;
+        return { prompt: options.prompt, loadedSkills: [], catalogRevision: 'catalog-source' };
+      }, onTool: vi.fn(), finish,
+    }));
+    gatewayMocks.completeGatewayText.mockResolvedValue('Complete.');
+    try {
+      useStore.getState().newSession();
+      tauriMocks.tauriAvailable.mockReturnValue(true);
+      expect(useStore.getState().sendPrompt('Read the source.', { skillIds: ['source-skill'] })).toBe(true);
+      await waitFor(() => skillLearningMocks.beginSkillLearningTurn.mock.calls.length === 1, 'skill source construction');
+      expect(hostBound).toBe(false);
+      expect(gatewayMocks.completeGatewayText).not.toHaveBeenCalled();
+      persistSession();
+      await waitFor(() => finish.mock.calls.length === 1, 'source-bound turn completion');
+      expect(hostBound).toBe(true);
+      expect(skillLearningMocks.beginSkillLearningTurn.mock.calls[0][0].origin).toMatchObject({ hostId: 'local', workspaceId: workspace.id, sessionId: createdSessionId, cwd: workspace.path });
+    } finally {
+      persistSession();
+      create.mockRestore(); getSession.mockRestore(); patchConfig.mockRestore();
+    }
+  });
+
+  it('persists confirmed context compression and updates the live session marker', async () => {
+    resetStore(simpleBlueprint('Compression status'));
+    const session = { id: 'compressed-live', workspaceId: '__default__', title: '压缩状态', createdAt: 1, isWorkflow: false };
+    useStore.setState({ activeSessionId: session.id, activeWorkspaceId: session.workspaceId, sessions: [session], sessionTree: { [session.workspaceId]: [session] } });
+    tauriMocks.isTauri.mockReturnValue(true);
+    tauriMocks.tauriAvailable.mockReturnValue(true);
+    gatewayMocks.resolveDirectGatewayRoute.mockReturnValue(null);
+    gatewayMocks.resolveCliGatewayRoute.mockResolvedValue({
+      selection: { adapter: 'codex', modelClass: 'default' }, adapter: 'codex', modelClass: 'default',
+      model: 'test-model', mode: 'cli', transport: 'cli', label: 'Test CLI', source: 'global', cliCommand: 'codex',
+    });
+    let markerSeen = false;
+    tauriMocks.aiEditViaCli.mockImplementation(async (_prompt, _adapter, options) => {
+      options.onProgress?.('\n<<UGS_TOOL>>{"id":"compact","name":"ugs_context_compaction","status":"done","ephemeral":true}<<UGS_TOOL_END>>\n');
+      markerSeen = useStore.getState().sessions.some((session) => session.contextCompressed === true);
+      return '压缩后的回答';
+    });
+    expect(useStore.getState().sendPrompt('继续任务')).toBe(true);
+    await waitFor(() => tauriMocks.aiEditViaCli.mock.calls.length > 0 && useStore.getState().chattingSessions.length === 0, 'compressed turn completion');
+    const state = useStore.getState();
+    expect(markerSeen).toBe(true);
+    expect(state.messages.find((message) => message.role === 'assistant')?.contextCompressed).toBe(true);
+    expect(state.messages.find((message) => message.role === 'assistant')?.text).not.toContain('ugs_context_compaction');
+    expect(state.sessions.find((session) => session.id === state.activeSessionId)?.contextCompressed).toBe(true);
+  });
+
+  it('forwards native CLI tool completions to learning without deriving evidence from progress text', async () => {
+    resetStore(simpleBlueprint('Native skill evidence'));
+    tauriMocks.isTauri.mockReturnValue(true);
+    tauriMocks.tauriAvailable.mockReturnValue(true);
+    gatewayMocks.resolveDirectGatewayRoute.mockReturnValue(null);
+    gatewayMocks.resolveCliGatewayRoute.mockResolvedValue({
+      selection: { adapter: 'codex', modelClass: 'default' }, adapter: 'codex', modelClass: 'default',
+      model: 'test-model', mode: 'cli', transport: 'cli', label: 'Test CLI', source: 'global', cliCommand: 'codex',
+    });
+    const onTool = vi.fn();
+    const finish = vi.fn();
+    skillLearningMocks.beginSkillLearningTurn.mockReturnValue({
+      loadContext: async () => ({ prompt: 'Verify the change.', loadedSkills: [], catalogRevision: 'catalog-native' }),
+      onTool, finish,
+    });
+    let native: Record<string, unknown> | undefined;
+    tauriMocks.aiEditViaCli.mockImplementation(async (_prompt, _adapter, options) => {
+      native = { runId: options.runId, toolCallId: 'test-call', toolName: 'command_execution', phase: 'end', provenance: 'native-tool', status: 'success', exitCode: 0, args: { command: 'npm test' }, result: 'Tests passed.' };
+      options.onProgress?.('<<UGS_TOOL>>{"name":"command_execution","status":"success"}<</UGS_TOOL>>');
+      options.onTool?.(native);
+      return 'Verified.';
+    });
+    expect(useStore.getState().sendPrompt('Verify the change.')).toBe(true);
+    await waitFor(() => finish.mock.calls.length === 1, 'native evidence turn');
+    expect(onTool).toHaveBeenCalledExactlyOnceWith(native);
+    expect(native?.runId).not.toBe(skillLearningMocks.beginSkillLearningTurn.mock.calls[0][0].origin.runId);
+    expect(finish).toHaveBeenCalledWith({ finalAnswer: 'Verified.', terminal: 'completed' });
+  });
+
+  it('binds native skill tools to the persisted original source across CLI and gateway calls', async () => {
+    for (const route of ['cli', 'gateway'] as const) {
+      __resetSimpleChatRuntimeForTests();
+      resetStore(simpleBlueprint('Scoped skill tools'));
+      tauriMocks.tauriAvailable.mockReturnValue(false);
+      const source = await historyStore.createSession({
+        workspaceId: '__default__', id: `scoped-tools-${route}`, isWorkflow: false, messages: [],
+      });
+      useStore.setState({ historyReady: true, activeWorkspaceId: source.workspaceId, activeSessionId: source.id });
+      tauriMocks.tauriAvailable.mockReturnValue(true);
+      tauriMocks.isTauri.mockReturnValue(route === 'cli');
+      if (route === 'cli') {
+        gatewayMocks.resolveDirectGatewayRoute.mockReturnValue(null);
+        gatewayMocks.resolveCliGatewayRoute.mockResolvedValue({
+          selection: { adapter: 'claude-code', modelClass: 'sonnet' }, adapter: 'claude-code', modelClass: 'sonnet',
+          model: 'sonnet', mode: 'cli', transport: 'cli', label: 'Test CLI', source: 'global', cliCommand: 'claude',
+        });
+      } else {
+        mockDirectRoute();
+      }
+      const finish = vi.fn();
+      let passedTools: unknown;
+      skillLearningMocks.beginSkillLearningTurn.mockImplementation(() => {
+        // Only unavailable native transport is mocked; history persists in the
+        // real browser fallback, while isTauri still chooses the CLI branch.
+        tauriMocks.tauriAvailable.mockReturnValue(false);
+        return {
+          loadContext: async () => ({ prompt: 'Read the manifest.', loadedSkills: [], catalogRevision: 'scoped-catalog' }),
+          onTool: vi.fn(), finish,
+        };
+      });
+      const verifyRequest = async (request: { skillTools?: { source: Record<string, unknown>; config: Record<string, unknown>; ready?: Promise<void> }; runId: string }) => {
+        passedTools = request.skillTools;
+        expect(request.skillTools, route).toBeDefined();
+        await request.skillTools!.ready;
+        const frozen = skillLearningMocks.beginSkillLearningTurn.mock.calls.at(-1)![0].origin;
+        expect(request.skillTools!.source).toEqual(frozen);
+        expect(request.skillTools!.source.runId).not.toBe(request.runId);
+        expect(request.skillTools!.config).toMatchObject({ enabled: true, mode: 'auto-safe' });
+        expect((await historyStore.getSession(source.workspaceId, source.id))?.messages
+          .find((message) => message.id === frozen.turnId)?.skillContext?.origin).toEqual(frozen);
+        return 'Read.';
+      };
+      tauriMocks.aiEditViaCli.mockImplementation(async (_prompt, _adapter, options) => verifyRequest(options));
+      gatewayMocks.completeGatewayText.mockImplementation((request) =>
+        // Title naming is a separate completion with no execution run.
+        request.runId ? verifyRequest(request) : Promise.resolve('Manifest check'));
+      expect(useStore.getState().sendPrompt('Read the manifest.')).toBe(true);
+      await waitFor(() => finish.mock.calls.length === 1, `${route} scoped skill tools`);
+      expect(passedTools, route).toBeDefined();
+      expect(finish).toHaveBeenCalledWith({ finalAnswer: 'Read.', terminal: 'completed' });
+    }
+  });
+
+  it('forwards ordinary gateway fallback evidence to the same frozen learning turn', async () => {
+    resetStore(simpleBlueprint('Gateway skill evidence'));
+    mockDirectRoute();
+    tauriMocks.tauriAvailable.mockReturnValue(true);
+    const onTool = vi.fn(); const finish = vi.fn();
+    skillLearningMocks.beginSkillLearningTurn.mockReturnValue({
+      loadContext: async () => ({ prompt: 'Check the output.', loadedSkills: [], catalogRevision: 'catalog-fallback' }), onTool, finish,
+    });
+    let event: Record<string, unknown> | undefined;
+    gatewayMocks.completeGatewayText.mockImplementation(async (request) => {
+      event = { runId: request.runId, toolCallId: 'fallback-check', toolName: 'Bash', phase: 'end', provenance: 'native-tool', exitCode: 0, status: 'success', result: 'Actual check completed.' };
+      request.onToolEvent?.(event);
+      return 'Checked.';
+    });
+    useStore.getState().sendPrompt('Check the output.');
+    await waitFor(() => finish.mock.calls.length === 1, 'fallback evidence');
+    expect(onTool).toHaveBeenCalledExactlyOnceWith(event);
+  });
+
+  it('loads selected skill content at turn execution and only adds it to this user request', async () => {
+    resetStore(simpleBlueprint('Skill chat'));
+    mockDirectRoute();
+    const source = await historyStore.createSession({
+      workspaceId: '__default__', id: 'skill-context-source', isWorkflow: false, messages: [],
+    });
+    useStore.setState({ historyReady: true, activeWorkspaceId: source.workspaceId, activeSessionId: source.id });
+    tauriMocks.tauriAvailable.mockReturnValue(true);
+    const finish = vi.fn();
+    skillLearningMocks.beginSkillLearningTurn.mockImplementation(() => {
+      tauriMocks.tauriAvailable.mockReturnValue(false);
+      return {
+      loadContext: async () => ({
+        prompt: 'Choose dependencies.\n\nRead package.json first: complete SKILL.md body.',
+        loadedSkills: [{ skillId: 'manifest-a', revision: 'revision-a', hash: 'hash-a', files: ['SKILL.md'] }],
+        catalogRevision: 'catalog-a',
+      }), onTool: vi.fn(), finish,
+      };
+    });
+    gatewayMocks.completeGatewayText.mockResolvedValue('Dependencies selected.');
+    expect(useStore.getState().sendPrompt('Choose dependencies.', { skillIds: ['manifest-a'] })).toBe(true);
+    await waitFor(() => !useStore.getState().aiStreaming, 'skill-context turn');
+    const request = gatewayMocks.completeGatewayText.mock.calls.find(([request]) =>
+      request.userContent?.includes('complete SKILL.md body.'))?.[0];
+    expect(request).toBeDefined();
+    expect(request.system).not.toContain('complete SKILL.md body.');
+    expect(skillLearningMocks.beginSkillLearningTurn).toHaveBeenCalledWith(expect.objectContaining({
+      prompt: 'Choose dependencies.', explicitSkillIds: ['manifest-a'],
+      origin: expect.objectContaining({ hostId: 'local' }),
+    }));
+    expect(finish).toHaveBeenCalledWith(expect.objectContaining({ terminal: 'completed' }));
+    expect(useStore.getState().messages.find((m) => m.role === 'user')?.text).toBe('Choose dependencies.');
+    expect((await historyStore.getSession(source.workspaceId, source.id))?.messages.find((message) => message.role === 'user')?.skillContext)
+      .toMatchObject({ loadedSkills: [{ skillId: 'manifest-a', revision: 'revision-a', hash: 'hash-a', files: ['SKILL.md'] }], catalogRevision: 'catalog-a' });
+  });
+
   it('does not treat a background AI-edit channel as the active view', () => {
     // A UGS_GEN generation driven from inside the chat loop is marked
     // `background: true`; its two-message shadow view must never flash over the
@@ -372,6 +679,59 @@ describe('simple-workflow chat mode', () => {
     expect(record?.title).toBe('新会话');
     expect(record?.isWorkflow).toBe(false);
     expect(record?.workflow).toBeUndefined();
+  });
+
+  it('inherits the Settings default thinking level when creating a new chat session', async () => {
+    window.localStorage.clear();
+    await historyStore.ready();
+    const workspace = await historyStore.resolveWorkspaceByPath('');
+    resetStore(simpleBlueprint('Existing chat'));
+    useStore.setState({
+      historyReady: true,
+      activeWorkspaceId: workspace.id,
+      activeSessionId: 'existing-thinking-session',
+      workspaces: [workspace],
+      composerBySession: {},
+      sessions: [],
+      sessionTree: { [workspace.id]: [] },
+      locale: 'zh-CN',
+    });
+    useStore.getState().setSessionRunSelection({
+      adapter: 'codex',
+      modelClass: 'gpt-6',
+      systemDefault: true,
+      thinkingLevel: 'low',
+    });
+    // Settings edits the default for future sessions, while the current
+    // conversation retains its own explicit thinking level.
+    useStore.getState().setDefaultRunSelection({
+      adapter: 'codex',
+      modelClass: 'gpt-6',
+      systemDefault: true,
+      thinkingLevel: 'xhigh',
+    });
+    expect(workflowDefaultGatewaySelection(useStore.getState().workflow).thinkingLevel)
+      .toBe('low');
+
+    useStore.getState().newSession();
+
+    await waitFor(
+      () => useStore.getState().activeSessionId !== 'existing-thinking-session',
+      'new chat with the Settings default thinking level',
+    );
+    const state = useStore.getState();
+    expect(workflowDefaultGatewaySelection(state.workflow)).toMatchObject({
+      adapter: 'codex',
+      modelClass: 'gpt-6',
+      systemDefault: true,
+      thinkingLevel: 'xhigh',
+    });
+    expect(state.composerBySession[`${workspace.id}::${state.activeSessionId}`]
+      .gatewaySelection.thinkingLevel).toBe('xhigh');
+    await waitFor(
+      async () => !!(await historyStore.getSession(workspace.id, state.activeSessionId!)),
+      'new chat persisted',
+    );
   });
 
   it('keeps visible chat messages while history activation is waiting for disk init', async () => {
@@ -6008,11 +6368,38 @@ describe('simple-workflow chat mode', () => {
     expect(assistant?.text).toContain('<<UGS_TOOL>>');
     expect(assistant?.text).not.toContain('<invoke');
     expect(assistant?.text).not.toContain('<parameter');
+    expect(assistant?.fileChanges?.source).toBe('agent');
+    expect(assistant?.fileChanges?.files[0].path).toBe(editedPath);
     expect(assistant?.text).not.toMatch(/^\s*count\s*$/m);
     const files = extractSessionFiles(useStore.getState().messages);
     expect(files.some((file) => file.path === editedPath && file.action === 'edited')).toBe(
       true,
     );
+  });
+
+  it('captures a fallback snapshot only after a queued runtime starts and persists the summary', async () => {
+    resetStore(simpleBlueprint('Simple chat'));
+    useStore.setState({ composer: { ...defaultComposer, workspace: 'E:/project' } });
+    tauriMocks.isTauri.mockReturnValue(true);
+    tauriMocks.tauriAvailable.mockReturnValue(true);
+    gatewayMocks.resolveDirectGatewayRoute.mockReturnValue(null);
+    gatewayMocks.resolveCliGatewayRoute.mockResolvedValue({
+      selection: { adapter: 'grok', modelClass: 'grok' }, adapter: 'grok', modelClass: 'grok',
+      model: 'grok', transport: 'cli', mode: 'cli', label: 'Grok', source: 'fallback', cliCommand: 'grok',
+    });
+    // The launch selection determines which runtimes need a disk baseline.
+    useStore.setState({ workflow: { ...useStore.getState().workflow, meta: {
+      ...useStore.getState().workflow.meta, gateway: { defaults: { adapter: 'grok', modelClass: 'grok' } },
+    } } });
+    tauriMocks.listWorkspaceChanges.mockResolvedValueOnce({ rootPath: 'E:/project', generatedAtMs: 2,
+      files: [{ path: 'src/new.ts', status: 'added', binary: false, truncated: false,
+        lines: [{ kind: 'added', content: 'new' }] }], truncated: false } as never);
+    tauriMocks.aiEditViaCli.mockResolvedValue('已完成');
+    useStore.getState().sendPrompt('创建文件');
+    await waitFor(() => !useStore.getState().aiStreaming, 'fallback file summary');
+    const answer = useStore.getState().messages.find((m) => m.role === 'assistant' && m.text.includes('已完成'));
+    expect(answer?.fileChanges?.source).toBe('snapshot');
+    expect(answer?.fileChanges?.files[0]).toMatchObject({ path: 'src/new.ts', status: 'added', added: 1 });
   });
 
   it('does not splice tool cards through final prose streamed around tools', async () => {

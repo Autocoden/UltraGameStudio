@@ -22,6 +22,7 @@ mod history;
 mod kimi_log;
 mod proxy_http;
 mod secure_store;
+mod skills;
 mod storage_paths;
 
 /// Windows CreateProcess flag: don't allocate a console window for the child.
@@ -2446,6 +2447,24 @@ fn scan_skill_dir(
     }
 }
 
+fn append_owned_slash_entries(
+    global: &Path, cwd: Option<&Path>, entries: &mut Vec<SlashCatalogEntry>, seen: &mut HashSet<String>,
+) -> Result<(),String> {
+    for (dir, skill) in skills::legacy_owned_entries(global, cwd)? {
+        if entries.len() >= MAX_SLASH_ENTRIES { break; }
+        let token=slash_token(&skill.name,&skill.relative_path); let name=format!("/{token}");
+        if is_app_reserved_slash_name(&name) { continue; }
+        let entry=SlashCatalogEntry {
+            id:format!("skill:ugs-owned:{}",skill.skill_id), kind:"skill".into(), name:name.clone(),
+            label:same_localized_text(&skill.name), detail:same_localized_text(&skill.description),
+            insert_text:localized_text(&format!("请按 {name} skill 的工作流处理当前请求。Skill 摘要：{}",skill.description),&format!("Use the {name} skill workflow for this request. Skill summary: {}",skill.description)),
+            source:Some(dir.to_string_lossy().into_owned()), source_adapter:None,
+        };
+        if seen.insert(slash_entry_key(&entry)) { entries.push(entry); }
+    }
+    Ok(())
+}
+
 fn scan_slash_catalog_blocking() -> SlashCatalogSnapshot {
     let mut entries = slash_command_entries();
     let mut seen_keys: HashSet<String> = entries.iter().map(slash_entry_key).collect();
@@ -2454,6 +2473,12 @@ fn scan_slash_catalog_blocking() -> SlashCatalogSnapshot {
         scan_command_dir(&source, &root, &root, 0, &mut entries, &mut seen_keys);
     }
 
+    // Owned roots use the transaction/recovery gate, never recursive legacy
+    // scanning of .state backups. Project-owned entries win same-name conflicts.
+    let owned_error = storage_paths::global_root().and_then(|global| {
+        let cwd=std::env::current_dir().ok();
+        append_owned_slash_entries(&global,cwd.as_deref(),&mut entries,&mut seen_keys)
+    }).err();
     for root in skill_root_candidates() {
         scan_skill_dir("local", &root, 0, &mut entries, &mut seen_keys);
     }
@@ -2462,7 +2487,7 @@ fn scan_slash_catalog_blocking() -> SlashCatalogSnapshot {
         scanned_at_ms: now_ms(),
         ready: true,
         entries,
-        error: None,
+        error: owned_error,
     }
 }
 
@@ -2522,6 +2547,59 @@ async fn refresh_slash_catalog_async(app: AppHandle) -> Result<SlashCatalogSnaps
 #[tauri::command]
 async fn refresh_slash_catalog(app: AppHandle) -> Result<SlashCatalogSnapshot, String> {
     refresh_slash_catalog_async(app).await
+}
+
+static SKILL_DESKTOP_HOST: OnceLock<Result<Arc<skills::SkillDesktopHost>, String>> = OnceLock::new();
+
+fn skill_desktop_host() -> Result<&'static Arc<skills::SkillDesktopHost>, String> {
+    SKILL_DESKTOP_HOST
+        .get_or_init(|| storage_paths::global_root().map(|root| Arc::new(skills::SkillDesktopHost::new(root))))
+        .as_ref()
+        .map_err(Clone::clone)
+}
+
+fn require_skill_app(window: &tauri::WebviewWindow) -> Result<(), String> {
+    let url = window.url().map_err(|_| "cannot verify skills IPC caller")?;
+    let origin = match url.port() {
+        Some(port) => format!("{}://{}:{port}", url.scheme(), url.host_str().unwrap_or_default()),
+        None => format!("{}://{}", url.scheme(), url.host_str().unwrap_or_default()),
+    };
+    skills::SkillDesktopHost::validate_app_caller(window.label(), &origin, cfg!(debug_assertions))
+}
+
+/// App orchestration supplies the frozen config/evidence before invoking the
+/// model-facing request. Never expose this binding command as a model tool.
+#[tauri::command]
+async fn skills_bind_run(window: tauri::WebviewWindow, request: skills::SkillHostBindingRequest) -> Result<serde_json::Value, String> {
+    require_skill_app(&window)?;
+    let host = Arc::clone(skill_desktop_host()?);
+    tauri::async_runtime::spawn_blocking(move || {
+        let origin = request.origin.clone(); let mode = request.mode;
+        let actor = match request.actor {
+            skills::SkillHostActor::Background => "background",
+            skills::SkillHostActor::User => "user",
+        };
+        host.bind(request)?;
+        Ok(serde_json::json!({"origin":origin,"mode":mode,"actor":actor}))
+    }).await.map_err(|e|format!("skills binding worker failed: {e}"))?
+}
+
+#[tauri::command]
+async fn skills_revoke_run(window: tauri::WebviewWindow, origin: skills::SkillOrigin) -> Result<(), String> {
+    require_skill_app(&window)?;
+    let host = Arc::clone(skill_desktop_host()?);
+    tauri::async_runtime::spawn_blocking(move || host.revoke(&origin))
+        .await.map_err(|e|format!("skills revoke worker failed: {e}"))?
+}
+
+#[tauri::command]
+async fn skills_request(app: AppHandle, window: tauri::WebviewWindow, request: skills::SkillServiceRequest) -> Result<serde_json::Value, String> {
+    require_skill_app(&window)?;
+    let host = Arc::clone(skill_desktop_host()?);
+    tauri::async_runtime::spawn_blocking(move || host.request_with_update(request, |origin,catalog| {
+        let _ = app.emit("skills-catalog-updated", serde_json::json!({"origin":origin,"catalog":catalog}));
+        start_slash_catalog_scan(app.clone());
+    })).await.map_err(|e|format!("skills request worker failed: {e}"))?
 }
 
 fn skill_install_root(
@@ -10880,7 +10958,9 @@ fn workspace_changes_blocking(
             Some(new) => {
                 if let Some(change) = diff_snapshot_file(old, &new) {
                     files.push(change);
-                } else if snapshot_modified_since(&new, baseline.generated_at_ms) {
+                } else if !cache_key.starts_with("turn:")
+                    && snapshot_modified_since(&new, baseline.generated_at_ms)
+                {
                     files.push(snapshot_file_to_modified_marker(&new));
                 }
             }
@@ -10901,8 +10981,15 @@ fn workspace_changes_blocking(
         truncated: truncated || baseline.truncated || current_truncated,
         scan_scope: Some("full".to_string()),
     };
-    let cache_file = workspace_change_cache_file(&root, &cache_key, "changes");
-    write_json_cache(&cache_file, &changes)?;
+    if cache_key.starts_with("turn:") {
+        // Per-turn fallback data is attached to the message. Discard large
+        // baseline contents instead of retaining one full workspace per turn.
+        let baseline_file = workspace_change_cache_file(&root, &cache_key, "baseline");
+        let _ = std::fs::remove_file(baseline_file);
+    } else {
+        let cache_file = workspace_change_cache_file(&root, &cache_key, "changes");
+        write_json_cache(&cache_file, &changes)?;
+    }
     Ok(changes)
 }
 
@@ -14427,6 +14514,21 @@ fn version_needs_update(current: &str, latest: &str) -> bool {
 }
 
 fn cli_version_probe_command(executable_path: &str) -> Command {
+    // npm-shim loss fallback: when `%APPDATA%\npm\dsh.cmd` is gone (an npm
+    // update that died between "remove old shim" and "rename the temp shim"),
+    // the CLI scan resolves the *package JS entry* instead — see
+    // `cli_runtime::dsh_npm_entry_fallback`, which hands back
+    // `…/node_modules/@deepseek-ai/dsh/lib/bin.js`. That file has no executable
+    // association, so a direct spawn fails and the panel reports
+    // "无法读取当前版本" while the chat path (which node-wraps the same entry)
+    // keeps working. Wrap it with `node` exactly like the launcher does.
+    if executable_path.to_ascii_lowercase().ends_with(".js") {
+        let mut cmd = new_spawn_command("node");
+        cmd.arg(executable_path);
+        cmd.arg("--version");
+        return cmd;
+    }
+
     let mut cmd = spawn_cli_command(executable_path);
     cmd.arg("--version");
     cmd
@@ -16351,6 +16453,28 @@ fn emit_usage(app: &tauri::AppHandle, run_id: &str, usage: &serde_json::Value) {
     );
 }
 
+fn spawn_ai_cli_stdout_reader<F>(
+    failure: Arc<Mutex<Option<String>>>,
+    read: F,
+) -> std::thread::JoinHandle<String>
+where
+    F: FnOnce() -> String + Send + 'static,
+{
+    std::thread::spawn(move || {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(read)) {
+            Ok(output) => output,
+            Err(_) => {
+                // Panic payloads may include raw native output. Report only
+                // the failed transport, never that potentially sensitive text.
+                if let Ok(mut slot) = failure.lock() {
+                    *slot = Some("stdout 读取线程 panic".into());
+                }
+                String::new()
+            }
+        }
+    })
+}
+
 fn ai_cli_result(text: String, usage: &Arc<Mutex<Option<serde_json::Value>>>) -> AiCliResult {
     AiCliResult {
         text,
@@ -16712,6 +16836,24 @@ fn tool_subject(input: &serde_json::Value) -> String {
 /// restores them) so a tool result that itself contains the literal sentinel
 /// markers can't emit a stray `<<UGS_TOOL_END>>` that prematurely closes the
 /// block and leaks the rest of the payload as prose.
+fn context_compression_patch(event: &serde_json::Value) -> Option<serde_json::Value> {
+    let kind = event.get("method").or_else(|| event.get("type")).and_then(|v| v.as_str())?;
+    let completed = match kind {
+        "system" => event.get("subtype").and_then(|v| v.as_str()) == Some("compact_boundary"),
+        "thread/compacted" | "thread.compacted" => true,
+        "item.completed" | "item/completed" => {
+            let item = event.get("item").or_else(|| event.pointer("/params/item"));
+            matches!(item.and_then(|v| v.get("type")).and_then(|v| v.as_str()),
+                Some("contextCompaction") | Some("context_compaction"))
+        }
+        _ => false,
+    };
+    completed.then(|| serde_json::json!({
+        "id": "native-context-compression", "name": "ugs_context_compaction",
+        "status": "done", "ephemeral": true
+    }))
+}
+
 pub(crate) fn encode_tool_patch(patch: &serde_json::Value) -> String {
     let payload = patch
         .to_string()
@@ -16726,6 +16868,7 @@ fn encode_running_status_patch(run_id: &str, elapsed_secs: u64, stage: &str) -> 
         "name": "运行状态",
         "subject": format!("{stage} · 仍在运行…（已 {elapsed_secs}s）"),
         "status": "running",
+        "provenance": "ui-synthetic",
         "ephemeral": true,
     });
     encode_tool_patch(&patch)
@@ -16781,6 +16924,277 @@ fn tool_result_raw(block: &serde_json::Value) -> String {
     }
 }
 
+#[derive(Debug)]
+struct NativeToolStart {
+    started_at: std::time::Instant,
+    name: String,
+    parent_id: Option<String>,
+    // Store only the already-minimized arguments, never raw credential fields.
+    args: Option<serde_json::Value>,
+}
+
+const NATIVE_CLI_TOOL_EVENT: &str = "ugs-cli-tool";
+
+const NATIVE_TOOL_RESULT_MAX_BYTES: usize = 8192;
+const NATIVE_TOOL_ARGS_MAX_BYTES: usize = 4096;
+
+fn native_tool_prefix(text: &str, limit: usize) -> &str {
+    let mut end = text.len().min(limit);
+    while !text.is_char_boundary(end) { end -= 1; }
+    &text[..end]
+}
+
+fn native_tool_sensitive_key(key: &str) -> bool {
+    let key: String = key.chars().filter(char::is_ascii_alphanumeric)
+        .flat_map(char::to_lowercase).collect();
+    matches!(key.as_str(), "env" | "envvars" | "environment" | "headers" | "cookie" | "cookies")
+        || ["authorization", "apikey", "password", "passwd", "secret", "credential", "accesstoken", "refreshtoken", "authtoken", "privatekey", "clientkey"]
+            .iter().any(|part| key.contains(part))
+        || (key.contains("token") && !matches!(key.as_str(), "tokens" | "tokenusage" | "tokencount" | "inputtokens" | "outputtokens" | "totaltokens"))
+}
+
+// No credential/config/file reads: redact only the already-received native
+// record. Bound scans as well as serialized output, on UTF-8 boundaries.
+fn native_tool_redact_text(raw: &str, limit: usize) -> String {
+    let scan = native_tool_prefix(raw, 64 * 1024);
+    if scan.to_ascii_lowercase().contains("private key") { return "[REDACTED]".into(); }
+    let mut output = String::new();
+    for line in scan.split_inclusive('\n') {
+        if output.len() >= limit { break; }
+        let credential_assignment = line.char_indices().any(|(index, ch)| {
+            if ch != '=' && ch != ':' { return false; }
+            let before = line[..index].trim_end_matches(|ch: char| ch.is_whitespace() || ch == '\"' || ch == '\'');
+            let key = before.rsplit(|ch: char| !ch.is_ascii_alphanumeric() && !matches!(ch, '_' | '-' | '.'))
+                .next().unwrap_or("");
+            native_tool_sensitive_key(key)
+        });
+        if credential_assignment {
+            output.push_str("[REDACTED]");
+            if line.ends_with('\n') { output.push('\n'); }
+            continue;
+        }
+        let mut bearer = false;
+        for word in line.split_inclusive(char::is_whitespace) {
+            if output.len() >= limit { break; }
+            let token = word.trim_end();
+            let lower = token.to_ascii_lowercase();
+            let known_secret = ["sk-", "sk_", "ghp_", "github_pat_", "xoxb-", "xoxp-", "aiza", "eyj"]
+                .iter().any(|prefix| lower.trim_start_matches(|ch: char| !ch.is_ascii_alphanumeric()).starts_with(prefix));
+            let opaque = (36..=512).contains(&token.len())
+                && token.chars().any(|ch| ch.is_ascii_alphabetic())
+                && token.chars().any(|ch| ch.is_ascii_digit())
+                && token.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '+' | '/' | '=' | '.'));
+            let url_credentials = token.contains("://") && token.contains('@');
+            let next = if bearer || known_secret || opaque || url_credentials { "[REDACTED]" } else { token };
+            output.push_str(native_tool_prefix(next, limit.saturating_sub(output.len())));
+            output.push_str(native_tool_prefix(&word[token.len()..], limit.saturating_sub(output.len())));
+            bearer = lower == "bearer";
+        }
+    }
+    native_tool_prefix(&output, limit).to_string()
+}
+
+fn native_tool_redact_value(value: &serde_json::Value, budget: &mut usize, depth: usize) -> serde_json::Value {
+    if *budget < 16 || depth > 6 { return "[TRUNCATED]".into(); }
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut safe = serde_json::Map::new();
+            for (key, value) in map.iter().take(32) {
+                if *budget < 32 { break; }
+                let key = native_tool_prefix(key, 128).to_string();
+                *budget = budget.saturating_sub(key.len() + 8);
+                let value = if native_tool_sensitive_key(&key) { "[REDACTED]".into() }
+                    else { native_tool_redact_value(value, budget, depth + 1) };
+                safe.insert(key, value);
+            }
+            serde_json::Value::Object(safe)
+        }
+        serde_json::Value::Array(array) => {
+            let mut safe = Vec::new();
+            for value in array.iter().take(32) {
+                if *budget < 32 { break; }
+                *budget = budget.saturating_sub(2);
+                safe.push(native_tool_redact_value(value, budget, depth + 1));
+            }
+            serde_json::Value::Array(safe)
+        }
+        serde_json::Value::String(text) => {
+            let safe = native_tool_redact_text(text, *budget);
+            *budget = budget.saturating_sub(safe.len() + 2);
+            safe.into()
+        }
+        _ => {
+            *budget = budget.saturating_sub(value.to_string().len() + 2);
+            value.clone()
+        }
+    }
+}
+
+fn native_tool_safe_args(args: &serde_json::Value) -> serde_json::Value {
+    let mut budget = NATIVE_TOOL_ARGS_MAX_BYTES;
+    let safe = native_tool_redact_value(args, &mut budget, 0);
+    if safe.to_string().len() > NATIVE_TOOL_ARGS_MAX_BYTES { "[TRUNCATED]".into() } else { safe }
+}
+
+// This sink is fed only by native protocol records, never by progress text or
+// model-authored sentinels. Production binds it directly to AppHandle::emit.
+fn emit_native_tool_event<S: FnMut(&str, serde_json::Value)>(
+    sink: &mut S,
+    mut event: serde_json::Value,
+) {
+    event["provenance"] = "native-tool".into();
+    event["occurredAt"] = now_ms().into();
+    if let Some(args) = event.get_mut("args") {
+        *args = native_tool_safe_args(args);
+    }
+    if let Some(result) = event.get("result").and_then(|result| result.as_str()) {
+        event["result"] = native_tool_redact_text(result, NATIVE_TOOL_RESULT_MAX_BYTES).into();
+    }
+    sink(NATIVE_CLI_TOOL_EVENT, event);
+}
+
+fn native_tool_parent(event: &serde_json::Value) -> Option<String> {
+    ["parent_tool_use_id", "parent_id", "parentId", "parentToolCallId"]
+        .iter()
+        .find_map(|key| event.get(*key).and_then(|value| value.as_str()))
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+}
+
+fn native_tool_exit_code(event: &serde_json::Value) -> Option<serde_json::Value> {
+    event.get("exit_code").or_else(|| event.get("exitCode"))
+        .filter(|value| value.is_i64() || value.is_null()).cloned()
+}
+
+fn native_tool_status(flag: Option<bool>, status: Option<&str>, exit: Option<&serde_json::Value>) -> &'static str {
+    let code = exit.and_then(|value| value.as_i64());
+    let status = status.unwrap_or("").to_ascii_lowercase();
+    if flag == Some(true) || code.is_some_and(|code| code != 0)
+        || matches!(status.as_str(), "error" | "failed" | "failure" | "errored" | "cancelled" | "canceled") {
+        "error"
+    } else if flag == Some(false) || code == Some(0) || codex_status_success(&status) {
+        "success"
+    } else {
+        "unknown"
+    }
+}
+
+fn claude_tool_start_patch<S: FnMut(&str, serde_json::Value)>(
+    run_id: &str,
+    event: &serde_json::Value,
+    block: &serde_json::Value,
+    tool_starts: &mut HashMap<String, NativeToolStart>,
+    sink: &mut S,
+) -> serde_json::Value {
+    let native_id = block.get("id").and_then(|value| value.as_str()).filter(|id| !id.is_empty());
+    let native_name = block.get("name").and_then(|value| value.as_str()).filter(|name| !name.is_empty());
+    let id = native_id.map(str::to_string).unwrap_or_else(|| format!("t{}", tool_starts.len()));
+    let name = native_name.unwrap_or("tool");
+    let parent = native_tool_parent(block).or_else(|| native_tool_parent(event));
+    let input = block.get("input").cloned().unwrap_or(serde_json::Value::Null);
+    if native_id.is_some() && native_name.is_some() {
+        tool_starts.insert(id.clone(), NativeToolStart {
+            started_at: std::time::Instant::now(), name: name.to_string(), parent_id: parent.clone(),
+            args: (!input.is_null()).then(|| native_tool_safe_args(&input)),
+        });
+        let mut evidence = serde_json::json!({
+            "runId": run_id, "toolCallId": id, "toolName": name, "phase": "start", "status": "unknown",
+        });
+        if let Some(parent) = parent.as_deref() { evidence["parentId"] = parent.into(); }
+        if !input.is_null() { evidence["args"] = input.clone(); }
+        emit_native_tool_event(sink, evidence);
+    }
+    let mut patch = serde_json::json!({
+        "id": id, "name": name, "subject": tool_subject(&input), "status": "running",
+        "provenance": if native_id.is_some() && native_name.is_some() { "native-tool" } else { "ui-synthetic" },
+    });
+    if let Some(parent) = parent.as_deref() { patch["parentId"] = parent.into(); }
+    if !input.is_null() { patch["args"] = input; }
+    patch
+}
+
+fn claude_tool_result_patch<S: FnMut(&str, serde_json::Value)>(
+    run_id: &str,
+    event: &serde_json::Value,
+    block: &serde_json::Value,
+    tool_starts: &mut HashMap<String, NativeToolStart>,
+    sink: &mut S,
+) -> Option<serde_json::Value> {
+    let id = block.get("tool_use_id").and_then(|value| value.as_str()).filter(|id| !id.is_empty())?;
+    let start = tool_starts.remove(id);
+    let name = start.as_ref().map(|start| start.name.as_str())
+        .or_else(|| block.get("name").and_then(|value| value.as_str()).filter(|name| !name.is_empty()));
+    let parent = native_tool_parent(block).or_else(|| native_tool_parent(event))
+        .or_else(|| start.as_ref().and_then(|start| start.parent_id.clone()));
+    let exit = native_tool_exit_code(block).or_else(|| {
+        let metadata = event.get("tool_use_result")?;
+        let metadata_id = metadata.get("tool_use_id").or_else(|| metadata.get("toolUseId"))
+            .and_then(|value| value.as_str());
+        let content = event.pointer("/message/content").and_then(|value| value.as_array());
+        // Envelope metadata without an id is attributable only when this is
+        // the sole tool_result. Never transfer another tool's process exit.
+        let correlated = metadata_id.map(|metadata_id| metadata_id == id).unwrap_or_else(|| {
+            content.is_some_and(|content| {
+                let mut results = content.iter().filter(|value| value.get("type").and_then(|value| value.as_str()) == Some("tool_result"));
+                results.next().is_some_and(|value| value.get("tool_use_id").and_then(|value| value.as_str()) == Some(id))
+                    && results.next().is_none()
+            })
+        });
+        correlated.then(|| native_tool_exit_code(metadata)).flatten()
+    });
+    let status = native_tool_status(block.get("is_error").and_then(|value| value.as_bool()),
+        block.get("status").and_then(|value| value.as_str()), exit.as_ref());
+    let raw = tool_result_raw(block);
+    if let Some(name) = name {
+        let mut evidence = serde_json::json!({
+            "runId": run_id, "toolCallId": id, "toolName": name, "phase": "end", "status": status, "result": raw,
+        });
+        if let Some(parent) = parent.as_deref() { evidence["parentId"] = parent.into(); }
+        if let Some(exit) = exit.as_ref() { evidence["exitCode"] = exit.clone(); }
+        if let Some(args) = start.as_ref().and_then(|start| start.args.as_ref()) { evidence["args"] = args.clone(); }
+        // Emit from the raw native result BEFORE clipping the UI projection.
+        emit_native_tool_event(sink, evidence);
+    }
+    let mut patch = serde_json::json!({
+        "id": id, "name": name.unwrap_or("tool"), "status": if status == "error" { "error" } else { "done" },
+        "evidenceStatus": status, "provenance": if name.is_some() { "native-tool" } else { "ui-synthetic" },
+        "durationMs": start.as_ref().map(|start| start.started_at.elapsed().as_millis() as u64),
+        "result": raw.chars().take(TOOL_RESULT_CLAMP).collect::<String>(),
+        "truncated": raw.chars().count() > TOOL_RESULT_CLAMP,
+    });
+    if let Some(parent) = parent.as_deref() { patch["parentId"] = parent.into(); }
+    if let Some(exit) = exit { patch["exitCode"] = exit; }
+    Some(patch)
+}
+
+fn gemini_tool_patch<S: FnMut(&str, serde_json::Value)>(
+    run_id: &str,
+    event: &serde_json::Value,
+    tool_starts: &mut HashMap<String, NativeToolStart>,
+    sink: &mut S,
+) -> Option<serde_json::Value> {
+    match event.get("type").and_then(|value| value.as_str())? {
+        "tool_use" => {
+            let block = serde_json::json!({
+                "id": event.get("tool_id"), "name": event.get("tool_name"), "input": event.get("parameters"),
+            });
+            Some(claude_tool_start_patch(run_id, event, &block, tool_starts, sink))
+        }
+        "tool_result" => {
+            let output = event.get("output").and_then(|value| value.as_str())
+                .or_else(|| event.pointer("/error/message").and_then(|value| value.as_str())).unwrap_or("");
+            let mut block = serde_json::json!({
+                "tool_use_id": event.get("tool_id"), "name": event.get("tool_name"),
+                "content": output, "status": event.get("status"),
+            });
+            if let Some(code) = native_tool_exit_code(event) { block["exitCode"] = code; }
+            if event.get("error").is_some_and(|error| !error.is_null()) { block["is_error"] = true.into(); }
+            claude_tool_result_patch(run_id, event, &block, tool_starts, sink)
+        }
+        _ => None,
+    }
+}
+
 #[derive(serde::Deserialize)]
 struct CodexLiteEvent {
     id: Option<serde_json::Value>,
@@ -16789,6 +17203,8 @@ struct CodexLiteEvent {
     // `codex exec --json` fatal errors print `{"type":"error","message":…}`
     // with no `error` object; keep the message so it can surface to the user.
     message: Option<String>,
+    #[serde(alias = "parentId", alias = "parentToolCallId", alias = "parent_tool_use_id")]
+    parent_id: Option<String>,
     method: Option<String>,
     #[serde(rename = "type")]
     event_type: Option<String>,
@@ -16801,6 +17217,8 @@ struct CodexLiteEvent {
 
 #[derive(serde::Deserialize)]
 struct CodexLiteParams {
+    #[serde(alias = "parentId", alias = "parentToolCallId", alias = "parent_tool_use_id")]
+    parent_id: Option<String>,
     delta: Option<String>,
     item: Option<CodexLiteItem>,
     turn: Option<CodexLiteTurn>,
@@ -16808,6 +17226,10 @@ struct CodexLiteParams {
     token_usage: Option<serde_json::Value>,
     usage: Option<serde_json::Value>,
     error: Option<serde_json::Value>,
+    plan: Option<serde_json::Value>,
+    explanation: Option<String>,
+    #[serde(rename = "turnId")]
+    turn_id: Option<String>,
 }
 
 fn codex_cli_supports_app_server(binary: &str, shell: &Option<ShellSpec>) -> bool {
@@ -16852,6 +17274,100 @@ fn claude_cli_supports_stream_input(binary: &str, shell: &Option<ShellSpec>) -> 
     supported
 }
 
+/// Kill-switch for the Codex App Server transport — the only channel that can
+/// steer a live GPT/Codex turn (`turn/steer`). Default ON: with it off the run
+/// is a one-shot `codex exec` process with no stdin the ⚡ 插话 action could
+/// write to, which is exactly the "GPT 插话点击无效" symptom.
+///
+/// `UGS_CODEX_APP_SERVER=0|false|off|no` forces the legacy `codex exec` path.
+/// The UI probe reads the same switch, so that mode hides the ⚡ action instead
+/// of offering a dead one.
+fn codex_app_server_env_enabled(raw: Option<&str>) -> bool {
+    match raw.map(|value| value.trim().to_ascii_lowercase()) {
+        Some(value) => !matches!(value.as_str(), "0" | "false" | "off" | "no"),
+        None => true,
+    }
+}
+
+/// Pure core of `codex_app_server_steerable`: the gate matrix (env switch ×
+/// approval mode × CLI capability). The capability arrives as a closure so the
+/// cheap gates really do short-circuit `codex app-server --help` — a probe that
+/// hangs would otherwise cost its full timeout on every first turn of an
+/// install that opted out — and so the matrix is unit-testable without spawning
+/// a probe or mutating the process environment.
+///
+/// `ask` stays on the one-shot path: App Server approval callbacks need a live
+/// UI reviewer, and that callback surface is not wired yet.
+fn codex_steer_supported<P>(
+    permission: Option<&str>,
+    env_enabled: bool,
+    app_server_capable: P,
+) -> bool
+where
+    P: FnOnce() -> bool,
+{
+    env_enabled && permission != Some("ask") && app_server_capable()
+}
+
+/// THE Codex steer decision, in one place: `ai_cli` derives this run's transport
+/// from it and `ai_cli_steer_supported` answers the UI with it.
+///
+/// Never re-derive this by hand. The two sides disagreed once — the probe
+/// omitted the App Server switch the launch path required — so the ⚡ action was
+/// offered for a run whose process had no steer channel at all, and the click
+/// died silently (issue "GPT 插话点击无效").
+fn codex_app_server_steerable(
+    binary: &str,
+    permission: Option<&str>,
+    shell: &Option<ShellSpec>,
+) -> bool {
+    let env_enabled =
+        codex_app_server_env_enabled(std::env::var("UGS_CODEX_APP_SERVER").ok().as_deref());
+    codex_steer_supported(permission, env_enabled, || {
+        codex_cli_supports_app_server(binary, shell)
+    })
+}
+
+/// Where a run's in-turn steer channel comes from — and therefore which
+/// transport the launch path has to pick.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AiCliSteerChannel {
+    None,
+    CodexAppServer,
+    ClaudeStreamInput,
+    ZcodeAppServer,
+}
+
+/// The one decision for "does this run have a live in-turn steer channel?".
+///
+/// Both `ai_cli` (transport selection) and `ai_cli_steer_supported` (UI
+/// capability) MUST go through here; a hand-rolled second copy is how the two
+/// drifted apart and the ⚡ action became a no-op for Codex/GPT.
+fn ai_cli_steer_channel(
+    protocol: &str,
+    binary: &str,
+    permission: Option<&str>,
+    shell: &Option<ShellSpec>,
+) -> AiCliSteerChannel {
+    match protocol {
+        "codex" if codex_app_server_steerable(binary, permission, shell) => {
+            AiCliSteerChannel::CodexAppServer
+        }
+        "claude" if claude_cli_supports_stream_input(binary, shell) => {
+            AiCliSteerChannel::ClaudeStreamInput
+        }
+        // zcode steers by writing an extra `session/send` on the live app-server
+        // session — only possible when the bundled runtime entry resolves (the
+        // same gate `ai_cli` uses to pick the app-server transport over
+        // `--prompt --json`). No probing of the CLI itself: the capability is a
+        // property of the vendored runtime layout, which UGS ships.
+        "zcode" if cli_runtime::resolve_zcode_runtime_entry(binary).is_some() => {
+            AiCliSteerChannel::ZcodeAppServer
+        }
+        _ => AiCliSteerChannel::None,
+    }
+}
+
 /// Whether this claude build accepts `--effort`.
 ///
 /// Probed once per binary (same shape as the `--bare` / `--input-format`
@@ -16888,25 +17404,45 @@ struct CodexLiteTurn {
     usage: Option<serde_json::Value>,
 }
 
+fn deserialize_native_exit<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<Option<i64>>, D::Error> {
+    let value = <Option<i64> as serde::Deserialize>::deserialize(deserializer)?;
+    Ok(Some(value))
+}
+
 #[derive(serde::Deserialize)]
 struct CodexLiteItem {
     id: Option<String>,
     #[serde(rename = "type")]
     item_type: Option<String>,
     text: Option<String>,
+    #[serde(alias = "aggregated_output", alias = "aggregatedOutput")]
     output: Option<String>,
+    #[serde(default, alias = "exitCode", deserialize_with = "deserialize_native_exit")]
+    exit_code: Option<Option<i64>>,
+    #[serde(alias = "parentId", alias = "parentToolCallId", alias = "parent_tool_call_id")]
+    parent_id: Option<String>,
     command: Option<String>,
     name: Option<String>,
+    tool: Option<String>,
+    server: Option<String>,
+    arguments: Option<serde_json::Value>,
+    result: Option<serde_json::Value>,
     path: Option<String>,
+    #[serde(alias = "filePath")]
     file_path: Option<String>,
+    #[serde(alias = "oldPath")]
     old_path: Option<String>,
+    #[serde(alias = "newPath")]
     new_path: Option<String>,
+    diff: Option<String>,
     query: Option<String>,
     status: Option<String>,
     changes: Option<serde_json::Value>,
     files: Option<serde_json::Value>,
     paths: Option<serde_json::Value>,
     edits: Option<serde_json::Value>,
+    items: Option<serde_json::Value>,
+    plan: Option<serde_json::Value>,
 }
 
 impl CodexLiteEvent {
@@ -16922,6 +17458,31 @@ impl CodexLiteEvent {
                 .or_else(|| self.params.as_ref().and_then(|p| p.item.as_ref())),
             _ => None,
         }
+    }
+
+    fn plan_patch(&self) -> Option<serde_json::Value> {
+        if matches!(self.kind(), Some("turn/plan/updated") | Some("turn.plan.updated")) {
+            let params = self.params.as_ref()?;
+            let plan = params.plan.as_ref().filter(|plan| plan.is_array())?;
+            return Some(serde_json::json!({
+                "id": format!("plan:{}", params.turn_id.as_deref().unwrap_or("current")),
+                "name": "update_plan", "status": "done", "provenance": "model-output",
+                "args": { "plan": plan, "explanation": params.explanation },
+            }));
+        }
+        if !matches!(self.kind(), Some("item.started") | Some("item.updated") | Some("item.completed")
+            | Some("item/started") | Some("item/updated") | Some("item/completed")) {
+            return None;
+        }
+        let item = self.item.as_ref().or_else(|| self.params.as_ref()?.item.as_ref())?;
+        if !matches!(item.item_type.as_deref(), Some("todo_list") | Some("todoList") | Some("plan")) {
+            return None;
+        }
+        let plan = item.plan.as_ref().or(item.items.as_ref()).filter(|plan| plan.is_array())?;
+        Some(serde_json::json!({
+            "id": format!("plan:{}", item.id.as_deref().unwrap_or("current")),
+            "name": "update_plan", "status": "done", "provenance": "model-output", "args": { "plan": plan },
+        }))
     }
 
     fn is_turn_progress(&self) -> bool {
@@ -17060,12 +17621,16 @@ fn codex_tool_args(item: &CodexLiteItem) -> Option<serde_json::Value> {
     insert_codex_arg_string(&mut map, "type", &item.item_type);
     insert_codex_arg_string(&mut map, "command", &item.command);
     insert_codex_arg_string(&mut map, "name", &item.name);
+    insert_codex_arg_string(&mut map, "tool", &item.tool);
+    insert_codex_arg_string(&mut map, "server", &item.server);
+    insert_codex_arg_value(&mut map, "arguments", &item.arguments);
     insert_codex_arg_string(&mut map, "path", &item.path);
     insert_codex_arg_string(&mut map, "file_path", &item.file_path);
     insert_codex_arg_string(&mut map, "old_path", &item.old_path);
     insert_codex_arg_string(&mut map, "new_path", &item.new_path);
     insert_codex_arg_string(&mut map, "query", &item.query);
     insert_codex_arg_string(&mut map, "status", &item.status);
+    insert_codex_arg_string(&mut map, "diff", &item.diff);
     insert_codex_arg_value(&mut map, "changes", &item.changes);
     insert_codex_arg_value(&mut map, "files", &item.files);
     insert_codex_arg_value(&mut map, "paths", &item.paths);
@@ -17092,17 +17657,99 @@ fn codex_tool_patch(item: &CodexLiteItem, fallback_id: String) -> Option<serde_j
             let status = status.to_ascii_lowercase();
             status.contains("error") || status.contains("fail")
         })
-        .unwrap_or(false);
+        .unwrap_or(false)
+        || item.exit_code.flatten().is_some_and(|code| code != 0);
     let mut patch = serde_json::json!({
         "id": item.id.clone().unwrap_or(fallback_id),
-        "name": item_type,
+        "name": item.name.as_deref().unwrap_or(item_type),
         "subject": codex_tool_subject(item),
+        // `done` is a UI terminal state, not a successful native verdict.
         "status": if is_error { "error" } else { "done" },
+        "evidenceStatus": if is_error { "error" }
+            else if item.exit_code.flatten() == Some(0) || item.status.as_deref().is_some_and(codex_status_success) { "success" }
+            else { "unknown" },
         "result": result,
         "truncated": truncated,
     });
     if let Some(args) = codex_tool_args(item) {
         patch["args"] = args;
+    }
+    if let Some(parent) = item.parent_id.as_deref() {
+        patch["parentId"] = parent.into();
+    }
+    if let Some(code) = item.exit_code {
+        patch["exitCode"] = serde_json::json!(code);
+    }
+    Some(patch)
+}
+
+fn codex_native_tool_patch<S: FnMut(&str, serde_json::Value)>(
+    run_id: &str,
+    event: &CodexLiteEvent,
+    tool_starts: &mut HashMap<String, NativeToolStart>,
+    sink: &mut S,
+) -> Option<serde_json::Value> {
+    let phase = match event.kind()? {
+        "item.started" | "item/started" => "start",
+        "item.completed" | "item/completed" => "end",
+        _ => return None,
+    };
+    let item = event.item.as_ref().or_else(|| event.params.as_ref()?.item.as_ref())?;
+    let kind = item.item_type.as_deref()?;
+    // A completed assistant/todo/plan is not a native tool result.
+    if !matches!(kind, "command_execution" | "commandExecution" | "file_change" | "fileChange"
+        | "mcp_tool_call" | "mcpToolCall" | "web_search" | "webSearch" | "dynamic_tool_call" | "dynamicToolCall") {
+        return None;
+    }
+    let id = item.id.as_deref().filter(|id| !id.is_empty())?;
+    let start = if phase == "end" { tool_starts.remove(id) } else { None };
+    let name = item.name.as_deref().filter(|name| !name.is_empty())
+        .or_else(|| item.tool.as_deref().filter(|name| !name.is_empty()))
+        .or_else(|| start.as_ref().map(|start| start.name.as_str())).unwrap_or(kind);
+    let parent = item.parent_id.as_deref()
+        .or_else(|| event.params.as_ref().and_then(|params| params.parent_id.as_deref()))
+        .or(event.parent_id.as_deref())
+        .or_else(|| start.as_ref().and_then(|start| start.parent_id.as_deref()));
+    let raw = item.output.clone().or_else(|| item.text.clone()).or_else(|| {
+        item.result.as_ref().map(|result| {
+            // Structured MCP results must not bypass the native minimizer or
+            // require serializing an unbounded result before clipping.
+            let mut budget = NATIVE_TOOL_RESULT_MAX_BYTES;
+            native_tool_redact_value(result, &mut budget, 0).to_string()
+        })
+    }).unwrap_or_default();
+    let exit = item.exit_code.map(serde_json::Value::from);
+    let reported_status = native_tool_status(None, item.status.as_deref(), exit.as_ref());
+    let status = if phase == "start"
+        || (matches!(kind, "command_execution" | "commandExecution") && item.exit_code.flatten().is_none() && reported_status == "success") {
+        // Command lifecycle completion is not a process success verdict.
+        "unknown"
+    } else { reported_status };
+    let mut evidence = serde_json::json!({
+        "runId": run_id, "toolCallId": id, "toolName": name, "phase": phase, "status": status,
+    });
+    if let Some(parent) = parent { evidence["parentId"] = parent.into(); }
+    if let Some(args) = start.as_ref().and_then(|start| start.args.clone()).or_else(|| codex_tool_args(item)) {
+        evidence["args"] = args;
+    }
+    if phase == "end" { evidence["result"] = raw.into(); }
+    if let Some(exit) = exit { evidence["exitCode"] = exit; }
+    // Independent evidence emission precedes codex_tool_patch's UI clamp.
+    emit_native_tool_event(sink, evidence);
+    let mut patch = codex_tool_patch(item, id.to_string())?;
+    patch["name"] = name.into();
+    patch["status"] = if phase == "start" { "running" } else if status == "error" { "error" } else { "done" }.into();
+    patch["evidenceStatus"] = status.into();
+    patch["provenance"] = "native-tool".into();
+    if let Some(parent) = parent { patch["parentId"] = parent.into(); }
+    if let Some(start) = start.as_ref() {
+        patch["durationMs"] = (start.started_at.elapsed().as_millis() as u64).into();
+    }
+    if phase == "start" {
+        tool_starts.insert(id.to_string(), NativeToolStart {
+            started_at: std::time::Instant::now(), name: name.to_string(), parent_id: parent.map(str::to_string),
+            args: codex_tool_args(item).map(|args| native_tool_safe_args(&args)),
+        });
     }
     Some(patch)
 }
@@ -17178,6 +17825,7 @@ fn remove_codex_sidecar(path: &Option<PathBuf>) {
 /// Passing those through to Codex would fail, so only forward explicit non-
 #[tauri::command]
 fn cancel_ai_cli(run_id: String) -> Result<(), String> {
+    skills::native_launch::cancel_native_cli(&run_id);
     // Kill all processes in the job (including orphaned grandchildren)
     // BEFORE the taskkill /T fallback, so orphans that `taskkill /T`
     // can't see are still reaped.
@@ -17209,23 +17857,19 @@ fn ai_cli_steer_supported(
     // Same self-heal as `ai_cli`: resolve a bare command name against the live
     // filesystem so capability probes see a freshly installed CLI.
     let binary = cli_runtime::resolve_launch_binary(&binary).unwrap_or(binary);
-    match cli_runtime::adapter_protocol(&adapter) {
-        "codex" => {
-            Ok(permission.as_deref() != Some("ask")
-                && codex_cli_supports_app_server(&binary, &shell))
-        }
-        "claude" => {
-            repair_claude_binary();
-            Ok(claude_cli_supports_stream_input(&binary, &shell))
-        }
-        // zcode steers by writing an extra `session/send` on the live app-server
-        // session — only possible when the bundled runtime entry resolves (same
-        // gate `ai_cli` uses to pick the app-server transport over `--prompt
-        // --json`). No support probing of the CLI itself: the capability is a
-        // property of the vendored runtime layout, which UGS ships.
-        "zcode" => Ok(cli_runtime::resolve_zcode_runtime_entry(&binary).is_some()),
-        _ => Ok(false),
+    let protocol = cli_runtime::adapter_protocol(&adapter);
+    // Same self-heal the launch path performs, and it must run BEFORE the probe:
+    // `ai_cli` repairs the binary and then decides the transport from it, so
+    // answering the UI from a file the launch path is about to replace is a
+    // second way to advertise a steer channel that will not exist.
+    if protocol == "claude" {
+        repair_claude_binary();
     }
+    // One shared decision with `ai_cli` — see `ai_cli_steer_channel`. Codex App
+    // Server, Claude stream-json stdin and the zcode app-server session are the
+    // only transports with a real in-turn channel; everything else is `None`.
+    let channel = ai_cli_steer_channel(&protocol, &binary, permission.as_deref(), &shell);
+    Ok(channel != AiCliSteerChannel::None)
 }
 
 fn write_codex_app_server_message(
@@ -17667,6 +18311,41 @@ async fn ai_cli(
     timeout_seconds: Option<u64>,
     idle_timeout_seconds: Option<u64>,
     run_id: String,
+    skill_tools: Option<skills::native_cli::NativeCliSkillToolsRequest>,
+    session_id: Option<String>,
+    resume: Option<bool>,
+    language_directive: Option<String>,
+    shell: Option<ShellSpec>,
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+) -> Result<AiCliResult, String> {
+    let native_skill = match skill_tools {
+        Some(request) if request.enabled && request.mode != skills::LearningMode::Off => {
+            require_skill_app(&window)?;
+            Some((Arc::clone(skill_desktop_host()?), request))
+        }
+        _ => None,
+    };
+    ai_cli_runtime(
+        prompt, adapter, cli_command, model, cwd, extra_workspace_paths, permission,
+        env_vars, timeout_seconds, idle_timeout_seconds, run_id, native_skill,
+        session_id, resume, language_directive, shell, app,
+    ).await
+}
+
+async fn ai_cli_runtime(
+    prompt: String,
+    adapter: String,
+    cli_command: Option<String>,
+    model: Option<String>,
+    cwd: Option<String>,
+    extra_workspace_paths: Option<Vec<String>>,
+    permission: Option<String>,
+    env_vars: Option<HashMap<String, String>>,
+    timeout_seconds: Option<u64>,
+    idle_timeout_seconds: Option<u64>,
+    run_id: String,
+    native_skill: Option<(Arc<skills::SkillDesktopHost>, skills::native_cli::NativeCliSkillToolsRequest)>,
     // Optional Claude session continuity (claude only): when `session_id` is set
     // and `resume` is false the run *creates* that session (`--session-id`); when
     // `resume` is true it *continues* it (`--resume`), inheriting the prior
@@ -17683,6 +18362,12 @@ async fn ai_cli(
     shell: Option<ShellSpec>,
     app: tauri::AppHandle,
 ) -> Result<AiCliResult, String> {
+    // Keep the request owner alive through worker teardown, including no-PID launch errors.
+    let native_owner = native_skill.as_ref()
+        .filter(|(_, request)| request.enabled && request.mode != skills::LearningMode::Off
+            && cli_runtime::adapter_protocol(&adapter) == "claude")
+        .map(|_| skills::native_launch::NativeSkillCliOwner::register(&run_id))
+        .transpose()?;
     tauri::async_runtime::spawn_blocking(move || -> Result<AiCliResult, String> {
         let env_vars = normalize_spawn_env(env_vars);
         let progress_model_hint = gateway_progress_model_hint(env_vars.as_ref());
@@ -17721,13 +18406,38 @@ async fn ai_cli(
             .filter(|s| !s.is_empty())
             .unwrap_or_default()
             .to_string();
-        let binary = match cli_command
+        // dsh self-heal: npm updates to @deepseek-ai/dsh sometimes delete the
+        // `%APPDATA%\npm\dsh.cmd` shim while leaving the package body intact.
+        // If the stored cli_command is a stale shim path that no longer exists,
+        // fall back to the package's `lib/bin.js` (spawned via node below).
+        let binary = if cli_command
             .as_deref()
-            .map(cli_runtime::normalize_cli_command_override)
-            .transpose()?
+            .map(|s| {
+                let lower = s.to_ascii_lowercase();
+                lower.contains("dsh") && (lower.ends_with(".cmd") || lower.ends_with(".bat"))
+            })
+            .unwrap_or(false)
+            && !std::path::Path::new(cli_command.as_deref().unwrap()).exists()
         {
-            Some(binary) => binary,
-            None => cli_runtime::adapter_binary(&adapter).to_string(),
+            if let Some(entry) = cli_runtime::resolve_dsh_node_entry("dsh") {
+                entry.to_string_lossy().to_string()
+            } else {
+                // Package body also missing: surface the original error.
+                cli_command
+                    .as_deref()
+                    .map(cli_runtime::normalize_cli_command_override)
+                    .transpose()?
+                    .unwrap_or_else(|| cli_runtime::adapter_binary(&adapter).to_string())
+            }
+        } else {
+            match cli_command
+                .as_deref()
+                .map(cli_runtime::normalize_cli_command_override)
+                .transpose()?
+            {
+                Some(binary) => binary,
+                None => cli_runtime::adapter_binary(&adapter).to_string(),
+            }
         };
         // Self-heal for a CLI installed after app start: the process PATH is
         // frozen at startup, so a bare command name is re-resolved against the
@@ -17745,15 +18455,21 @@ async fn ai_cli(
         let is_dsh = protocol == "deepseek-harness";
         let is_zcode = protocol == "zcode";
         let is_grok = protocol == "grok";
-        let claude_stream_input =
-            is_claude && claude_cli_supports_stream_input(&binary, &shell);
-        // App Server approval callbacks need a live UI reviewer. Keep the
-        // existing `codex exec` path for ask-each-time mode until that callback
-        // surface is wired; full/read-only turns can steer safely today.
-        let codex_app_server = is_codex
-            && std::env::var("UGS_CODEX_APP_SERVER").ok().as_deref() == Some("1")
-            && permission.as_deref() != Some("ask")
-            && codex_cli_supports_app_server(&binary, &shell);
+        // Self-heal a claude binary that an interrupted auto-update corrupted,
+        // BEFORE the steer-channel probe below: `ai_cli_steer_supported` repairs
+        // first as well, so both sides must read the same file.
+        if is_claude {
+            repair_claude_binary();
+        }
+        // Single source of truth for this run's in-turn steer channel — the same
+        // call `ai_cli_steer_supported` makes when the UI asks whether it may
+        // offer ⚡ 插话. Deriving both transports from one answer, instead of
+        // re-testing each capability here, is what keeps the ⚡ action and the
+        // running process in agreement.
+        let steer_channel =
+            ai_cli_steer_channel(&protocol, &binary, permission.as_deref(), &shell);
+        let claude_stream_input = steer_channel == AiCliSteerChannel::ClaudeStreamInput;
+        let codex_app_server = steer_channel == AiCliSteerChannel::CodexAppServer;
         let codex_last_message_path = if is_codex && !codex_app_server {
             Some(temp_output_path_for_cwd(
                 cwd.as_deref(),
@@ -17764,11 +18480,6 @@ async fn ai_cli(
             None
         };
 
-        // Self-heal a claude binary that an interrupted auto-update corrupted.
-        if protocol == "claude" {
-            repair_claude_binary();
-        }
-
         // Collect the program arguments first so the whole invocation can be
         // optionally wrapped in a launch shell (see build_launch_command). Env
         // vars and the working directory are applied to the final (outer)
@@ -17777,6 +18488,7 @@ async fn ai_cli(
         let mut workdir: Option<std::path::PathBuf> = None;
         let mut disable_autoupdater = false;
         let mut temp_files: Vec<TempFileGuard> = Vec::new();
+        let mut native_scope: Option<Arc<skills::native_launch::NativeSkillCliScope>> = None;
         let mut gemini_system_settings_path: Option<String> = None;
         // When set, dsh is launched as `node <bin.js> <args>` (bypassing the
         // `.cmd` shim's cmd.exe command-line length cap). See the is_dsh branch.
@@ -18287,6 +18999,10 @@ async fn ai_cli(
             // when the vendor bundle isn't in the expected npm layout.
             if let Some(entry) = cli_runtime::resolve_zcode_runtime_entry(&binary) {
                 zcode_node_entry = Some(entry.to_string_lossy().to_string());
+                // Keep this in sync with `ai_cli_steer_channel`, which answers
+                // the UI probe from the very same `resolve_zcode_runtime_entry`
+                // lookup — that is what lets the zcode ⚡ action and this
+                // transport agree by construction.
                 zcode_app_server = true;
                 zcode_task = Some(task.clone());
                 args.push("app-server".into());
@@ -18374,7 +19090,25 @@ async fn ai_cli(
             // global/engine UE MCP servers cannot compete with the preferred one.
             // With no `--mcp-config`, `--strict-mcp-config` means "none", so that
             // flag remains the explicit-disable path below.
-            if mcp_enabled() {
+            if let Some(owner) = native_owner.as_ref() {
+                owner.check_active()?;
+                let (host, request) = native_skill.as_ref().ok_or("SKILL_NATIVE_HOST_REQUIRED")?;
+                let settings = mcp_enabled().then(||
+                    skills::native_launch::NativeSkillCliScope::project_settings(host, cwd.as_deref())
+                ).flatten();
+                let strict = !mcp_enabled() || settings.as_ref()
+                    .is_some_and(project_mcp_settings_prefers_unreal_mcp);
+                // Independent authority budget: ordinary CLI timeout=0 must never grant an unbounded bridge.
+                let scope = Arc::new(skills::native_launch::NativeSkillCliScope::start(
+                    Arc::clone(host), request.clone(), &run_id, cwd.as_deref(),
+                    &skills::native_launch::NativeSkillCliScope::private_scratch(host),
+                    settings, 256, std::time::Duration::from_secs(600),
+                )?);
+                scope.append_claude_args(&mut args);
+                if strict { args.push("--strict-mcp-config".into()); }
+                owner.attach(Arc::clone(&scope))?;
+                native_scope = Some(scope);
+            } else if mcp_enabled() {
                 if let Some(project_mcp_settings) = project_mcp_settings_json(cwd.as_deref()) {
                     let prefer_unreal_mcp =
                         project_mcp_settings_prefers_unreal_mcp(&project_mcp_settings);
@@ -18568,6 +19302,14 @@ async fn ai_cli(
         if let Some(root) = dsh_sessions_root.as_deref() {
             cmd.env("UGS_DSH_SESSIONS", root);
         }
+        if is_dsh {
+            // dsh 的部署级权限开关：base profile 的 sandbox-policy.mode 与
+            // approval.policy 都读 DSH_PERMISSION_MODE（见 dsh-base 的
+            // cordis.patch.yml）。不设时 dsh 永远默认 workspace-write + ask，
+            // 这正是 composer 选了「完全访问」仍弹申请的根因。映射与 codex
+            // 分支一致：full → 完全放行，readonly → 只读，ask → 工作区写入+询问。
+            cmd.env("DSH_PERMISSION_MODE", dsh_log::dsh_permission_mode(permission.as_deref()));
+        }
 
         // Snapshot the dsh session root BEFORE spawn so the live-progress
         // tracer can tell this run's brand-new session directory apart from
@@ -18580,6 +19322,9 @@ async fn ai_cli(
             None
         };
 
+        #[cfg(test)]
+        skills::native_launch::test_checkpoint(&run_id, "before-spawn");
+        if let Some(owner) = native_owner.as_ref() { owner.check_active()?; }
         let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -18588,13 +19333,26 @@ async fn ai_cli(
             .map_err(|e| {
                 format!("无法启动 CLI \"{binary}\"：请确认它已安装并在 PATH 中。({e})")
             })?;
+        // Publish PID immediately; an external cancel cannot miss capability-probe/startup work.
+        register_ai_cli(&run_id, child.id());
         // Windows: pin the CLI into a KILL_ON_JOB_CLOSE job so any bash/grep/
         // find/rg it spawns are reaped by the kernel even if UGS crashes or the
         // normal `terminate_child_tree` path is skipped. No-op elsewhere.
         if let Some(job) = assign_child_to_kill_on_close_job(&child) {
             register_ai_cli_job(&run_id, job);
         }
-        register_ai_cli(&run_id, child.id());
+        #[cfg(test)]
+        skills::native_launch::test_checkpoint(&run_id, "after-spawn");
+        if let Some(owner) = native_owner.as_ref() {
+            if let Err(error) = owner.check_active() {
+                // Dispatcher revocation precedes process-tree termination, including the spawn race.
+                skills::native_launch::cancel_native_cli(&run_id);
+                terminate_ai_cli_tree(&mut child, &run_id);
+                take_ai_cli_cancelled(&run_id);
+                unregister_ai_cli(&run_id);
+                return Err(error);
+            }
+        }
         let last_activity = Arc::new(Mutex::new(std::time::Instant::now()));
         // Codex app-server may print repetitive diagnostics on stderr while a
         // turn makes no real progress. Keep protocol progress separate so log
@@ -18939,6 +19697,10 @@ async fn ai_cli(
         let stdout = child.stdout.take();
         let app2 = app.clone();
         let run2 = run_id.clone();
+        let native_scope_reader = native_scope.clone();
+        let native_run2 = native_scope.as_ref()
+            .map(|scope| scope.invocation().execution_run_id().to_owned())
+            .unwrap_or_else(|| run_id.clone());
         let parse_codex = is_codex;
         let parse_gemini = is_gemini;
         let parse_kimi = is_kimi;
@@ -19069,7 +19831,9 @@ async fn ai_cli(
             None
         };
         let partial_streaming = partial_enabled();
-        let out_handle = std::thread::spawn(move || -> String {
+        let stdout_read_error = Arc::new(Mutex::new(None::<String>));
+        let stdout_read_error_reader = Arc::clone(&stdout_read_error);
+        let out_handle = spawn_ai_cli_stdout_reader(Arc::clone(&stdout_read_error), move || -> String {
             let mut result = String::new();
             let mut acc = String::new();
             // Token-level partial deltas (`stream_event` content_block_delta) are
@@ -19093,8 +19857,20 @@ async fn ai_cli(
             // events). Both events carry the same message, so dedupe here —
             // only the first copy is pushed into the streamed output.
             let mut codex_last_error: Option<String> = None;
-            // tool_use id → start time, so a tool_result can report its duration.
-            let mut tool_starts: HashMap<String, std::time::Instant> = HashMap::new();
+            // Native id → timing + identity; completion records omit names/parents.
+            let mut tool_starts: HashMap<String, NativeToolStart> = HashMap::new();
+            let mut native_tool_sink = |event: &str, mut payload: serde_json::Value| {
+                #[cfg(test)]
+                if payload.get("phase").and_then(serde_json::Value::as_str) == Some("end") {
+                    skills::native_launch::test_checkpoint(&run2, "before-native-end");
+                }
+                if let Some(scope) = native_scope_reader.as_ref() {
+                    // Authentic parser events enter host authority before any UI consumer.
+                    if scope.invocation().observe_native_event(&mut payload).is_err() { return; }
+                    payload["requestRunId"] = run2.clone().into();
+                }
+                let _ = app2.emit(event, payload);
+            };
             let mut init_done = false;
             // Surface the `requesting` status once so the gap between session
             // init and the first token isn't filled only by "still running"
@@ -19110,7 +19886,12 @@ async fn ai_cli(
                     match reader.read_line(&mut line) {
                         Ok(0) => break,
                         Ok(_) => {}
-                        Err(_) => break,
+                        Err(error) => {
+                            if let Ok(mut slot) = stdout_read_error_reader.lock() {
+                                *slot = Some(format!("stdout 读取失败: {error}"));
+                            }
+                            break;
+                        }
                     }
                     let line = line.trim_end_matches(['\r', '\n']);
                     touch_activity(&stdout_activity);
@@ -19390,6 +20171,13 @@ async fn ai_cli(
                         }
                         continue;
                     }
+                    if let Ok(raw) = serde_json::from_str::<serde_json::Value>(&line) {
+                        if let Some(patch) = context_compression_patch(&raw) {
+                            touch_activity(&meaningful_activity_reader);
+                            progress.emit_now(&encode_tool_patch(&patch));
+                            continue;
+                        }
+                    }
                     if parse_codex {
                         let event: CodexLiteEvent = match serde_json::from_str(&line) {
                             Ok(event) => event,
@@ -19462,9 +20250,24 @@ async fn ai_cli(
                                 }
                             }
                         }
+                        if let Some(patch) = event.plan_patch() {
+                            codex_first_event_seen_reader.store(true, Ordering::Relaxed);
+                            received_content_reader.store(true, Ordering::Relaxed);
+                            touch_activity(&meaningful_activity_reader);
+                            progress.emit_now(&encode_tool_patch(&patch));
+                            continue;
+                        }
                         if event.is_turn_progress() {
                             codex_first_event_seen_reader.store(true, Ordering::Relaxed);
                             touch_activity(&meaningful_activity_reader);
+                        }
+                        if let Some(patch) = codex_native_tool_patch(
+                            &run2, &event, &mut tool_starts, &mut native_tool_sink,
+                        ) {
+                            received_content_reader.store(true, Ordering::Relaxed);
+                            emitted_tool_use_reader.store(true, Ordering::Relaxed);
+                            progress.emit_now(&encode_tool_patch(&patch));
+                            continue;
                         }
                         match event.kind() {
                             Some("thread/started") => {
@@ -19624,7 +20427,12 @@ async fn ai_cli(
                                         .and_then(|value| value.as_str())
                                         .unwrap_or("")
                                         .to_string(),
-                                    std::time::Instant::now(),
+                                    NativeToolStart {
+                                        started_at: std::time::Instant::now(),
+                                        name: patch["name"].as_str().unwrap_or("tool").to_string(),
+                                        parent_id: item.parent_id.clone(),
+                                        args: None,
+                                    },
                                 );
                                 progress.emit_now(&encode_tool_patch(&patch));
                             }
@@ -19665,72 +20473,12 @@ async fn ai_cli(
                                     }
                                 }
                             }
-                            Some("tool_use") => {
-                                received_content_reader.store(true, Ordering::Relaxed);
-                                emitted_tool_use_reader.store(true, Ordering::Relaxed);
-                                let name = v
-                                    .get("tool_name")
-                                    .and_then(|value| value.as_str())
-                                    .unwrap_or("tool");
-                                let id = v
-                                    .get("tool_id")
-                                    .and_then(|value| value.as_str())
-                                    .map(|s| s.to_string())
-                                    .unwrap_or_else(|| format!("t{}", tool_starts.len()));
-                                let input = v
-                                    .get("parameters")
-                                    .cloned()
-                                    .unwrap_or(serde_json::Value::Null);
-                                tool_starts
-                                    .insert(id.clone(), std::time::Instant::now());
-                                let mut patch = serde_json::json!({
-                                    "id": id,
-                                    "name": name,
-                                    "subject": tool_subject(&input),
-                                    "status": "running",
-                                });
-                                if !input.is_null() {
-                                    patch["args"] = input;
-                                }
-                                progress.emit_now(&encode_tool_patch(&patch));
-                            }
-                            Some("tool_result") => {
-                                let id = v
-                                    .get("tool_id")
-                                    .and_then(|value| value.as_str())
-                                    .unwrap_or("");
-                                if !id.is_empty() {
-                                    let dur_ms = tool_starts
-                                        .remove(id)
-                                        .map(|start| start.elapsed().as_millis() as u64);
-                                    let is_error = v
-                                        .get("status")
-                                        .and_then(|value| value.as_str())
-                                        .map(|status| status != "success")
-                                        .unwrap_or(false);
-                                    let result_body = v
-                                        .get("output")
-                                        .and_then(|value| value.as_str())
-                                        .map(|value| value.to_string())
-                                        .or_else(|| {
-                                            v.pointer("/error/message")
-                                                .and_then(|value| value.as_str())
-                                                .map(|value| value.to_string())
-                                        })
-                                        .unwrap_or_default();
-                                    let truncated =
-                                        result_body.chars().count() > TOOL_RESULT_CLAMP;
-                                    let result_text: String = result_body
-                                        .chars()
-                                        .take(TOOL_RESULT_CLAMP)
-                                        .collect();
-                                    let patch = serde_json::json!({
-                                        "id": id,
-                                        "status": if is_error { "error" } else { "done" },
-                                        "durationMs": dur_ms,
-                                        "result": result_text,
-                                        "truncated": truncated,
-                                    });
+                            Some("tool_use") | Some("tool_result") => {
+                                if let Some(patch) = gemini_tool_patch(
+                                    &run2, &v, &mut tool_starts, &mut native_tool_sink,
+                                ) {
+                                    received_content_reader.store(true, Ordering::Relaxed);
+                                    emitted_tool_use_reader.store(true, Ordering::Relaxed);
                                     progress.emit_now(&encode_tool_patch(&patch));
                                 }
                             }
@@ -19863,41 +20611,13 @@ async fn ai_cli(
                                         Some("tool_use") => {
                                             received_content_reader.store(true, Ordering::Relaxed);
                                             emitted_tool_use_reader.store(true, Ordering::Relaxed);
-                                            let name = block
-                                                .get("name")
-                                                .and_then(|t| t.as_str())
-                                                .unwrap_or("tool");
-                                            let input = block
-                                                .get("input")
-                                                .cloned()
-                                                .unwrap_or(serde_json::Value::Null);
-                                            let id = block
-                                                .get("id")
-                                                .and_then(|t| t.as_str())
-                                                .map(|s| s.to_string())
-                                                .unwrap_or_else(|| {
-                                                    format!("t{}", tool_starts.len())
-                                                });
-                                            tool_starts.insert(
-                                                id.clone(),
-                                                std::time::Instant::now(),
+                                            let patch = claude_tool_start_patch(
+                                                &native_run2, &v, block, &mut tool_starts, &mut native_tool_sink,
                                             );
                                             if prev_kind == "thinking" {
                                                 progress.emit_now("</think>");
                                             }
                                             prev_kind = "";
-                                            // Structured sentinel for the rich card.
-                                            // Omit `args` when there is no input
-                                            // so the card shows no empty JSON panel.
-                                            let mut patch = serde_json::json!({
-                                                "id": id,
-                                                "name": name,
-                                                "subject": tool_subject(&input),
-                                                "status": "running",
-                                            });
-                                            if !input.is_null() {
-                                                patch["args"] = input;
-                                            }
                                             progress.emit_now(&encode_tool_patch(&patch));
                                         }
                                         _ => {}
@@ -19922,33 +20642,13 @@ async fn ai_cli(
                                     {
                                         continue;
                                     }
-                                    let id = block
-                                        .get("tool_use_id")
-                                        .and_then(|t| t.as_str())
-                                        .unwrap_or("");
-                                    let dur_ms = tool_starts
-                                        .remove(id)
-                                        .map(|start| start.elapsed().as_millis() as u64);
-                                    let is_error = block
-                                        .get("is_error")
-                                        .and_then(|t| t.as_bool())
-                                        .unwrap_or(false);
-                                    let raw = tool_result_raw(block);
-                                    let truncated = raw.chars().count() > TOOL_RESULT_CLAMP;
-                                    let result_body: String =
-                                        raw.chars().take(TOOL_RESULT_CLAMP).collect();
-                                    if prev_kind == "thinking" {
-                                        progress.emit_now("</think>");
-                                    }
-                                    prev_kind = "";
-                                    if !id.is_empty() {
-                                        let patch = serde_json::json!({
-                                            "id": id,
-                                            "status": if is_error { "error" } else { "done" },
-                                            "durationMs": dur_ms,
-                                            "result": result_body,
-                                            "truncated": truncated,
-                                        });
+                                    if let Some(patch) = claude_tool_result_patch(
+                                        &native_run2, &v, block, &mut tool_starts, &mut native_tool_sink,
+                                    ) {
+                                        if prev_kind == "thinking" {
+                                            progress.emit_now("</think>");
+                                        }
+                                        prev_kind = "";
                                         progress.emit_now(&encode_tool_patch(&patch));
                                     }
                                 }
@@ -20087,6 +20787,12 @@ async fn ai_cli(
         // child (e.g. an MCP server that never exits) can't stall the turn.
         let stream_complete_grace = std::time::Duration::from_secs(3);
         let mut stream_complete_at: Option<std::time::Instant> = None;
+        // EOF can slightly precede a one-shot CLI's process exit. Allow that
+        // short race, but never leave a persistent server alive without its
+        // only completion-event consumer until the (possibly disabled) idle
+        // deadline. Check terminal events above this guard on every poll.
+        let stdout_exit_grace = std::time::Duration::from_millis(500);
+        let mut stdout_exited_at: Option<std::time::Instant> = None;
         let wait_result = loop {
             let watchdog_activity = if is_codex {
                 &last_meaningful_activity
@@ -20099,6 +20805,7 @@ async fn ai_cli(
                     .ok()
                     .and_then(|current| current.clone())
                 {
+                    skills::native_launch::cancel_native_cli(&run_id);
                     terminate_ai_cli_tree(&mut child, &run_id);
                     break Err(error);
                 }
@@ -20114,6 +20821,7 @@ async fn ai_cli(
                                 )
                         });
                     if first_event_timed_out {
+                        skills::native_launch::cancel_native_cli(&run_id);
                         terminate_ai_cli_tree(&mut child, &run_id);
                         break Err(format!(
                             "Codex turn 已启动，但 {}s 内未收到模型或工具事件，已终止。",
@@ -20156,6 +20864,7 @@ async fn ai_cli(
                     .ok()
                     .and_then(|current| current.clone())
                 {
+                    skills::native_launch::cancel_native_cli(&run_id);
                     terminate_ai_cli_tree(&mut child, &run_id);
                     break Err(error);
                 }
@@ -20168,10 +20877,38 @@ async fn ai_cli(
                     // become orphans and keep burning CPU. Kill the whole tree
                     // so a finished turn never leaves stray search processes
                     // behind. This is a no-op if the tree is already gone.
+                    if !status.success()
+                        || claude_stream_error.lock().ok().is_some_and(|slot| slot.is_some())
+                        || stdout_read_error.lock().ok().is_some_and(|slot| slot.is_some())
+                    {
+                        skills::native_launch::cancel_native_cli(&run_id);
+                    }
+                    #[cfg(test)]
+                    skills::native_launch::test_checkpoint(&run_id, "before-exit-kill");
                     terminate_ai_cli_tree(&mut child, &run_id);
                     break Ok(WaitOutcome::Exited(status));
                 }
                 Ok(None) => {
+                    if out_handle.is_finished()
+                        && !stream_result_seen.load(Ordering::Relaxed)
+                    {
+                        let since = stdout_exited_at
+                            .get_or_insert_with(std::time::Instant::now);
+                        if since.elapsed() >= stdout_exit_grace {
+                            let error = format!(
+                                "CLI \"{binary}\" stdout 读取线程已退出，未收到完成事件，已终止。"
+                            );
+                            // Handshake writers poll these slots; wake them as
+                            // well so their join cannot add a startup timeout.
+                            set_codex_startup_error(&codex_startup_error, error.clone());
+                            set_codex_startup_error(&zcode_startup_error, error.clone());
+                            skills::native_launch::cancel_native_cli(&run_id);
+                            #[cfg(test)]
+                            skills::native_launch::test_checkpoint(&run_id, "before-error-kill");
+                            terminate_ai_cli_tree(&mut child, &run_id);
+                            break Err(error);
+                        }
+                    }
                     // Stream-json (claude/gemini) signalled its terminal result.
                     // Allow a short grace for a clean self-exit, then break early
                     // so a lingering child process can't stall the finished turn.
@@ -20179,16 +20916,25 @@ async fn ai_cli(
                         let since = stream_complete_at
                             .get_or_insert_with(std::time::Instant::now);
                         if since.elapsed() >= stream_complete_grace {
+                            if claude_stream_error.lock().ok().is_some_and(|slot| slot.is_some())
+                                || stdout_read_error.lock().ok().is_some_and(|slot| slot.is_some())
+                            {
+                                skills::native_launch::cancel_native_cli(&run_id);
+                            }
+                            #[cfg(test)]
+                            skills::native_launch::test_checkpoint(&run_id, "before-stream-kill");
                             terminate_ai_cli_tree(&mut child, &run_id);
                             break Ok(WaitOutcome::StreamCompleted);
                         }
                     }
                     if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+                        skills::native_launch::cancel_native_cli(&run_id);
                         terminate_ai_cli_tree(&mut child, &run_id);
                         break Err(format!("CLI \"{binary}\" 超时（{timeout_secs}s）已终止。"));
                     }
                     if let Some(idle) = idle_timeout {
                         if activity_elapsed(watchdog_activity) >= idle {
+                            skills::native_launch::cancel_native_cli(&run_id);
                             terminate_ai_cli_tree(&mut child, &run_id);
                             break Err(format!(
                                 "CLI \"{binary}\" 空转超过 {idle_timeout_secs}s 未产生输出，已终止。"
@@ -20230,6 +20976,7 @@ async fn ai_cli(
                     std::thread::sleep(std::time::Duration::from_millis(100));
                 }
                 Err(e) => {
+                    skills::native_launch::cancel_native_cli(&run_id);
                     terminate_ai_cli_tree(&mut child, &run_id);
                     break Err(format!("等待 CLI \"{binary}\" 失败: {e}"));
                 }
@@ -20237,52 +20984,22 @@ async fn ai_cli(
         };
 
         let _ = stdin_handle.join();
-        if is_codex {
-            let streamed_fallback = codex_streamed_output
-                .lock()
-                .map(|current| current.clone())
-                .unwrap_or_default();
-            let terminal_output = codex_last_message_path
-                .as_ref()
-                .and_then(|path| codex_sidecar_output(path))
-                .unwrap_or(streamed_fallback);
-            match &wait_result {
-                Ok(WaitOutcome::CodexTurnCompleted(status)) => {
-                    remove_codex_sidecar(&codex_last_message_path);
-                    let cancelled = take_ai_cli_cancelled(&run_id);
-                    unregister_ai_cli(&run_id);
-                    if cancelled {
-                        return Err(append_cli_error_context(
-                            format!("CLI \"{binary}\" 已由用户中断。"),
-                            &terminal_output,
-                            "",
-                        ));
-                    }
-                    if codex_status_success(status) {
-                        return Ok(ai_cli_result(terminal_output, &codex_usage));
-                    }
-                    return Err(format!(
-                        "CLI \"{binary}\" turn status {status}: {}",
-                        terminal_output.trim()
-                    ));
-                }
-                Ok(WaitOutcome::CodexLastMessageReady) => {
-                    remove_codex_sidecar(&codex_last_message_path);
-                    let cancelled = take_ai_cli_cancelled(&run_id);
-                    unregister_ai_cli(&run_id);
-                    if cancelled {
-                        return Err(append_cli_error_context(
-                            format!("CLI \"{binary}\" 已由用户中断。"),
-                            &terminal_output,
-                            "",
-                        ));
-                    }
-                    return Ok(ai_cli_result(terminal_output, &codex_usage));
-                }
-                _ => {}
-            }
-        }
+        #[cfg(test)]
+        skills::native_launch::test_checkpoint(&run_id, "before-worker-drain");
+        // Every transport drains its authentic parser and stderr before returning.
+        // Codex terminal status/sidecar readiness are outcomes, not a reader teardown shortcut.
         let streamed_output = out_handle.join().unwrap_or_default();
+        // A pipe read error may race a clean process exit. Received tool/text
+        // content is not terminal evidence; do not turn the read failure into
+        // a successful turn just because the launcher exited with code zero.
+        let wait_result = if wait_result.is_ok() && !stream_result_seen.load(Ordering::Relaxed) {
+            match stdout_read_error.lock().ok().and_then(|slot| slot.clone()) {
+                Some(error) => Err(format!("CLI \"{binary}\" {error}，未收到完成事件。")),
+                None => wait_result,
+            }
+        } else {
+            wait_result
+        };
         // Stop the dsh session-log tracer and drain its last batch so the final
         // progress (closing tool cards, trailing answer text) reaches the UI.
         if let Some(tracer) = dsh_tracer_handle {
@@ -20316,6 +21033,19 @@ async fn ai_cli(
                 &output,
                 &stderr,
             ));
+        }
+
+        // A failed terminal event stays failed even when it contains useful
+        // partial text or the process later exits zero. Text is not a success
+        // signal and must not mask the provider's authoritative result.
+        if wait_result.is_ok() {
+            if let Some(detail) = claude_stream_error.lock().ok().and_then(|slot| slot.clone()) {
+                return Err(append_cli_error_context(
+                    format!("CLI \"{binary}\" 本轮执行出错：{detail}"),
+                    &output,
+                    &stderr,
+                ));
+            }
         }
 
         match wait_result {
@@ -20462,7 +21192,44 @@ async fn ai_cli(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn context_compression_only_marks_native_completion() {
+        for event in [
+            serde_json::json!({"type": "system", "subtype": "compact_boundary"}),
+            serde_json::json!({"method": "thread/compacted", "params": {"threadId": "t"}}),
+            serde_json::json!({"type": "item.completed", "item": {"type": "context_compaction"}}),
+            serde_json::json!({"method": "item/completed", "params": {"item": {"type": "contextCompaction"}}}),
+        ] {
+            let patch = super::context_compression_patch(&event).unwrap();
+            assert_eq!(patch["name"], "ugs_context_compaction");
+            assert_eq!(patch["ephemeral"], true);
+        }
+        for event in [
+            serde_json::json!({"type": "system", "subtype": "status", "status": "compacting"}),
+            serde_json::json!({"type": "item.started", "item": {"type": "context_compaction"}}),
+            serde_json::json!({"type": "assistant", "text": "compact_boundary"}),
+        ] {
+            assert!(super::context_compression_patch(&event).is_none());
+        }
+    }
     use super::*;
+
+    #[test]
+    fn skills_owned_slash_scans_both_roots_and_refreshes_same_id_details() {
+        let f = skills::test_support::Fixture::new("owned-slash");
+        f.write("global/skills/global-rule/SKILL.md", &skills::test_support::skill("global-rule", "Keep global rules."));
+        f.write("project/.ultragamestudio/skills/project-rule/SKILL.md", &skills::test_support::skill("project-rule", "Keep project rules."));
+        f.write("global/skills/.state/transactions/hidden/SKILL.md", &skills::test_support::skill("hidden", "Ignore state."));
+        let mut entries=vec![]; let mut seen=HashSet::new();
+        append_owned_slash_entries(&f.global(),Some(&f.project()),&mut entries,&mut seen).unwrap();
+        assert_eq!(entries.len(),2);
+        assert_eq!(entries[0].name,"/project-rule"); assert_eq!(entries[1].name,"/global-rule");
+        let id=entries[0].id.clone();
+        f.write("project/.ultragamestudio/skills/project-rule/SKILL.md","---\nname: project-rule\ndescription: Use when updating project rules.\n---\n\nKeep original requirements.\n");
+        entries.clear();seen.clear();
+        append_owned_slash_entries(&f.global(),Some(&f.project()),&mut entries,&mut seen).unwrap();
+        assert_eq!(entries[0].id,id); assert_eq!(entries[0].detail["en-US"],"Use when updating project rules.");
+    }
 
     /// 1x1 透明 PNG。位图预览测试只需要一个真能被 `image` 解码的样本。
     const TINY_PNG: &[u8] = &[
@@ -20739,6 +21506,18 @@ mod tests {
         assert!(command_arg_strings(&cmd)
             .iter()
             .any(|arg| arg == "--version"));
+    }
+
+    #[test]
+    fn cli_version_probe_command_wraps_raw_js_entry_with_node() {
+        // Stale-shim fallback: the scan can hand us the package JS entry
+        // directly (`@deepseek-ai/dsh/lib/bin.js`) when npm lost the `.cmd`
+        // shim. It must be launched through `node`, never spawned as-is.
+        let entry =
+            r"C:\Users\me\AppData\Roaming\npm\node_modules\@deepseek-ai\dsh\lib\bin.js";
+        let cmd = cli_version_probe_command(entry);
+        assert_eq!(cmd.get_program().to_string_lossy(), "node");
+        assert_eq!(command_arg_strings(&cmd), vec![entry, "--version"]);
     }
 
     #[cfg(windows)]
@@ -21821,6 +22600,24 @@ mod tests {
     }
 
     #[test]
+    fn codex_native_plan_snapshots_reach_task_progress() {
+        let event: CodexLiteEvent = serde_json::from_str(r#"{
+          "method":"turn/plan/updated","params":{"turnId":"turn-1",
+            "plan":[{"step":"build","status":"inProgress"}],"explanation":"verify"}
+        }"#).unwrap();
+        let patch = event.plan_patch().unwrap();
+        assert_eq!(patch["id"], "plan:turn-1");
+        assert_eq!(patch["args"]["plan"][0]["status"], "inProgress");
+        for kind in ["item.started", "item.updated", "item.completed"] {
+            let event: CodexLiteEvent = serde_json::from_value(serde_json::json!({
+                "type": kind, "item": {"id":"todo", "type":"todo_list",
+                    "items":[{"text":"build","completed":false}]}
+            })).unwrap();
+            assert_eq!(event.plan_patch().unwrap()["args"]["plan"][0]["completed"], false);
+        }
+    }
+
+    #[test]
     fn parses_codex_type_events() {
         let item: CodexLiteEvent = serde_json::from_str(
             r#"{
@@ -21946,6 +22743,83 @@ mod tests {
             format!("{first}{second}"),
             "\n🔎 目标：分析原因。\n\n🛠 下一步：修复。\n"
         );
+    }
+
+    // The UI probe (`ai_cli_steer_supported`) and the transport selection
+    // (`ai_cli`) both read `ai_cli_steer_channel`, so they cannot disagree.
+    // They used to: the probe omitted the App Server switch the launch path
+    // required, so ⚡ 插话 was offered for a `codex exec` run that had no steer
+    // channel at all and the click died silently ("GPT 插话点击无效").
+    #[test]
+    fn ai_cli_steer_channel_matches_the_launch_transport() {
+        let no_shell: Option<ShellSpec> = None;
+        // A binary that cannot be spawned advertises no in-turn channel, for
+        // every adapter — the probe must fail closed.
+        for protocol in [
+            "codex",
+            "claude",
+            "zcode",
+            "gemini",
+            "kimi",
+            "grok",
+            "deepseek-harness",
+        ] {
+            assert_eq!(
+                ai_cli_steer_channel(protocol, "ugs-no-such-binary", Some("full"), &no_shell),
+                AiCliSteerChannel::None,
+                "{protocol}"
+            );
+        }
+        assert_eq!(
+            ai_cli_steer_channel("mystery", "codex", Some("full"), &no_shell),
+            AiCliSteerChannel::None
+        );
+    }
+
+    #[test]
+    fn codex_app_server_switch_defaults_on_with_an_opt_out() {
+        assert!(codex_app_server_env_enabled(None));
+        for value in ["1", "true", "TRUE", "yes", " on "] {
+            assert!(codex_app_server_env_enabled(Some(value)), "{value}");
+        }
+        for value in ["0", "false", "FALSE", "off", "no", " 0 ", " Off "] {
+            assert!(!codex_app_server_env_enabled(Some(value)), "{value}");
+        }
+    }
+
+    #[test]
+    fn codex_steer_gate_covers_env_approval_and_capability() {
+        // This predicate is what picks `app-server --stdio` over `exec`, and
+        // the UI probe reads the same value — so it is the one place the two
+        // sides could still drift.
+        let capable = || true;
+        assert!(codex_steer_supported(Some("full"), true, &capable));
+        assert!(codex_steer_supported(Some("readonly"), true, &capable));
+        assert!(codex_steer_supported(None, true, &capable));
+        // App Server approval callbacks have no UI reviewer yet -> one-shot.
+        assert!(!codex_steer_supported(Some("ask"), true, &capable));
+        // Opted out -> `codex exec`, and the UI hides the action.
+        assert!(!codex_steer_supported(Some("full"), false, &capable));
+        // CLI build without an `app-server --stdio` subcommand.
+        assert!(!codex_steer_supported(Some("full"), true, || false));
+    }
+
+    // `codex app-server --help` is a real spawn with a 5s timeout. It must stay
+    // behind the cheap gates, or opting out of App Server would still pay for
+    // the probe on every first turn.
+    #[test]
+    fn codex_steer_skips_the_probe_when_a_cheap_gate_already_decided() {
+        let calls = std::cell::Cell::new(0);
+        let counted = || {
+            calls.set(calls.get() + 1);
+            true
+        };
+        assert!(!codex_steer_supported(Some("full"), false, &counted));
+        assert_eq!(calls.get(), 0, "switch off must not probe app-server");
+        assert!(!codex_steer_supported(Some("ask"), true, &counted));
+        assert_eq!(calls.get(), 0, "ask mode must not probe app-server");
+        assert!(codex_steer_supported(Some("full"), true, &counted));
+        assert_eq!(calls.get(), 1);
     }
 
     #[test]
@@ -22119,6 +22993,519 @@ requires_openai_auth = true\n";
             "sss"
         );
         assert_eq!(arg, "model_providers.sss.env_key=\"UGS_CODEX_CHANNEL_KEY\"");
+    }
+
+    #[test]
+    fn native_tool_codex_preserves_command_identity_and_explicit_exit() {
+        let event: CodexLiteEvent = serde_json::from_value(serde_json::json!({
+            "type": "item.completed",
+            "item": {
+                "id": "cmd-original", "type": "command_execution", "name": "run_shell_command",
+                "parentId": "task-original", "status": "completed", "exit_code": 9,
+                "aggregated_output": "fixture command failed"
+            }
+        })).unwrap();
+        let patch = codex_tool_patch(event.completed_item().unwrap(), "fallback".into()).unwrap();
+        assert_eq!(patch["id"], "cmd-original");
+        assert_eq!(patch["name"], "run_shell_command");
+        assert_eq!(patch["parentId"], "task-original");
+        assert_eq!(patch["status"], "error");
+        assert_eq!(patch["exitCode"], 9);
+        assert_eq!(patch["result"], "fixture command failed");
+    }
+
+    #[test]
+    fn native_tool_completion_retains_sanitized_start_arguments() {
+        let mut tool_starts = HashMap::new();
+        let mut observed = Vec::new();
+        let mut sink = |_: &str, payload: serde_json::Value| observed.push(payload);
+        let start = serde_json::json!({"id":"call-original", "name":"Bash", "input":{
+            "command":"npm test", "env":{"API_KEY":"fixture-private-value"}
+        }});
+        claude_tool_start_patch("run-original", &serde_json::json!({}), &start, &mut tool_starts, &mut sink);
+        let end = serde_json::json!({"tool_use_id":"call-original", "is_error":false, "content":"fixture output"});
+        claude_tool_result_patch("run-original", &serde_json::json!({}), &end, &mut tool_starts, &mut sink).unwrap();
+        assert_eq!(observed[1]["args"]["command"], "npm test");
+        assert_eq!(observed[1]["args"]["env"], "[REDACTED]");
+        assert!(!serde_json::to_string(&observed).unwrap().contains("fixture-private-value"));
+    }
+
+    #[cfg(windows)]
+    fn stdio_fixture_binary() -> &'static std::path::PathBuf {
+        static BINARY: OnceLock<std::path::PathBuf> = OnceLock::new();
+        BINARY.get_or_init(|| {
+            let dir = preview_fixture_dir("cli-transport-binary");
+            let source = dir.join("fixture.rs");
+            let binary = dir.join("fixture-codex.exe");
+            std::fs::write(&source, include_str!("../tests/fixtures/stdio_cli.rs")).unwrap();
+            let compiled = new_spawn_command("rustc").arg("--edition=2021")
+                .arg(&source).arg("-o").arg(&binary).output().unwrap();
+            assert!(compiled.status.success(), "fixture must compile: {}",
+                String::from_utf8_lossy(&compiled.stderr));
+            binary
+        })
+    }
+
+    #[cfg(windows)]
+    fn assert_stdio_run_released(run_id: &str) {
+        assert!(!active_ai_cli_pids().lock().unwrap().contains_key(run_id));
+        assert!(!active_ai_cli_steers().lock().unwrap().contains_key(run_id));
+        assert!(!active_ai_cli_jobs().lock().unwrap().contains_key(run_id));
+        assert!(!active_ai_cli_visible_progress().lock().unwrap().contains_key(run_id));
+        assert!(!cancelled_ai_cli_ids().lock().unwrap().contains(run_id));
+    }
+
+    #[cfg(windows)]
+    fn run_stdio_fixture(mode: &str, adapter: &str, timeout: u64, idle: u64)
+        -> (Result<AiCliResult, String>, std::time::Duration, std::path::PathBuf)
+    {
+        let binary = stdio_fixture_binary();
+        let dir = preview_fixture_dir(mode);
+        let mut context = tauri::generate_context!();
+        context.config_mut().app.windows.clear();
+        let app = tauri::Builder::default().any_thread().build(context).unwrap();
+        let run_id = format!("fixture-disconnect-{mode}-{}", now_ms());
+        let env = HashMap::from([("UGS_TEST_STDOUT_MODE".into(), mode.into())]);
+        let started = std::time::Instant::now();
+        let result = tauri::async_runtime::block_on(ai_cli_runtime(
+            "fixture input".into(), adapter.into(), Some(binary.to_string_lossy().into_owned()),
+            None, Some(dir.to_string_lossy().into_owned()), None, Some("readonly".into()),
+            Some(env), Some(timeout), Some(idle), run_id.clone(), None, None, None, None, None,
+            app.handle().clone(),
+        ));
+        assert!(dir.join("transport-started").is_file(), "must launch the native fixture");
+        if adapter == "codex" && mode != "initial-eof" {
+            assert!(dir.join("turn-started").is_file(), "must reach the real turn handshake");
+        }
+        assert_stdio_run_released(&run_id);
+        (result, started.elapsed(), dir)
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ai_cli_closed_stdout_fails_without_waiting_for_idle_timeout() {
+        let (result, elapsed, dir) = run_stdio_fixture("eof", "codex", 60, 30);
+        let error = result.err().expect("missing terminal event must not be reported as success");
+        assert!(elapsed < std::time::Duration::from_secs(5),
+            "a dead stdout reader must fail promptly, not at the idle deadline: {error}");
+        assert!(error.contains("stdout 读取"), "surface the failed transport: {error}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ai_cli_stdout_read_error_does_not_become_success_on_exit_zero() {
+        let (result, _, dir) = run_stdio_fixture("invalid-exit", "codex", 60, 30);
+        let error = result.err().expect("read errors before terminal must survive a clean process exit");
+        assert!(error.contains("stdout 读取失败"), "preserve the actual read failure: {error}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ai_cli_stdout_eof_remains_bounded_when_both_timeouts_are_disabled() {
+        let (result, elapsed, dir) = run_stdio_fixture("eof", "codex", 0, 0);
+        assert!(elapsed < std::time::Duration::from_secs(5));
+        assert!(result.err().unwrap().contains("stdout 读取"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ai_cli_stdout_handshake_eof_wakes_the_writer_before_join() {
+        let (result, elapsed, dir) = run_stdio_fixture("initial-eof", "codex", 0, 0);
+        assert!(elapsed < std::time::Duration::from_secs(5), "writer must not wait for its startup deadline");
+        assert!(result.err().unwrap().contains("stdout 读取"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ai_cli_stdout_error_while_server_lingers_fails_promptly() {
+        let (result, elapsed, dir) = run_stdio_fixture("invalid-linger", "codex", 0, 0);
+        assert!(elapsed < std::time::Duration::from_secs(5));
+        assert!(result.err().unwrap().contains("stdout 读取"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ai_cli_stdout_eof_after_codex_terminal_preserves_unicode_completion() {
+        let (result, elapsed, dir) = run_stdio_fixture("complete", "codex", 0, 0);
+        assert!(elapsed < std::time::Duration::from_secs(5));
+        assert_eq!(result.unwrap().text, "fixture complete");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ai_cli_stdout_eof_after_stream_terminal_preserves_completion() {
+        let (result, elapsed, dir) = run_stdio_fixture("stream-complete", "fixture-json", 0, 0);
+        assert!(elapsed < std::time::Duration::from_secs(6));
+        assert_eq!(result.unwrap().text, "fixture complete");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ai_cli_stdout_eof_after_failed_terminal_stays_failed() {
+        let (result, _, dir) = run_stdio_fixture("stream-failed", "fixture-json", 0, 0);
+        assert!(result.err().unwrap().contains("fixture upstream failed"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ai_cli_stdout_eof_immediately_before_clean_one_shot_exit_is_not_a_failure() {
+        let (result, _, dir) = run_stdio_fixture("clean-exit", "fixture-json", 0, 0);
+        assert_eq!(result.unwrap().text, "fixture complete");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn ai_cli_stdout_reader_panic_is_reported_without_exposing_its_payload() {
+        let failure = Arc::new(Mutex::new(None::<String>));
+        let reader = spawn_ai_cli_stdout_reader(Arc::clone(&failure), || -> String {
+            panic!("fixture private payload must not enter the transport error");
+        });
+        assert!(reader.join().unwrap().is_empty());
+        assert_eq!(failure.lock().unwrap().as_deref(), Some("stdout 读取线程 panic"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ai_cli_stdout_cancelled_run_stays_cancelled_and_releases_only_its_registration() {
+        let binary = stdio_fixture_binary();
+        let dir = preview_fixture_dir("cli-cancel");
+        let run_id = format!("fixture-disconnect-cancel-{}", now_ms());
+        let other_run = format!("fixture-independent-{}", now_ms());
+        // A registration-only sentinel has no process attached and is never
+        // cancelled or passed to any kill API. It must remain untouched.
+        active_ai_cli_visible_progress().lock().unwrap()
+            .insert(other_run.clone(), std::time::Instant::now());
+        let mut context = tauri::generate_context!();
+        context.config_mut().app.windows.clear();
+        let app = tauri::Builder::default().any_thread().build(context).unwrap();
+        let cancel_id = run_id.clone();
+        let marker = dir.join("turn-started");
+        let canceller = std::thread::spawn(move || {
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !marker.is_file() && std::time::Instant::now() < until {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            assert!(marker.is_file(), "must cancel an actual running fixture turn");
+            cancel_ai_cli(cancel_id).unwrap();
+        });
+        let env = HashMap::from([("UGS_TEST_STDOUT_MODE".into(), "cancel".into())]);
+        let result = tauri::async_runtime::block_on(ai_cli_runtime(
+            "fixture input".into(), "codex".into(), Some(binary.to_string_lossy().into_owned()),
+            None, Some(dir.to_string_lossy().into_owned()), None, Some("readonly".into()),
+            Some(env), Some(0), Some(0), run_id.clone(), None, None, None, None, None,
+            app.handle().clone(),
+        ));
+        canceller.join().unwrap();
+        assert_stdio_run_released(&run_id);
+        assert!(active_ai_cli_visible_progress().lock().unwrap().remove(&other_run).is_some());
+        assert!(result.err().unwrap().contains("已由用户中断"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn native_tool_codex_unicode_result_keeps_turn_completion_readable() {
+        // The stdio reader processes native tool evidence before turn/completed.
+        // A UTF-8 slicing panic here drops the pipe and loses the terminal event.
+        let records = [
+            serde_json::json!({
+                "method": "item/completed",
+                "params": {"item": {
+                    "id": "unicode-command", "type": "commandExecution",
+                    "command": "printf fixture", "status": "completed", "exitCode": 0,
+                    "aggregatedOutput": "退出代码: 0\n结果=完成\n检查✅: 通过\n中文API_KEY=fixture-private-value\n"
+                }}
+            }),
+            serde_json::json!({
+                "method": "turn/completed",
+                "params": {"turn": {"id": "unicode-turn", "status": "completed"}}
+            }),
+        ];
+        let reader = std::thread::spawn(move || {
+            let mut observed = Vec::new();
+            let mut tool_starts = HashMap::new();
+            let mut completed = false;
+            for record in records {
+                let event: CodexLiteEvent = serde_json::from_value(record).unwrap();
+                let mut sink = |_: &str, payload| observed.push(payload);
+                let _ = codex_native_tool_patch("unicode-run", &event, &mut tool_starts, &mut sink);
+                completed |= event.turn_completion_status().as_deref() == Some("completed");
+            }
+            (observed, completed)
+        });
+        let (observed, completed) = reader.join().expect("native evidence must not kill the stdout reader");
+        assert!(completed, "the reader must reach turn/completed after Unicode tool output");
+        assert_eq!(observed.len(), 1);
+        let result = observed[0]["result"].as_str().unwrap();
+        assert!(result.contains("退出代码: 0"));
+        assert!(result.contains("检查✅: 通过"));
+        assert!(!result.contains("fixture-private-value"));
+        assert!(result.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn native_tool_evidence_redacts_named_token_assignments() {
+        let mut observed = Vec::new();
+        let mut sink = |_: &str, payload: serde_json::Value| observed.push(payload);
+        let start = serde_json::json!({"id":"token-original", "name":"Bash", "input":{
+            "command":"npm test", "github_token":"fixture-private-value"
+        }});
+        let mut tool_starts = HashMap::new();
+        claude_tool_start_patch("run-original", &serde_json::json!({}), &start, &mut tool_starts, &mut sink);
+        let end = serde_json::json!({"tool_use_id":"token-original", "content":"GITHUB_TOKEN=fixture-output-value\nordinary output"});
+        claude_tool_result_patch("run-original", &serde_json::json!({}), &end, &mut tool_starts, &mut sink).unwrap();
+        assert_eq!(observed[0]["args"]["github_token"], "[REDACTED]");
+        let result = observed[1]["result"].as_str().unwrap();
+        assert!(result.contains("ordinary output"));
+        assert!(!serde_json::to_string(&observed).unwrap().contains("fixture-private-value"));
+        assert!(!result.contains("fixture-output-value"));
+    }
+
+    #[test]
+    fn native_tool_serialized_arguments_have_a_hard_byte_limit() {
+        let mut observed = Vec::new();
+        let mut sink = |_: &str, payload: serde_json::Value| observed.push(payload);
+        // JSON escaping must count toward the bound, not only source text bytes.
+        let start = serde_json::json!({"id":"args-original", "name":"Bash", "input":{
+            "command": "\"".repeat(2500), "path":"docs/guide.md"
+        }});
+        claude_tool_start_patch("run-original", &serde_json::json!({}), &start, &mut HashMap::new(), &mut sink);
+        assert!(observed[0]["args"].to_string().len() <= NATIVE_TOOL_ARGS_MAX_BYTES);
+    }
+
+    #[test]
+    fn native_tool_evidence_is_redacted_and_bounded_before_ui_clipping() {
+        let mut tool_starts = HashMap::new();
+        let mut observed = Vec::new();
+        let mut sink = |_: &str, payload: serde_json::Value| observed.push(payload);
+        let start = serde_json::json!({"id":"read-original", "name":"Read", "input":{
+            "file_path":"docs/guide.md", "env":{"API_KEY":"fixture-private-value"},
+            "headers":{"Authorization":"Bearer fixture-bearer-value"}, "password":"fixture-password-value"
+        }});
+        claude_tool_start_patch("run-original", &serde_json::json!({}), &start, &mut tool_starts, &mut sink);
+        let raw = format!("Authorization: Bearer fixture-output-value\n{}", "x".repeat(12000));
+        let end = serde_json::json!({"tool_use_id":"read-original", "is_error":false, "content":raw});
+        let patch = claude_tool_result_patch("run-original", &serde_json::json!({}), &end, &mut tool_starts, &mut sink).unwrap();
+        let serialized = serde_json::to_string(&observed).unwrap();
+        for secret in ["fixture-private-value", "fixture-bearer-value", "fixture-password-value", "fixture-output-value"] {
+            assert!(!serialized.contains(secret), "fixture credentials must never reach the evidence sink");
+        }
+        assert_eq!(observed[0]["args"]["file_path"], "docs/guide.md");
+        assert_eq!(observed[0]["args"]["env"], "[REDACTED]");
+        let result = observed[1]["result"].as_str().unwrap();
+        assert!(result.contains("[REDACTED]"));
+        assert!(result.len() <= 8192);
+        assert!(result.len() > TOOL_RESULT_CLAMP, "native projection must not inherit the UI clip");
+        assert_eq!(patch["result"].as_str().unwrap().chars().count(), TOOL_RESULT_CLAMP);
+        assert_eq!(observed[1]["status"], "success");
+        assert!(observed[1].get("exitCode").is_none());
+    }
+
+    #[test]
+    fn native_tool_claude_does_not_borrow_another_call_metadata_exit() {
+        for metadata in [serde_json::json!({"tool_use_id":"other-call", "exitCode":0}), serde_json::json!({"exitCode":0})] {
+            let mut observed = Vec::new();
+            let mut sink = |_: &str, payload: serde_json::Value| observed.push(payload);
+            let start = serde_json::json!({"id":"call-original", "name":"Bash", "input":{"command":"npm test"}});
+            let mut tool_starts = HashMap::new();
+            claude_tool_start_patch("run-original", &serde_json::json!({}), &start, &mut tool_starts, &mut sink);
+            let end = serde_json::json!({"type":"tool_result", "tool_use_id":"call-original", "content":"fixture output"});
+            let event = serde_json::json!({"type":"user", "message":{"content":[end.clone(),
+                {"type":"tool_result", "tool_use_id":"other-call", "content":"unrelated output"}]}, "tool_use_result":metadata});
+            claude_tool_result_patch("run-original", &event, &end, &mut tool_starts, &mut sink).unwrap();
+            assert_eq!(observed[1]["status"], "unknown");
+            assert!(observed[1].get("exitCode").is_none());
+        }
+    }
+
+    #[test]
+    fn native_tool_claude_preserves_correlated_result_metadata_exit() {
+        for explicit_metadata_id in [true, false] {
+            let mut tool_starts = HashMap::new();
+            let mut observed = Vec::new();
+            let mut sink = |_: &str, payload: serde_json::Value| observed.push(payload);
+            let start = serde_json::json!({"id":"call-original", "name":"Bash", "input":{"command":"npm test"}});
+            claude_tool_start_patch("run-original", &serde_json::json!({}), &start, &mut tool_starts, &mut sink);
+            let end = serde_json::json!({"type":"tool_result", "tool_use_id":"call-original", "content":"fixture output"});
+            let mut metadata = serde_json::json!({"exitCode":7});
+            if explicit_metadata_id { metadata["tool_use_id"] = "call-original".into(); }
+            let event = serde_json::json!({"type":"user", "message":{"content":[end.clone()]}, "tool_use_result":metadata});
+            claude_tool_result_patch("run-original", &event, &end, &mut tool_starts, &mut sink).unwrap();
+            assert_eq!(observed[1]["toolName"], "Bash");
+            assert_eq!(observed[1]["exitCode"], 7);
+            assert_eq!(observed[1]["status"], "error");
+        }
+    }
+
+    #[test]
+    fn native_tool_claude_emits_correlated_completion_on_independent_channel() {
+        let mut tool_starts = HashMap::new();
+        let mut observed = Vec::new();
+        let mut sink = |name: &str, payload: serde_json::Value| observed.push((name.to_string(), payload));
+        let start_event = serde_json::json!({"type":"assistant", "parent_tool_use_id":"task-original"});
+        let start = serde_json::json!({"type":"tool_use", "id":"call-original", "name":"Bash", "input":{"command":"npm test"}});
+        let start_patch = claude_tool_start_patch("run-original", &start_event, &start, &mut tool_starts, &mut sink);
+        let end = serde_json::json!({"type":"tool_result", "tool_use_id":"call-original", "content":"fixture command failed", "is_error":true, "exit_code":7});
+        let end_patch = claude_tool_result_patch("run-original", &serde_json::json!({"type":"user"}), &end, &mut tool_starts, &mut sink).unwrap();
+        assert_eq!(start_patch["id"], "call-original");
+        assert_eq!(end_patch["name"], "Bash");
+        assert_eq!(end_patch["parentId"], "task-original");
+        assert_eq!(observed.len(), 2);
+        assert_eq!(observed[0].0, "ugs-cli-tool");
+        assert_eq!(observed[0].1["phase"], "start");
+        assert_eq!(observed[0].1["status"], "unknown");
+        assert_eq!(observed[1].0, "ugs-cli-tool");
+        assert_eq!(observed[1].1["runId"], "run-original");
+        assert_eq!(observed[1].1["toolCallId"], "call-original");
+        assert_eq!(observed[1].1["toolName"], "Bash");
+        assert_eq!(observed[1].1["parentId"], "task-original");
+        assert_eq!(observed[1].1["provenance"], "native-tool");
+        assert_eq!(observed[1].1["phase"], "end");
+        assert_eq!(observed[1].1["status"], "error");
+        assert_eq!(observed[1].1["exitCode"], 7);
+        assert_eq!(observed[1].1["result"], "fixture command failed");
+    }
+
+    #[test]
+    fn native_tool_codex_exec_and_app_server_emit_start_and_end() {
+        for (kind_key, start_kind, end_kind) in [
+            ("type", "item.started", "item.completed"),
+            ("method", "item/started", "item/completed"),
+        ] {
+            let mut tool_starts = HashMap::new();
+            let mut observed = Vec::new();
+            let mut sink = |name: &str, payload: serde_json::Value| observed.push((name.to_string(), payload));
+            for (kind, item) in [
+                (start_kind, serde_json::json!({"id":"cmd-original", "type":"commandExecution", "name":"run_shell_command", "parentId":"parent-original", "command":"npm test"})),
+                (end_kind, serde_json::json!({"id":"cmd-original", "type":"commandExecution", "status":"completed", "exitCode":0, "aggregatedOutput":"fixture passed"})),
+            ] {
+                let mut raw = serde_json::json!({kind_key: kind});
+                if kind_key == "method" { raw["params"] = serde_json::json!({"item":item}); }
+                else { raw["item"] = item; }
+                let event: CodexLiteEvent = serde_json::from_value(raw).unwrap();
+                let patch = codex_native_tool_patch("run-original", &event, &mut tool_starts, &mut sink).unwrap();
+                assert_eq!(patch["name"], "run_shell_command");
+            }
+            assert_eq!(observed.len(), 2);
+            assert_eq!(observed[0].0, "ugs-cli-tool");
+            assert_eq!(observed[0].1["phase"], "start");
+            assert_eq!(observed[0].1["status"], "unknown");
+            assert_eq!(observed[1].0, "ugs-cli-tool");
+            assert_eq!(observed[1].1["phase"], "end");
+            assert_eq!(observed[1].1["toolCallId"], "cmd-original");
+            assert_eq!(observed[1].1["toolName"], "run_shell_command");
+            assert_eq!(observed[1].1["parentId"], "parent-original");
+            assert_eq!(observed[1].1["exitCode"], 0);
+            assert_eq!(observed[1].1["status"], "success");
+            assert_eq!(observed[1].1["result"], "fixture passed");
+        }
+    }
+
+    #[test]
+    fn native_tool_ui_status_and_model_plan_are_not_native_evidence() {
+        let heartbeat = encode_running_status_patch("run-original", 12, "waiting");
+        let payload = heartbeat.split("<<UGS_TOOL>>").nth(1).unwrap().split("<<UGS_TOOL_END>>").next().unwrap();
+        let heartbeat: serde_json::Value = serde_json::from_str(payload).unwrap();
+        assert_eq!(heartbeat["provenance"], "ui-synthetic");
+        let mut tool_starts = HashMap::new();
+        let mut observed = Vec::new();
+        let mut sink = |_: &str, payload: serde_json::Value| observed.push(payload);
+        let plan: CodexLiteEvent = serde_json::from_value(serde_json::json!({
+            "method":"turn/plan/updated", "params":{"turnId":"turn-original", "plan":[{"step":"model plan","status":"completed"}]}
+        })).unwrap();
+        assert_eq!(plan.plan_patch().unwrap()["provenance"], "model-output");
+        assert!(codex_native_tool_patch("run-original", &plan, &mut tool_starts, &mut sink).is_none());
+        let todo: CodexLiteEvent = serde_json::from_value(serde_json::json!({
+            "type":"item.completed", "item":{"id":"todo-original", "type":"todo_list", "items":[]}
+        })).unwrap();
+        assert!(codex_native_tool_patch("run-original", &todo, &mut tool_starts, &mut sink).is_none());
+        assert!(observed.is_empty());
+    }
+
+    #[test]
+    fn native_tool_gemini_preserves_identity_and_unknown_verdict() {
+        let mut tool_starts = HashMap::new();
+        let mut observed = Vec::new();
+        let mut sink = |name: &str, payload: serde_json::Value| observed.push((name.to_string(), payload));
+        let start = serde_json::json!({"type":"tool_use", "tool_id":"gem-original", "tool_name":"run_shell_command", "parent_id":"parent-original", "parameters":{"command":"npm test"}});
+        gemini_tool_patch("run-original", &start, &mut tool_starts, &mut sink).unwrap();
+        let end = serde_json::json!({"type":"tool_result", "tool_id":"gem-original", "output":"fixture output", "exitCode":null});
+        let patch = gemini_tool_patch("run-original", &end, &mut tool_starts, &mut sink).unwrap();
+        assert_eq!(patch["name"], "run_shell_command");
+        assert_eq!(patch["parentId"], "parent-original");
+        assert_eq!(observed.len(), 2);
+        assert_eq!(observed[0].0, "ugs-cli-tool");
+        assert_eq!(observed[0].1["phase"], "start");
+        assert_eq!(observed[1].1["toolCallId"], "gem-original");
+        assert_eq!(observed[1].1["toolName"], "run_shell_command");
+        assert_eq!(observed[1].1["parentId"], "parent-original");
+        assert_eq!(observed[1].1["phase"], "end");
+        assert_eq!(observed[1].1["status"], "unknown");
+        assert_eq!(observed[1].1["exitCode"], serde_json::Value::Null);
+        assert_eq!(observed[1].1["result"], "fixture output");
+    }
+
+    #[test]
+    fn native_tool_codex_preserves_mcp_name_arguments_and_structured_result() {
+        let event: CodexLiteEvent = serde_json::from_value(serde_json::json!({
+            "method":"item/completed", "params":{"item":{
+                "id":"mcp-original", "type":"mcpToolCall", "server":"workspace", "tool":"read_file",
+                "status":"completed", "arguments":{"path":"docs/guide.md", "api_key":"fixture-private-value"},
+                "result":{"content":[{"type":"text", "text":"fixture output"}]}
+            }}
+        })).unwrap();
+        let mut observed = Vec::new();
+        let mut sink = |_: &str, payload: serde_json::Value| observed.push(payload);
+        codex_native_tool_patch("run-original", &event, &mut HashMap::new(), &mut sink).unwrap();
+        assert_eq!(observed[0]["toolName"], "read_file");
+        assert_eq!(observed[0]["args"]["arguments"]["path"], "docs/guide.md");
+        assert_eq!(observed[0]["args"]["arguments"]["api_key"], "[REDACTED]");
+        assert!(observed[0]["result"].as_str().unwrap().contains("fixture output"));
+        assert!(!serde_json::to_string(&observed).unwrap().contains("fixture-private-value"));
+    }
+
+    #[test]
+    fn native_tool_codex_keeps_explicit_null_exit_and_params_parent() {
+        let event: CodexLiteEvent = serde_json::from_value(serde_json::json!({
+            "method":"item/completed", "params":{"parentId":"parent-original",
+                "item":{"id":"cmd-original", "type":"commandExecution", "exitCode":null}}
+        })).unwrap();
+        let mut observed = Vec::new();
+        let mut sink = |_: &str, payload: serde_json::Value| observed.push(payload);
+        codex_native_tool_patch("run-original", &event, &mut HashMap::new(), &mut sink).unwrap();
+        assert_eq!(observed[0]["parentId"], "parent-original");
+        assert_eq!(observed[0].get("exitCode"), Some(&serde_json::Value::Null));
+        assert_eq!(observed[0]["status"], "unknown");
+    }
+
+    #[test]
+    fn native_tool_codex_completed_command_without_exit_stays_unknown() {
+        let event: CodexLiteEvent = serde_json::from_value(serde_json::json!({
+            "type":"item.completed", "item":{"id":"cmd-original", "type":"command_execution", "status":"completed"}
+        })).unwrap();
+        let mut observed = Vec::new();
+        let mut sink = |_: &str, payload: serde_json::Value| observed.push(payload);
+        codex_native_tool_patch("run-original", &event, &mut HashMap::new(), &mut sink).unwrap();
+        assert_eq!(observed[0]["status"], "unknown");
+        assert!(observed[0].get("exitCode").is_none());
+    }
+
+    #[test]
+    fn native_tool_codex_unknown_completion_is_not_success() {
+        let event: CodexLiteEvent = serde_json::from_value(serde_json::json!({
+            "type": "item.completed",
+            "item": { "id": "cmd-unknown", "type": "command_execution", "output": "fixture output" }
+        })).unwrap();
+        let patch = codex_tool_patch(event.completed_item().unwrap(), "fallback".into()).unwrap();
+        assert_eq!(patch["evidenceStatus"], "unknown");
+        assert!(patch.get("exitCode").is_none());
     }
 
     #[test]
@@ -23087,6 +24474,28 @@ requires_openai_auth = true\n";
     }
 
     #[test]
+    fn turn_file_changes_exclude_unchanged_dirty_files() {
+        let root = std::env::current_dir().unwrap().join("../../.ultragamestudio/tests")
+            .join(format!("turn-changes-{}-{}", std::process::id(), now_ms()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("existing.txt"), "user's dirty content\n").unwrap();
+        std::fs::write(root.join("changed.txt"), "old\n").unwrap();
+        let key = format!("turn:test:{}", now_ms());
+        workspace_changes_baseline_blocking(display_preview_path(&root), key.clone(), None).unwrap();
+        let unchanged = workspace_changes_blocking(display_preview_path(&root), key.clone(), None).unwrap();
+        assert!(unchanged.files.is_empty());
+        assert!(!workspace_change_cache_file(&root, &key, "baseline").exists());
+        workspace_changes_baseline_blocking(display_preview_path(&root), key.clone(), None).unwrap();
+        std::fs::write(root.join("changed.txt"), "new\n").unwrap();
+        std::fs::write(root.join("created.txt"), "created\n").unwrap();
+        let changes = workspace_changes_blocking(display_preview_path(&root), key, None).unwrap();
+        assert_eq!(changes.files.len(), 2);
+        assert_eq!(changes.files[0].path, "changed.txt");
+        assert_eq!(changes.files[1].path, "created.txt");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn normalizes_spawn_env_known_provider_models() {
         let mut env = HashMap::new();
         env.insert(
@@ -23341,6 +24750,9 @@ pub fn run() {
             steer_ai_cli,
             slash_catalog,
             refresh_slash_catalog,
+            skills_bind_run,
+            skills_revoke_run,
+            skills_request,
             skill_install_targets,
             install_skill_from_url,
             install_skill_from_zip_url,

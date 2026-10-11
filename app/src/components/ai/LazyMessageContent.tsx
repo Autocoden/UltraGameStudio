@@ -26,8 +26,8 @@ import {
  * they scroll near the viewport (IntersectionObserver). Once upgraded a message
  * stays upgraded, so scrolling back never re-pays the cost or flickers.
  *
- * `eager` promotes the rich renderer after the first paint for historical
- * messages. The live streaming bubble still renders rich immediately.
+ * `eager` renders visible tail messages richly in the first commit, including
+ * historical messages, so session switches never paint a placeholder first.
  *
  * `scrollRootRef` is the scroll container; passing it makes the observer measure
  * intersection relative to the message stream rather than the whole window, and
@@ -65,7 +65,7 @@ function LazyMessageContentImpl({
   // upgrading) always start from index 0 and produce identical match IDs.
   if (searchState) searchState.hitCounter.current = 0;
 
-  const [rich, setRich] = useState(eager && streaming);
+  const [rich, setRich] = useState(eager);
   const holderRef = useRef<HTMLDivElement>(null);
 
   // Promote to the rich renderer if this message becomes eager later (e.g. it
@@ -95,7 +95,7 @@ function LazyMessageContentImpl({
     return () => io.disconnect();
   }, [rich, scrollRootRef]);
 
-  if (rich) {
+  if (rich || eager) {
     return (
       <MessageContent
         text={text}

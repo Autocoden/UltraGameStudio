@@ -24,6 +24,7 @@ import {
   personalInstructionsForSelection,
 } from '../core/personalInstructions';
 import { appendExecutionContract } from './contract';
+import { loadSkillContext } from './skills/context';
 import { appendWorkspaceLayout } from './workspaceLayout';
 import { parseRunFailure } from './failure';
 import { formatFailureLine } from './failure';
@@ -87,6 +88,11 @@ export async function invokeAgent(
   } = {},
 ): Promise<{ text: string; adapter: string }> {
   const { gateway } = context;
+  if (context.skills) {
+    const loaded = await loadSkillContext({ ...context.skills, prompt });
+    prompt = loaded.prompt;
+    context.skills.onLoaded?.(loaded);
+  }
   const direct = gateway.resolveDirectRoute(selection);
   if (direct) {
     const startedAt = Date.now();
@@ -97,6 +103,7 @@ export async function invokeAgent(
         model: opts.model ?? direct.model,
         omitModel: opts.omitModel,
         prompt,
+        onToolEvent: context.onToolEvent,
         onDelta: (chunk) => {
           firstProgressAt ??= Date.now();
           opts.onProgress?.(chunk);
@@ -137,6 +144,7 @@ export async function invokeAgent(
       timeoutSeconds: opts.timeoutSeconds,
       idleTimeoutSeconds: opts.idleTimeoutSeconds,
       cliCommand: opts.cliCommand ?? cli.cliCommand ?? context.cliCommand,
+      onToolEvent: context.onToolEvent,
       onProgress: (chunk) => {
         firstProgressAt ??= Date.now();
         opts.onProgress?.(chunk);

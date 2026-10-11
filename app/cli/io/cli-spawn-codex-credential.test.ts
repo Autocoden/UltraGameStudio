@@ -1,3 +1,4 @@
+// @vitest-environment node
 /**
  * Codex channel-credential wiring: when the user's own `config.toml` selects a
  * named `model_provider`, UGS must feed the key from 设置 → 模型 into *that

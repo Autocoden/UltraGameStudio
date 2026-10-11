@@ -53,6 +53,38 @@ describe('completeGatewayText', () => {
     mocks.aiEditViaCli.mockResolvedValue('cli fallback');
   });
 
+  it('forwards scoped skill authority and abort signal through ordinary direct-to-CLI fallback', async () => {
+    mocks.completeAnthropic.mockRejectedValue(new TypeError('Failed to fetch'));
+    const signal = new AbortController().signal;
+    const source = { hostId: 'local', workspaceId: 'workspace-a', sessionId: 'session-a',
+      turnId: 'source-main', runId: 'source-main', cwd: 'E:/frozen-project' };
+    const skillTools = { source, config: { enabled: true, mode: 'auto-safe' as const }, ready: Promise.resolve() };
+    await completeGatewayText({
+      route: { selection: { adapter: 'claude-code', modelClass: 'sonnet' }, adapter: 'claude-code', modelClass: 'sonnet', model: 'local-model', transport: 'anthropic', mode: 'direct', baseUrl: 'http://localhost:1234', label: 'Local', source: 'global' },
+      system: 'Task rules', userContent: 'Verify.', runId: 'child: exact/a', cwd: source.cwd, signal,
+      ...{ skillTools },
+    });
+    expect(mocks.aiEditViaCli).toHaveBeenCalledWith('Task rules\n\nVerify.', 'claude-code',
+      expect.objectContaining({ skillTools, signal, runId: 'child: exact/a' }));
+  });
+
+  it('preserves native tool evidence when an ordinary direct request falls back to CLI', async () => {
+    mocks.completeAnthropic.mockRejectedValue(new TypeError('Failed to fetch'));
+    const event = { runId: 'gateway-native', toolCallId: 'check-a', toolName: 'Bash', phase: 'end' as const, provenance: 'native-tool' as const, exitCode: 0, status: 'success' as const, args: { command: 'npm test' } };
+    const onToolEvent = vi.fn();
+    mocks.aiEditViaCli.mockImplementation(async (_prompt, _adapter, options) => {
+      options.onTool?.(event);
+      return 'Observed.';
+    });
+    await completeGatewayText({
+      route: { selection: { adapter: 'claude-code', modelClass: 'sonnet' }, adapter: 'claude-code', modelClass: 'sonnet', model: 'test-model', transport: 'anthropic', mode: 'direct', baseUrl: 'http://localhost:1234', label: 'Local', source: 'global' },
+      system: 'Task rules', userContent: 'Verify.', runId: event.runId,
+      ...{ onToolEvent },
+    });
+    expect(onToolEvent).toHaveBeenCalledExactlyOnceWith(event);
+    expect(mocks.aiEditViaCli.mock.calls[0][2].runId).toBe(event.runId);
+  });
+
   it('falls back to Claude Code CLI when browser-direct Anthropic fetch fails', async () => {
     mocks.completeAnthropic.mockRejectedValue(new TypeError('Failed to fetch'));
 

@@ -2,10 +2,11 @@ import { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { defaultBlueprint } from '@/core/defaultBlueprint';
-import { loadComposerToolButtonsVisible } from '@/lib/composerStorage';
+import { loadComposerHintRowVisible, loadComposerToolButtonsVisible } from '@/lib/composerStorage';
 import { defaultComposer } from '@/store/sampleSessions';
 import { useStore } from '@/store/useStore';
 import SettingsModal from './SettingsModal';
+import AIDock from './AIDock';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
   true;
@@ -67,6 +68,62 @@ describe('SettingsModal composer tool buttons switch', () => {
         root.unmount();
       });
       container.remove();
+    }
+  });
+});
+
+describe('输入框上方提示与权限栏', () => {
+  it.each([false, true])('默认隐藏，设置开关立即控制整行并保存选择（有信息流：%s）', async (hasMessages) => {
+    vi.stubGlobal('ResizeObserver', class {
+      observe() {} unobserve() {} disconnect() {}
+    });
+    window.localStorage.clear();
+    expect(loadComposerHintRowVisible()).toBe(false);
+    useStore.setState({
+      locale: 'zh-CN', mode: 'design', workflow: defaultBlueprint('wf'),
+      composer: { ...defaultComposer, workspace: '' }, composerDraft: '',
+      activeWorkspaceId: null, activeSessionId: null, workspaces: [],
+      messages: hasMessages ? [
+        { id: 'user', role: 'user', text: '继续这个会话', createdAt: 1 },
+        { id: 'assistant', role: 'assistant', text: '已有信息流。', createdAt: 2 },
+      ] : [], aiStreaming: false, aiEditingSessions: [], chattingSessions: [],
+      composerHintRowVisible: loadComposerHintRowVisible(),
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const render = () => root.render(<><SettingsModal onClose={vi.fn()} /><AIDock layout="chat" /></>);
+    try {
+      await act(async () => { render(); });
+      expect(container.querySelector('[data-testid="composer-hint-row"]')).toBeNull();
+      expect(container.querySelector('.ugs-ai-input-card textarea')).not.toBeNull();
+      expect(container.querySelectorAll('[data-ugs-message-row]').length).toBe(hasMessages ? 2 : 0);
+      const target = Array.from(container.querySelectorAll<HTMLButtonElement>('button[role="switch"]'))
+        .find(button => button.parentElement?.parentElement?.textContent?.includes('显示输入框上方提示与权限栏'));
+      expect(target).toBeDefined();
+      expect(target?.getAttribute('aria-checked')).toBe('false');
+      await act(async () => { target!.click(); });
+      expect(target?.getAttribute('aria-checked')).toBe('true');
+      expect(loadComposerHintRowVisible()).toBe(true);
+      const row = container.querySelector('[data-testid="composer-hint-row"]');
+      expect(row?.textContent).toContain('提及文件');
+      expect(row?.querySelectorAll('[role="radio"]').length).toBe(3);
+      expect(row?.textContent).toContain('发送');
+      await act(async () => { root.render(null); });
+      useStore.setState({ composerHintRowVisible: loadComposerHintRowVisible() });
+      await act(async () => { render(); });
+      expect(container.querySelector('[data-testid="composer-hint-row"]')).not.toBeNull();
+      const restored = Array.from(container.querySelectorAll<HTMLButtonElement>('button[role="switch"]'))
+        .find(button => button.parentElement?.parentElement?.textContent?.includes('显示输入框上方提示与权限栏'));
+      const permission = useStore.getState().composer.permission;
+      await act(async () => { restored!.click(); });
+      expect(container.querySelector('[data-testid="composer-hint-row"]')).toBeNull();
+      expect(loadComposerHintRowVisible()).toBe(false);
+      expect(useStore.getState().composer.permission).toBe(permission);
+    } finally {
+      await act(async () => { root.unmount(); });
+      container.remove();
+      vi.unstubAllGlobals();
     }
   });
 });

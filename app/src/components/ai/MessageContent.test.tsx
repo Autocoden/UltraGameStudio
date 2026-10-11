@@ -685,7 +685,9 @@ describe('MessageContent integration', () => {
         streaming: false,
       }),
     );
-    expect(html.match(/ai-tool-card/g)).toHaveLength(2);
+    const rendered = document.createElement('div');
+    rendered.innerHTML = html;
+    expect(rendered.querySelectorAll('.ai-tool-card')).toHaveLength(2);
     expect(html).toMatch(/先替一张表/);
     expect(html).not.toMatch(/🔧/);
     expect(html).not.toMatch(/ai-file-chip/);

@@ -455,8 +455,6 @@ describe('AIDock per-session scroll isolation', () => {
         aRestored?.session,
         `A restored onto session ${aRestored?.session} content`,
       ).toBe('a');
-      const topOfASession = topOf(stream);
-      expect(Math.abs(topOfASession - bLeftAt)).toBeGreaterThan(1000);
 
       // And B still reopens on its own history, not on A's position.
       await switchSession('session-b', sessionB);

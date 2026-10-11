@@ -6,10 +6,55 @@ import {
   PREFERRED_UNREAL_MCP_SERVER_ID,
   preferUnrealMcpServer,
   projectSettingsFromMetadata,
+  projectSettingsPatch,
   settingsWithDetectedGameFeatures,
   uiDesignDefaultsForEngine,
 } from './projectSettings';
 import type { ProjectEngineKind, ProjectEnvironmentScan } from './tauri';
+import { DEFAULT_SKILL_LEARNING_CONFIG } from './skillLearningConfig';
+
+describe('project settings skill learning', () => {
+  it('normalizes and roundtrips the optional skills learning configuration', () => {
+    const settings = projectSettingsFromMetadata({
+      projectSettings: {
+        skills: {
+          enabledRootIds: ['agents'],
+          disabledSkillNames: ['old-skill'],
+          recommendedSkillIds: ['skill-a'],
+          learning: { enabled: false, mode: 'off', maxRounds: 2, apiKey: 'fixture-only' },
+        },
+      },
+    });
+    expect(settings.skills).toEqual({
+      enabledRootIds: ['agents'],
+      disabledSkillNames: ['old-skill'],
+      recommendedSkillIds: ['skill-a'],
+      learning: { ...DEFAULT_SKILL_LEARNING_CONFIG, enabled: false, mode: 'off', maxRounds: 2 },
+    });
+    expect(projectSettingsFromMetadata(projectSettingsPatch(settings)).skills).toEqual(settings.skills);
+  });
+
+  it('whitelists learning data before serializing a project patch without mutating the caller', () => {
+    const settings = emptyProjectSettings();
+    const rawLearning = { ...DEFAULT_SKILL_LEARNING_CONFIG, debugToken: 'fixture-not-a-credential', maxRounds: 1000 };
+    settings.skills.learning = rawLearning;
+    const patch = projectSettingsPatch(settings);
+    const serialized = patch.projectSettings as { skills: { learning: typeof DEFAULT_SKILL_LEARNING_CONFIG } };
+    expect(serialized.skills.learning).toEqual({ ...DEFAULT_SKILL_LEARNING_CONFIG, maxRounds: 16 });
+    expect(serialized.skills.learning).not.toHaveProperty('debugToken');
+    expect(settings.skills.learning).toBe(rawLearning);
+    expect(rawLearning.maxRounds).toBe(1000);
+  });
+
+  it('keeps legacy skill settings absent instead of pinning a new project override', () => {
+    expect(emptyProjectSettings().skills).toEqual({
+      enabledRootIds: ['codex', 'agents', 'claude'], disabledSkillNames: [], recommendedSkillIds: [],
+    });
+    expect(projectSettingsFromMetadata({ projectSettings: { skills: { learning: null } } }).skills.learning)
+      .toBeUndefined();
+    expect(projectSettingsFromMetadata({ projectSettings: {} }).skills.learning).toBeUndefined();
+  });
+});
 
 function scanForEngine(
   engine: ProjectEngineKind,

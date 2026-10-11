@@ -75,6 +75,19 @@ export interface Message {
   createdAt: number;
   /** Epoch milliseconds when an assistant turn finished. Used for history order. */
   completedAt?: number;
+  /** Native runtime confirmed that this assistant turn compressed its context. */
+  contextCompressed?: boolean;
+  /** File summary captured at turn completion; survives history reloads. */
+  fileChanges?: import('@/lib/turnFileChanges').TurnFileChanges;
+  /** Full-read metadata for the source turn; never replayed as assistant prose. */
+  skillContext?: {
+    origin: import('@/runtime/skills/types').SkillOrigin;
+    sourceSession?: import('@/runtime/skills/types').SkillSourceSession;
+    loadedSkills: import('@/runtime/skills/types').SkillLearningJob['loadedSkills'];
+    catalogRevision: string;
+  };
+  /** Host review state on a separate localOnly result card. */
+  skillLearning?: import('@/runtime/skills/types').SkillReviewState;
   /**
    * Present when this message is a node's request for user input (rendered in
    * the AI-return dock as a select/input/confirm widget rather than plain text).
@@ -172,6 +185,8 @@ export interface Session {
    * the history rail; cleared once the session is selected.
    */
   unreadCompletion?: boolean;
+  /** This session has a confirmed native context compression. */
+  contextCompressed?: boolean;
   /** True when a workflow session is pinned into the Sidebar favorites tab. */
   favorite?: boolean;
   /** Optional alarm-style schedule for favorite sessions. */

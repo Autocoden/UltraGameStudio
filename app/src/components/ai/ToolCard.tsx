@@ -100,12 +100,15 @@ export default function ToolCard({
   onOpenFile,
   depth = 0,
   cwd,
+  keepActiveChildrenVisible = false,
 }: {
   event: ToolEvent;
   childrenEvents?: ToolEvent[];
   onOpenFile?: OpenFileFn;
   depth?: number;
   cwd?: string;
+  /** Active/failed sub-agent steps must survive the outer process disclosure. */
+  keepActiveChildrenVisible?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const locale = useStore((s) => s.locale);
@@ -158,7 +161,7 @@ export default function ToolCard({
       data-status={event.status}
       style={depth ? { marginLeft: depth * 14 } : undefined}
     >
-      <div className="flex items-center gap-1.5 px-2 py-0.5 font-mono text-[10px] leading-snug">
+      <div className="ai-tool-card__header flex items-center gap-1.5 px-2 py-0.5 font-mono text-[10px] leading-snug">
         {hasBody ? (
           <button
             type="button"
@@ -225,17 +228,23 @@ export default function ToolCard({
               streaming={event.status === 'running'}
             />
           )}
-          {childrenEvents?.map((child) => (
-            <ToolCard
-              key={child.id}
-              event={child}
-              onOpenFile={onOpenFile}
-              depth={depth + 1}
-              cwd={cwd}
-            />
-          ))}
         </div>
       )}
+      {childrenEvents?.map((child, index) => (
+        <div
+          key={keepActiveChildrenVisible ? `child-${index}` : child.id}
+          className="ai-tool-children px-2.5"
+          hidden={!open && !(keepActiveChildrenVisible && child.status !== 'done')}
+        >
+          <ToolCard
+            event={child}
+            onOpenFile={onOpenFile}
+            depth={depth + 1}
+            cwd={cwd}
+            keepActiveChildrenVisible={keepActiveChildrenVisible}
+          />
+        </div>
+      ))}
     </div>
   );
 }

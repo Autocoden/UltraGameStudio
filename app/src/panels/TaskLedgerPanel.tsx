@@ -17,9 +17,9 @@ import type { TaskLedger, TaskLedgerEntry } from '@/core/ir';
 
 /** Tailwind classes per acceptance status (accepted green / rejected red / …). */
 const STATUS_STYLE: Record<TaskLedgerEntry['status'], string> = {
-  accepted: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30',
-  rejected: 'bg-red-500/15 text-red-400 border-red-500/30',
-  blocked: 'bg-amber-500/15 text-amber-400 border-amber-500/30',
+  accepted: 'bg-status-success/15 text-status-success border-status-success/30',
+  rejected: 'bg-status-error/15 text-status-error border-status-error/30',
+  blocked: 'bg-status-warning/15 text-status-warning border-status-warning/30',
   running: 'bg-accent/15 text-accent border-accent/30',
   pending: 'bg-border-soft text-fg-faint border-border',
 };
@@ -60,7 +60,7 @@ function TaskCard({ task, locale }: { task: TaskLedgerEntry; locale: Locale }) {
           <span className="text-[11px] text-fg-faint">
             {t(locale, 'taskLedger.gaps')}：
           </span>
-          <ul className="mt-0.5 list-disc pl-4 text-[11px] leading-relaxed text-red-400">
+          <ul className="mt-0.5 list-disc pl-4 text-[11px] leading-relaxed text-status-error">
             {task.gaps.map((g, i) => (
               <li key={i}>{g}</li>
             ))}

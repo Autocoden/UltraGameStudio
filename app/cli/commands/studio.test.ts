@@ -1,15 +1,24 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createServer, type Server } from 'node:http';
+import { resetFucConfigCache, type ResolvedRoute } from '../config/providers';
+import { createHash } from 'node:crypto';
 import type { RunGateway, SpawnCliAgentOpts } from '../../src/runtime';
 import { runStudio } from './studio';
+
+const isolated = vi.hoisted(() => ({ home: '' }));
+vi.mock('node:os', async (original) => ({ ...await original<typeof import('node:os')>(),
+  homedir: () => { if (!isolated.home) throw new Error('Studio fixture home is not initialized'); return isolated.home; },
+}));
 
 let outBuf = '';
 let errBuf = '';
 let outSpy: { mockRestore: () => void };
 let errSpy: { mockRestore: () => void };
 let dir: string;
+const servers: Server[] = [];
 
 const sink = (append: (s: string) => void) =>
   ((chunk: unknown) => {
@@ -23,15 +32,156 @@ beforeEach(() => {
   outSpy = vi.spyOn(process.stdout, 'write').mockImplementation(sink((s) => (outBuf += s)));
   errSpy = vi.spyOn(process.stderr, 'write').mockImplementation(sink((s) => (errBuf += s)));
   dir = mkdtempSync(join(tmpdir(), 'ugs-studio-'));
+  isolated.home = join(dir, 'isolated-home'); mkdirSync(isolated.home, { recursive: true });
+  for (const name of ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY', 'XAI_API_KEY']) vi.stubEnv(name, undefined);
+  resetFucConfigCache();
 });
 
-afterEach(() => {
+afterEach(async () => {
+  for (const server of servers.splice(0)) { server.closeAllConnections(); await new Promise<void>((resolve) => server.close(() => resolve())); }
   outSpy.mockRestore();
   errSpy.mockRestore();
+  vi.unstubAllEnvs(); vi.restoreAllMocks(); resetFucConfigCache();
   rmSync(dir, { recursive: true, force: true });
 });
 
 describe('ugs studio', () => {
+  it('forwards independent reviewer flags into a real Anthropic request without changing foreground CLI selection', async () => {
+    writeFileSync(join(dir, 'check.mjs'), "console.log('INDEPENDENT REVIEW CHECK PASSED');\n");
+    const content = '---\nname: independent-review\ndescription: Use when isolating background review.\n---\nKeep completion-only review independent of foreground coding execution.\n';
+    const payloads: Record<string, unknown>[] = [];
+    const paths: string[] = [];
+    const server = createServer((req, res) => {
+      let body = ''; req.setEncoding('utf8'); req.on('data', (chunk) => { body += chunk; }); req.on('end', () => {
+        paths.push(req.url ?? ''); const payload = JSON.parse(body); payloads.push(payload);
+        const snapshot = JSON.parse(payload.messages[0].content);
+        res.writeHead(200, { 'content-type': 'application/json', connection: 'close' });
+        res.end(JSON.stringify({ content: [{ type: 'text', text: JSON.stringify({ version: 1, kind: 'propose',
+          lesson: 'Keep completion-only review independent of coding execution.',
+          evidenceIds: snapshot.evidence.map((item: { evidenceId: string }) => item.evidenceId),
+          operations: [{ action: 'create', name: 'independent-review', content }] }) }],
+          stop_reason: 'end_turn', usage: { input_tokens: 40, output_tokens: 40 } }));
+      });
+    });
+    servers.push(server); await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+    const address = server.address(); if (!address || typeof address === 'string') throw new Error('server');
+    mkdirSync(join(dir, '.ugs'), { recursive: true }); const configFile = join(dir, '.ugs', 'config.json');
+    writeFileSync(configFile, JSON.stringify({ providers: { 'fixture-review': {
+      transport: 'cli', baseUrl: `http://127.0.0.1:${address.port}/v1`, model: 'foreground/default-model',
+    } }, skillLearning: { activityThreshold: 1 } }));
+    const configBefore = readFileSync(configFile);
+    const providers = await import('../config/providers');
+    const ordinary = vi.spyOn(providers, 'resolveDirectRoute').mockImplementation(() => { throw new Error('FORBIDDEN_REVIEW_GENERAL_GATEWAY'); });
+    const cli = vi.spyOn(providers, 'resolveCliRoute').mockImplementation(() => { throw new Error('FORBIDDEN_REVIEW_CLI_ROUTE'); });
+    const foregroundSelections: Array<{ adapter: string; modelClass: string; providerId?: string }> = [];
+    const calls: string[] = []; const foreground = fakeStudioGateway(calls);
+    const gateway: RunGateway = { ...foreground, resolveCliRoute: async (selection) => {
+      foregroundSelections.push({ ...selection }); return foreground.resolveCliRoute(selection);
+    } };
+    const options = { cwd: dir, runId: 'uc-independent-flags', json: true, quiet: true, gateway, maxRetries: '0',
+      adapter: 'claude-code', model: 'sonnet', provider: 'foreground-coding', verifyCommand: 'node check.mjs',
+      reviewAdapter: 'codex', reviewProvider: 'fixture-review', reviewModel: 'review/exact-model', reviewTransport: 'anthropic' };
+    expect(await runStudio('审查博客里的技术论断', options)).toBe(0);
+    const result = JSON.parse(outBuf);
+    expect(result.skillLearning).toMatchObject({ status: 'reviewed', result: { status: 'applied', operationsApplied: 1 } });
+    expect(result.verification).toMatchObject({ exitCode: 0, passed: true, stdout: expect.stringContaining('INDEPENDENT REVIEW CHECK PASSED') });
+    expect(paths).toEqual(['/v1/messages']); expect(payloads).toHaveLength(1);
+    expect(payloads[0]).toMatchObject({ model: 'review/exact-model', stream: false });
+    expect(Object.keys(payloads[0]).sort()).toEqual(['max_tokens', 'messages', 'model', 'stream', 'system']);
+    expect(foregroundSelections.length).toBeGreaterThan(0);
+    expect(foregroundSelections.every((selection) => selection.adapter === 'claude-code' && selection.modelClass === 'sonnet' && selection.providerId === 'foreground-coding')).toBe(true);
+    expect(ordinary).not.toHaveBeenCalled(); expect(cli).not.toHaveBeenCalled();
+    expect(readFileSync(configFile)).toEqual(configBefore);
+    const file = join(dir, '.ultragamestudio', 'skills', 'independent-review', 'SKILL.md');
+    const bytes = readFileSync(file); expect(bytes.toString('utf8')).toBe(content);
+    const { createNodeSkillHostPort, createNodeWorkspaceSkillRequest } = await import('../io/skill-host');
+    const origin = { ...result.skillLearning.origin, turnId: 'fresh-read-turn', runId: 'fresh-read-run' };
+    const host = createNodeSkillHostPort({ origin, request: createNodeWorkspaceSkillRequest({ cwd: dir, hostId: origin.hostId, workspaceId: origin.workspaceId }) });
+    const fresh = await host.view({ skillId: (await host.list()).entries[0].skillId });
+    expect(fresh).toMatchObject({ content, fullRead: true, hash: createHash('sha256').update(bytes).digest('hex') });
+    const evidenceDir = process.env.UGS_REVIEW_ROUTE_EVIDENCE_DIR;
+    if (evidenceDir) {
+      mkdirSync(evidenceDir, { recursive: true });
+      writeFileSync(join(evidenceDir, 'studio-independent-flags.json'), JSON.stringify({ paths, payloads,
+        foregroundSelections, verification: result.verification, outcome: result.skillLearning,
+        configByteIdentical: readFileSync(configFile).equals(configBefore), freshRead: fresh }, null, 2));
+    }
+  }, 20000);
+
+  it('automatically reviews actual verify-command evidence over HTTP then delivers the learned rule to a new task', async () => {
+    const content = '---\nname: verify-outcomes\ndescription: Use when verifying outcomes.\n---\nRun check.mjs and read CHECK PASSED before reporting success.\n';
+    writeFileSync(join(dir, 'check.mjs'), "console.log('CHECK PASSED');\n");
+    const snapshots: Array<{ evidence: Array<Record<string, unknown>> }> = [];
+    const server = createServer((req, res) => {
+      let body = ''; req.setEncoding('utf8'); req.on('data', (chunk) => { body += chunk; });
+      req.on('end', () => {
+        const payload = JSON.parse(body); const snapshot = JSON.parse(payload.messages[1].content); snapshots.push(snapshot);
+        res.writeHead(200, { 'content-type': 'application/json', connection: 'close' });
+        res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ version: 1, kind: 'propose',
+          lesson: 'Read an actual successful host check before reporting success.',
+          evidenceIds: snapshot.evidence.map((item: { evidenceId: string }) => item.evidenceId),
+          operations: [{ action: 'create', name: 'verify-outcomes', content }] }) } }],
+          usage: { prompt_tokens: 40, completion_tokens: 40 } }));
+      });
+    });
+    servers.push(server); await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+    const address = server.address(); if (!address || typeof address === 'string') throw new Error('server');
+    const route: ResolvedRoute = { selection: { adapter: 'custom', modelClass: 'review' }, adapter: 'custom', modelClass: 'review',
+      mode: 'direct', transport: 'openai-compatible', model: 'review-only', baseUrl: `http://127.0.0.1:${address.port}` };
+    expect(await runStudio('审查博客里的技术论断', { cwd: dir, runId: 'uc-auto-skill-http', json: true, quiet: true,
+      gateway: fakeStudioGateway([]), maxRetries: '0', verifyCommand: 'node check.mjs',
+      skillWorkflow: { route, config: { activityThreshold: 1 } } })).toBe(0);
+    const first = JSON.parse(outBuf);
+    expect(first.verification).toMatchObject({ exitCode: 0, passed: true, stdout: expect.stringContaining('CHECK PASSED') });
+    expect(first.skillLearning).toMatchObject({ status: 'reviewed', result: { status: 'applied', operationsApplied: 1 } });
+    expect(snapshots).toHaveLength(1);
+    expect(snapshots[0].evidence).toMatchObject([{ provenance: 'host-check', kind: 'verification', exitCode: 0, status: 'success' }]);
+    expect(snapshots[0].evidence).toHaveLength(1);
+    expect(readFileSync(join(dir, '.ultragamestudio', 'skills', 'verify-outcomes', 'SKILL.md'), 'utf8')).toBe(content);
+    outBuf = ''; const calls: string[] = [];
+    expect(await runStudio('/verify-outcomes 审查博客里的技术论断', { cwd: dir, runId: 'uc-reuse-learned-skill', json: true, quiet: true,
+      gateway: fakeStudioGateway(calls), maxRetries: '0', verifyCommand: 'node check.mjs' })).toBe(0);
+    const second = JSON.parse(outBuf);
+    expect(second.loadedSkills).toHaveLength(1);
+    expect(calls[0]).toContain('Run check.mjs and read CHECK PASSED');
+    expect(calls[calls.length - 1]).toContain('Run check.mjs and read CHECK PASSED');
+    expect(second.verification).toMatchObject({ exitCode: 0, passed: true });
+  });
+
+  it('delivers the full Node managed skill to planner and execution and reports unsafe CLI review unavailable', async () => {
+    const packageDir = join(dir, '.ultragamestudio', 'skills', 'verify-work');
+    mkdirSync(packageDir, { recursive: true });
+    const content = '---\nname: verify-work\ndescription: Use when verifying work.\n---\nSTUDIO FULL RULE: validate actual results before reporting.\n';
+    writeFileSync(join(packageDir, 'SKILL.md'), content);
+    const calls: string[] = [];
+    const code = await runStudio('/verify-work 审查博客里的技术论断', { cwd: dir, runId: 'uc-skills', json: true, quiet: true,
+      gateway: fakeStudioGateway(calls), concurrency: '3', maxRetries: '0' });
+    expect(code).toBe(0);
+    expect(calls[0]).toContain('STUDIO FULL RULE');
+    expect(calls[calls.length - 1]).toContain('STUDIO FULL RULE');
+    const result = JSON.parse(outBuf);
+    expect(result.skillLearning).toMatchObject({ status: 'unavailable', reason: expect.stringContaining('SKILL_REVIEW_UNAVAILABLE') });
+    expect(result.loadedSkills).toHaveLength(1);
+    expect(readFileSync(join(packageDir, 'SKILL.md'), 'utf8')).toBe(content);
+    expect(JSON.parse(readFileSync(join(dir, '.ugs-run', 'uc-skills', 'skill-review.json'), 'utf8'))).toMatchObject({ status: 'unavailable' });
+  });
+
+  it('passes the foreground tool host to the ordinary Node Studio gateway while leaving reviewer capsules unavailable', async () => {
+    const source = await import('../runtime-host');
+    const fake = fakeStudioGateway([]);
+    const build = vi.spyOn(source, 'buildNodeGateway').mockImplementation((options) => {
+      expect(options?.skillTools?.origin.runId).toBe(options?.runId);
+      expect(options?.skillTools?.request).toBeTypeOf('function');
+      expect(options?.skillTools?.evidence).toBeTypeOf('function');
+      return fake;
+    });
+    try {
+      expect(await runStudio('审查博客里的技术论断', { cwd: dir, runId: 'uc-active-tools', json: true, quiet: true, maxRetries: '0' })).toBe(0);
+      expect(build).toHaveBeenCalled();
+      expect(JSON.parse(outBuf).skillLearning).toMatchObject({ status: 'unavailable', reason: expect.stringContaining('SKILL_REVIEW_UNAVAILABLE') });
+    } finally { build.mockRestore(); }
+  });
+
   it('plans, executes, validates, and persists a dynamic harness run', async () => {
     const calls: string[] = [];
     const gateway = fakeStudioGateway(calls);

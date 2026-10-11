@@ -23,6 +23,8 @@ import type {
   NodeGatewayOverride,
 } from '../core/ir';
 import type { PersonalInstructionsByModel } from '../core/personalInstructions';
+import type { SkillEvidence, SkillHostPort, SkillNativeToolEvent, SkillOrigin, SkillReviewModelPort } from './skills/types';
+import type { LoadedSkillContext } from './skills/context';
 import type {
   InteractionAnswer,
   InteractionRequest,
@@ -144,6 +146,8 @@ export interface RunResult {
   failedNodeId?: string;
   error?: Record<string, unknown> | null;
   evidence?: RunEvidence[];
+  /** Authentic redacted tool evidence, never model claims or UI closures. */
+  skillEvidence?: SkillEvidence[];
   /**
    * Per-node content hashes for this run's graph (see runtime/node-hash.ts).
    * Persisted by the host alongside `outputs` so a later "continue" run can pass
@@ -212,6 +216,8 @@ export interface SpawnCliAgentOpts {
   idleTimeoutSeconds?: number;
   onProgress?: (text: string) => void;
   onUsage?: (usage: unknown) => void;
+  /** Raw native parser event BEFORE UI card trimming/synthetic closure. */
+  onToolEvent?: (event: SkillNativeToolEvent) => void;
   sessionId?: string;
   resume?: boolean;
 }
@@ -275,6 +281,7 @@ export interface RunGateway {
     omitModel?: boolean;
     prompt: string;
     onDelta?: (chunk: string) => void;
+    onToolEvent?: (event: SkillNativeToolEvent) => void;
   }): Promise<{ text: string; adapter: string }>;
 
   /** Spawn a one-shot CLI agent (`claude -p` / `codex exec` / `gemini`). */
@@ -381,6 +388,19 @@ export interface RunContext {
   adaptiveEscalation?: boolean;
   /** Injected host gateway capabilities. */
   gateway: RunGateway;
+  /** Frozen execution provenance supplied by desktop/CLI host. */
+  skillOrigin?: SkillOrigin;
+  /** Optional progressive loading. Do not also append skills in the host. */
+  skills?: {
+    origin: SkillOrigin;
+    host: SkillHostPort;
+    model?: SkillReviewModelPort;
+    explicitSkillIds?: readonly string[];
+    signal?: AbortSignal;
+    onLoaded?: (result: LoadedSkillContext) => void;
+  };
+  /** Native event sink; not a decoder of rendered tool-card text. */
+  onToolEvent?: (event: SkillNativeToolEvent) => void;
   /** Per-spawn CLI command override (set once a CLI route is resolved). */
   cliCommand?: string;
   /**

@@ -14,6 +14,8 @@ function slashSuggestionRankForAdapter(
   adapter: RuntimeAdapterId,
 ): number {
   const sourceAdapter = suggestion.sourceAdapter;
+  // These names execute inside the app, never as adapter prompt expansions.
+  if (sourceAdapter === 'app' && /^\/(learn|refine)$/i.test(suggestion.name)) return 3;
   if (sourceAdapter === adapter) return 2;
   if (!sourceAdapter || sourceAdapter === 'app' || sourceAdapter === 'agent') {
     return 1;

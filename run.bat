@@ -4,6 +4,7 @@ title UltraGameStudio Runner
 cd /d "%~dp0"
 
 set "EXE=app\src-tauri\target\release\UltraGameStudio.exe"
+set "EXIT_CODE=1"
 set "MODE=auto"
 if /I "%~1"=="/run"   set "MODE=run"
 if /I "%~1"=="/build" set "MODE=build"
@@ -11,33 +12,21 @@ if /I "%~1"=="/build" set "MODE=build"
 echo ============================================================
 echo   UltraGameStudio Runner
 echo ============================================================
-echo   run.bat          auto: rebuild if sources changed, then launch
-echo   run.bat /run     launch existing exe only
-echo   run.bat /build   build only, do not launch
+echo   run.bat          full rebuild (Rust + frontend), then launch
+echo   run.bat /run     launch existing exe only (skip build)
+echo   run.bat /build   full rebuild only, do not launch
 echo ============================================================
 echo.
 
-set "NEED_BUILD=0"
-if "%MODE%"=="build" (
-  set "NEED_BUILD=1"
-  goto after_decide
+REM default and /build always rebuild; only /run skips the build
+set "NEED_BUILD=1"
+if "%MODE%"=="run" set "NEED_BUILD=0"
+if "%MODE%"=="run" goto after_decide
+if not exist "%EXE%" (
+  echo [..] no exe yet - first build required.
+) else (
+  echo [..] full rebuild - compiling Rust + frontend.
 )
-if "%MODE%"=="run"   goto after_decide
-if not exist "%EXE%" goto need_first_build
-
-REM auto mode + exe exists: ask the helper whether source content changed
-powershell -NoProfile -ExecutionPolicy Bypass -File "app\scripts\needs-rebuild.ps1" "%EXE%" "%CD%"
-if errorlevel 1 goto sources_newer
-echo [OK] exe up to date - skip build.
-goto after_decide
-:sources_newer
-echo [..] source changed since last build - will rebuild.
-set "NEED_BUILD=1"
-goto after_decide
-
-:need_first_build
-echo [..] no exe yet - first build required.
-set "NEED_BUILD=1"
 
 :after_decide
 if "%NEED_BUILD%"=="1" goto do_build
@@ -89,8 +78,6 @@ popd
 
 :build_result
 if not "!CMD_RC!"=="0" goto build_fail
-powershell -NoProfile -ExecutionPolicy Bypass -File "app\scripts\needs-rebuild.ps1" "%EXE%" "%CD%" -WriteStamp
-if errorlevel 1 goto stamp_fail
 echo [OK] build done: %EXE%
 if "%MODE%"=="build" goto build_only_done
 
@@ -104,11 +91,13 @@ start "" "%EXE%"
 echo [OK] launched an independent window. You can close this console.
 echo      (self-test tip: point the in-app workspace to a project COPY.)
 powershell -NoProfile -Command "Start-Sleep -Seconds 3" >nul
+set "EXIT_CODE=0"
 goto end
 
 :build_only_done
 echo.
 echo [OK] build complete (not launched).
+set "EXIT_CODE=0"
 goto pause_end
 
 :ensure_windows_rc
@@ -148,9 +137,6 @@ goto pause_end
 :stop_exe_fail
 echo [X] failed to close running exe before rebuild.
 goto pause_end
-:stamp_fail
-echo [X] failed to save build fingerprint.
-goto pause_end
 :no_exe
 echo [X] exe not found: %EXE%
 goto pause_end
@@ -158,4 +144,4 @@ goto pause_end
 :pause_end
 pause
 :end
-endlocal
+endlocal & exit /b %EXIT_CODE%

@@ -275,6 +275,7 @@ export interface SessionMeta extends HistoryMetadata {
   runStatus?: 'idle' | 'running' | 'success' | 'error' | 'interrupted';
   /** True when the last successful run has not been viewed yet. */
   unreadCompletion?: boolean;
+  contextCompressed?: boolean;
   /** Unsent text left in the AI input box for this session (persisted draft). */
   composerDraft?: string;
   runState?: Record<string, IRRunStatus>;
@@ -352,6 +353,7 @@ export type SessionSummary = Pick<
   runStatus?: SessionMeta['runStatus'];
   /** Derived from meta.unreadCompletion for the "unviewed completion" badge. */
   unreadCompletion?: boolean;
+  contextCompressed?: boolean;
   /** Derived from meta.favorite for lightweight favorite-tab rendering. */
   favorite?: boolean;
   /** Derived from meta.scheduledTask for lightweight schedule rendering. */
@@ -425,6 +427,8 @@ export interface SessionPatch {
   preserveUpdatedAt?: boolean;
   /** Whole-replace messages (rare - prefer appendMessage). */
   messages?: Message[];
+  /** Merge an asynchronous chat snapshot inside the history write queue. */
+  mergeMessages?: boolean;
 }
 
 export interface WorkspaceUpsertInput {

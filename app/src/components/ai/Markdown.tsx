@@ -29,6 +29,7 @@ import {
   detectDetailsTitle,
 } from './lib/htmlDetails';
 import { scanFileRefs } from './lib/fileScan';
+import { parseFileRef } from './lib/filePath';
 import { parseToolLine } from './lib/toolLine';
 import CodeBlock from './CodeBlock';
 import DetailsBlock from './DetailsBlock';
@@ -125,6 +126,7 @@ function MarkdownImage({
       <button
         type="button"
         className="ai-generated-image-trigger"
+        data-file-preview-trigger="true"
         title={`在右侧预览\n${t(locale, 'chat.revealHint')}`}
         onClick={() => void onOpenFile(previewRef)}
         onContextMenu={openContextMenu}
@@ -157,21 +159,10 @@ function markdownUrlTransform(url: string, key: string): string | null | undefin
   }
   if (key === 'href' && isModelUrl(url)) return url;
   if (key === 'href' && /^data:text\/plain;base64,/i.test(url)) return url;
-  // `file:///E:/…/report.md` 是 AI 指明本地交付物的常见写法（生成的 md / HTML /
-  // 文档）。defaultUrlTransform 只放行 http/https/irc/mailto/xmpp，file: 会被清成
-  // ""，SmartLink 于是把整条链接降级成带下划线的装饰性 <span>：看起来像链接，点
-  // 下去毫无反应——正是"交付物点了没反应"的主因。这里保留原样，让 parseFileRef
-  // （内部自己会剥掉 file:// 前缀并解码 %XX）把它变成真正可点的 FileChip。
-  // 上面的 isModelUrl 分支只覆盖 .glb/.zip 等模型资产，.md/.html/.pdf 全靠这条。
-  if (key === 'href' && /^file:\/\//i.test(url)) return url;
-  // Windows drive-letter paths (E:\…) and UNC paths (\\host\…) look like
-  // unknown-protocol URLs to defaultUrlTransform, which sanitises them to
-  // "". When the AI wraps a clipboard-image path in a markdown link
-  // ([截图](E:\…\shot.png)) the href must survive so SmartLink can detect it
-  // as a local file reference and render a clickable FileChip.
-  // CommonMark percent-encodes backslashes in link destinations, so the URL
-  // arrives as "E:%5C…%5C…" rather than "E:\…\…". Match both forms.
-  if (key === 'href' && /^(?:[A-Za-z]:(?:[\\/]|%5[Cc])|\\\\)/.test(url)) return url;
+  // Preserve recognised local destinations (drive paths, /E:/..., file URLs,
+  // UNC, percent-encoded paths). SmartLink handles them through the file
+  // preview bridge instead of asking the webview to navigate to a file URL.
+  if (key === 'href' && parseFileRef(url, { allowSpaces: true })) return url;
   return defaultUrlTransform(url);
 }
 

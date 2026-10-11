@@ -30,6 +30,11 @@
  * Pure Node: no react / zustand / tauri. Imports only `which-cli` (sibling) +
  * `node:*`.
  */
+import { randomUUID } from 'node:crypto';
+import { isContextCompressionEvent, CONTEXT_COMPRESSION_TOOL } from '../../src/lib/contextCompression';
+import type { SkillNativeToolEvent } from '../../src/runtime/skills/types';
+import type { NodeSkillToolOptions } from './skill-tools';
+import { attachNodeCliSkillTools } from './skill-cli';
 import { spawn } from 'node:child_process';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -43,7 +48,9 @@ import {
   whichCli,
 } from './which-cli';
 import {
+  createCliNativeToolParser,
   codexCompletedItem,
+  codexPlanPatch,
   codexProgressLine,
   codexStatusSuccess,
   codexTurnCompletionStatus,
@@ -111,6 +118,15 @@ export interface SpawnCliAgentOpts {
   onProgress?: (text: string) => void;
   /** Raw model usage payload emitted by supported CLI adapters. */
   onUsage?: (usage: unknown) => void;
+  /** Host-assigned native execution identity, independent of session resume. */
+  runId?: string;
+  /** Native parser events, BEFORE UI clipping; prose/sentinels are not input. */
+  onNativeToolEvent?: (event: SkillNativeToolEvent) => void;
+  /** Foreground skill MCP only; never used by completion-only review ports. */
+  skillTools?: NodeSkillToolOptions;
+  onSkillToolsUnavailable?: (reason: string) => void;
+  /** Invocation-owned MCP configuration, assembled only by the host wrapper. */
+  _skillMcp?: { path: string; mcp: Record<string, unknown> };
   /** Claude session continuity. */
   sessionId?: string;
   resume?: boolean;
@@ -307,9 +323,10 @@ function projectMcpSettingsJson(cwd: string | undefined): Record<string, unknown
   return Object.keys(mcpServers).length > 0 ? { mcpServers } : null;
 }
 
-function writeProjectMcpSettings(cwd: string | undefined): { path: string; dir: string } | null {
-  const settings = projectMcpSettingsJson(cwd);
-  if (!settings) return null;
+function writeProjectMcpSettings(cwd: string | undefined, skillMcp?: { path: string; mcp: Record<string, unknown> }): { path: string; dir?: string } | null {
+  const project = projectMcpSettingsJson(cwd);
+  if (!project) return skillMcp ? { path: skillMcp.path } : null;
+  const settings = skillMcp ? { ...project, mcpServers: { ...project.mcpServers as Record<string, unknown>, ugs_skill_tools: skillMcp.mcp } } : project;
   const dir = mkdtempSync(join(tmpdir(), 'ultragamestudio-project-mcp-'));
   const path = join(dir, 'settings.json');
   writeFileSync(path, JSON.stringify(settings), 'utf8');
@@ -471,6 +488,12 @@ function buildArgs(
       args.push('-o', codexOutPath);
     }
     args.push('-');
+  } else if (protocol === 'gemini') {
+    args.push('-p', '', '--output-format', 'stream-json');
+    if (opts.model && shouldPassModel(opts.adapter, opts.model)) args.push('--model', opts.model);
+    if (permission === 'readonly') args.push('--approval-mode', 'plan');
+    else if (permission !== 'ask') args.push('--approval-mode', 'yolo');
+    if (cwd) workdir = cwd;
   } else if (protocol === 'grok') {
     // grok (`@xai-official/grok`): claude-family headless single-turn, but with
     // grok's own flag names. `streaming-messages-json` emits NDJSON in the
@@ -518,10 +541,10 @@ function buildArgs(
     }
     disableAutoupdater = true;
     if (mcpEnabled()) {
-      const projectMcp = writeProjectMcpSettings(cwd);
+      const projectMcp = writeProjectMcpSettings(cwd, opts._skillMcp);
       if (projectMcp) {
         args.push('--mcp-config', projectMcp.path);
-        tempDirs.push(projectMcp.dir);
+        if (projectMcp.dir) tempDirs.push(projectMcp.dir);
       }
     } else {
       args.push('--strict-mcp-config');
@@ -558,8 +581,43 @@ function buildArgs(
  * `runtime/failure.ts#parseRunFailure` can classify (same wording as lib.rs):
  * timeout / idle_timeout / interrupted / exit / spawn.
  */
-export function spawnCliAgent(prompt: string, opts: SpawnCliAgentOpts): Promise<string> {
+export async function spawnCliAgent(prompt: string, opts: SpawnCliAgentOpts): Promise<string> {
+  if (!opts.skillTools) return spawnCliAgentProcess(prompt, opts);
+  const notify = (reason: string) => { try { opts.onSkillToolsUnavailable?.(reason); } catch { /* Auxiliary status observer. */ } };
+  if (!mcpEnabled()) {
+    notify('SKILL_TOOLS_UNAVAILABLE: MCP is explicitly disabled; no reviewer fallback.');
+    return spawnCliAgentProcess(prompt, { ...opts, skillTools: undefined });
+  }
+  const runId = opts.runId ?? `${opts.skillTools.origin.runId}/cli/${randomUUID()}`;
+  const source = opts.skillTools.origin.runId;
+  if (runId !== source && !runId.startsWith(`${source}/cli/`)) throw new Error('SKILL_TOOL_ORIGIN_MISMATCH');
+  const binary = whichCli(opts.adapter, { cliCommand: opts.cliCommand });
+  // Probe transport flags only: this never certifies a background CLI sandbox.
+  let help = '';
+  if (['claude-code', 'claude'].includes(opts.adapter)) {
+    const launch = resolveLaunch(binary, ['--help']);
+    const result = spawnSync(launch.command, launch.args, { encoding: 'utf8', input: '', timeout: 5000, maxBuffer: 262144,
+      env: { ...process.env, DISABLE_AUTOUPDATER: '1' }, windowsHide: true, windowsVerbatimArguments: launch.verbatim });
+    if (result.status === 0) help = String(result.stdout ?? '');
+  }
+  let attachment: Awaited<ReturnType<typeof attachNodeCliSkillTools>>;
+  try {
+    attachment = await attachNodeCliSkillTools({ ...opts.skillTools, origin: { ...opts.skillTools.origin, runId }, adapter: opts.adapter,
+      help, permission: opts.permission, signal: opts.signal ?? opts.skillTools.signal });
+  } catch (error) {
+    if (opts.signal?.aborted || opts.skillTools.signal?.aborted) throw new Error('SKILL_TOOL_CANCELLED');
+    notify(error instanceof Error ? error.message : 'SKILL_TOOLS_UNAVAILABLE');
+    return spawnCliAgentProcess(prompt, { ...opts, skillTools: undefined, runId });
+  }
+  try {
+    return await spawnCliAgentProcess(prompt, { ...opts, skillTools: undefined, runId,
+      env: { ...opts.env, ...attachment.env }, _skillMcp: { path: attachment.path, mcp: attachment.mcp } });
+  } finally { await attachment.close(); }
+}
+
+function spawnCliAgentProcess(prompt: string, opts: SpawnCliAgentOpts): Promise<string> {
   const protocol = adapterProtocol(opts.adapter);
+  const parseNative = createCliNativeToolParser({ adapter: opts.adapter, runId: opts.runId ?? randomUUID() });
   if (protocol === 'claude') {
     repairClaudeBunInstall();
   }
@@ -748,7 +806,22 @@ export function spawnCliAgent(prompt: string, opts: SpawnCliAgentOpts): Promise<
       } catch {
         return;
       }
+      if (isContextCompressionEvent(v)) {
+        opts.onProgress?.(encodeToolPatch({
+          id: `compression:${Date.now()}:${toolStartedAt.size}`,
+          name: CONTEXT_COMPRESSION_TOOL, status: 'done', ephemeral: true,
+        }));
+        return;
+      }
+      for (const event of parseNative(v)) {
+        try { opts.onNativeToolEvent?.(event); } catch { /* Auxiliary observers cannot break the foreground task. */ }
+      }
       if (isCodex) {
+        const plan = codexPlanPatch(v);
+        if (plan) {
+          opts.onProgress?.(encodeToolPatch(plan));
+          return;
+        }
         const usage = codexTurnUsage(v);
         if (usage) opts.onUsage?.(usage);
         const status = codexTurnCompletionStatus(v);
@@ -803,6 +876,13 @@ export function spawnCliAgent(prompt: string, opts: SpawnCliAgentOpts): Promise<
               }),
             );
           }
+        }
+        return;
+      }
+      if (protocol === 'gemini') {
+        if (v.type === 'message' && v.role === 'assistant' && typeof v.content === 'string') {
+          acc += v.content;
+          opts.onProgress?.(v.content);
         }
         return;
       }

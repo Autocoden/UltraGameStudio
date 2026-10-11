@@ -358,16 +358,16 @@ export default function Select({
                               })
                             }
                             className={cn(
-                              'flex w-full items-center gap-1.5 px-3 pb-1 pt-1.5 text-left font-mono text-[9px] uppercase tracking-wider text-fg-faint hover:text-fg-dim',
+                              'flex w-full items-center gap-1.5 px-3 pb-1 pt-1.5 text-left text-[11px] font-semibold uppercase tracking-wide text-fg-faint hover:text-fg-dim',
                               index > 0 && 'border-t border-border-soft',
                             )}
                           >
-                            <span className="shrink-0 text-[9px] leading-none">
+                            <span className="shrink-0 text-[11px] leading-none">
                               {groupCollapsed ? '▸' : '▾'}
                             </span>
                             <span className="flex-1 truncate">{opt.group}</span>
                             {groupCollapsed && (
-                              <span className="shrink-0 text-[9px] text-fg-faint/70">
+                              <span className="shrink-0 text-[11px] text-fg-faint/70">
                                 {
                                   filtered.filter(
                                     (o) => o.group === opt.group && !o.action,
@@ -381,7 +381,7 @@ export default function Select({
                         <li
                           role="presentation"
                           className={cn(
-                            'px-3 pb-1 pt-1.5 font-mono text-[9px] uppercase tracking-wider text-fg-faint',
+                            'px-3 pb-1 pt-1.5 text-[11px] font-semibold uppercase tracking-wide text-fg-faint',
                             index > 0 && 'mt-1 border-t border-border-soft',
                           )}
                         >

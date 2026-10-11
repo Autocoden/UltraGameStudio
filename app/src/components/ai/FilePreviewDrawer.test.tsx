@@ -1,12 +1,19 @@
-import { act, createElement } from 'react';
+import { act, createElement, useCallback, useState } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import FilePreviewDrawer, { rewriteLocalAssetsInHtml } from './FilePreviewDrawer';
 import { previewLocalFile, workspaceFileDiff } from '@/lib/tauri';
+import GeneratedArtifactsCard from './GeneratedArtifactsCard';
+import FileChip from './FileChip';
+import SmartLink from './SmartLink';
+import EditedFilesCard from './EditedFilesCard';
+import type { FileRef } from './lib/filePath';
 
 vi.mock('@/lib/tauri', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/tauri')>()),
   openLocalPath: vi.fn(),
+  fileExists: vi.fn().mockResolvedValue(true),
+  readImageThumbnail: vi.fn().mockRejectedValue(new Error('No thumbnail')),
   previewLocalFile: vi.fn(),
   workspaceFileDiff: vi.fn(),
 }));
@@ -248,6 +255,73 @@ describe('FilePreviewDrawer', () => {
     });
     expect(onClose).toHaveBeenCalledOnce();
   });
+
+  it.each(['overlay', 'embedded'] as const)(
+    '%s switches directly between preview entries without closing on pointerdown',
+    async (variant) => {
+      const first = { path: 'report.md', basename: 'report.md' };
+      const second = { path: 'result.svg', basename: 'result.svg' };
+      const onClose = vi.fn();
+      vi.mocked(previewLocalFile).mockImplementation(async (path) => ({
+        path,
+        fileName: path,
+        kind: 'text',
+        mime: 'text/plain',
+        sizeBytes: 16,
+        truncated: false,
+        text: `Preview: ${path}`,
+        base64: null,
+      }));
+
+      function PreviewEntries() {
+        const [refData, setRefData] = useState<FileRef | null>(first);
+        const close = useCallback(() => {
+          onClose();
+          setRefData(null);
+        }, []);
+        return createElement('div', {},
+          createElement(GeneratedArtifactsCard, {
+            artifacts: [{ ref: first, label: 'Report' }, { ref: second, label: 'Image' }],
+            onOpenFile: setRefData,
+          }),
+          createElement(FileChip, { refData: first, onOpenFile: setRefData }),
+          createElement(FileChip, { refData: second, onOpenFile: setRefData, thumbnailOnly: true }),
+          createElement(SmartLink, {
+            href: 'https://example.com/remote.png', children: 'Remote image', onOpenFile: setRefData,
+          }),
+          createElement(EditedFilesCard, {
+            changes: { source: 'agent', files: [{ path: 'source.ts', status: 'modified', added: 1, deleted: 0 }] },
+            locale: 'zh-CN', onOpenFile: setRefData,
+          }),
+          refData && createElement(FilePreviewDrawer, { refData, variant, onClose: close }),
+        );
+      }
+
+      await act(async () => root.render(createElement(PreviewEntries)));
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+
+      for (const [selector, expectedLabel] of [
+        ['button[aria-label="打开生成物：result.svg"] span span', second.basename],
+        ['.ai-file-chip__label', first.basename],
+        ['.ai-file-chip-thumb', second.basename],
+        ['button[title="在右侧预览"]', 'Remote image'],
+        ['[data-ugs-edited-files] button[title="source.ts"] span', 'source.ts'],
+      ]) {
+        const target = container.querySelector<HTMLElement>(selector);
+        expect(target, selector).not.toBeNull();
+        await act(async () => {
+          target!.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
+        });
+        expect(onClose, `Pointerdown on ${selector} must preserve the preview`).not.toHaveBeenCalled();
+        await act(async () => target!.click());
+        expect(container.querySelector('header')?.textContent).toContain(expectedLabel);
+      }
+
+      await act(async () => document.body.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true })));
+      expect(onClose).toHaveBeenCalledOnce();
+      expect(container.querySelector('header')).toBeNull();
+    },
+  );
 
   it('renders image previews through a blob URL instead of a large data URL', async () => {
     vi.useFakeTimers();

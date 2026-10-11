@@ -304,7 +304,9 @@ function ScriptModal({
             {t(locale, 'common.close')}
           </button>
         </div>
-        <pre className="overflow-auto bg-[#010409] px-4 py-3 font-mono text-[12.5px] leading-relaxed text-[#c9d1d9]">
+        {/* Theme-aware code surface: this used to hardcode a GitHub-dark pair
+            (#010409 / #c9d1d9), so the snippet stayed dark on the light presets. */}
+        <pre className="overflow-auto bg-[var(--code-bg)] px-4 py-3 font-mono text-[12.5px] leading-relaxed text-fg">
           <code>{script}</code>
         </pre>
       </div>

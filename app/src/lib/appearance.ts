@@ -500,6 +500,15 @@ export function applyAppearance(settings: AppearanceSettings): void {
   root.dataset.ugsFontFamily = fontFamilyId;
   root.dataset.ugsFontSize = String(fontSizePx);
   root.style.setProperty('--ugs-font-family', fontFamily.cssFamily);
+  // Streamed answers and reasoning are the product's main reading surface, so the
+  // family setting has to reach them explicitly. It used to only write
+  // --ugs-font-family while `.ai-markdown` was pinned to --ugs-mono-font-family,
+  // which made the font picker a no-op exactly where it mattered most.
+  root.style.setProperty('--ugs-reader-font-family', fontFamily.cssFamily);
+  // --ugs-mono-font-family is deliberately NOT user-selectable: it is the code /
+  // terminal face (JetBrains Mono + CJK monospace fallbacks, see global.css :root).
+  // Keeping it out of the per-user write path is what keeps code columns aligned
+  // no matter which UI font is chosen.
   root.style.setProperty('--ugs-font-size', `${fontSizePx}px`);
   for (const presetId of BUILTIN_STYLE_PRESETS) {
     root.classList.toggle(`ugs-style-${presetId}`, presetId === stylePresetId);

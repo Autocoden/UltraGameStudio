@@ -81,15 +81,17 @@ function regionLabel(region: VisionProviderRegion, locale: Locale): string {
 }
 
 function regionClass(region: VisionProviderRegion): string {
-  if (region === 'china') return 'border-rose-500/30 bg-rose-500/10 text-rose-200';
-  if (region === 'local') return 'border-violet-500/30 bg-violet-500/10 text-violet-200';
-  return 'border-sky-500/30 bg-sky-500/10 text-sky-200';
+  if (region === 'china') return 'border-status-error/30 bg-status-error/10 text-status-error';
+  // 'local' is the violet "other" state; --status-draft is the violet token, so it
+  // stays themed. It used to be a literal violet-500/200 pair.
+  if (region === 'local') return 'border-status-draft/30 bg-status-draft/10 text-status-draft';
+  return 'border-status-info/30 bg-status-info/10 text-status-info';
 }
 
 function categoryClass(category: VisionProviderCategory): string {
   return category === 'free-credit'
-    ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200'
-    : 'border-amber-500/30 bg-amber-500/10 text-amber-200';
+    ? 'border-status-success/30 bg-status-success/10 text-status-success'
+    : 'border-status-warning/30 bg-status-warning/10 text-status-warning';
 }
 
 function statusLabel(
@@ -430,7 +432,7 @@ function VisionProviderRow({
             <span className={cn(
               'rounded-full border px-2 py-0.5 text-[10px] font-medium',
               ready
-                ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200'
+                ? 'border-status-success/30 bg-status-success/10 text-status-success'
                 : 'border-border bg-panel text-fg-faint',
             )}>
               {statusLabel(provider, settings, locale)}
@@ -458,7 +460,7 @@ function VisionProviderRow({
             onClick={onDelete}
             title={t(locale, 'settings.models.delete')}
             aria-label={t(locale, 'settings.models.delete')}
-            className="inline-flex h-7 w-7 items-center justify-center rounded border border-rose-500/40 bg-rose-500/10 text-rose-300 transition-colors hover:bg-rose-500/20"
+            className="inline-flex h-7 w-7 items-center justify-center rounded border border-status-error/40 bg-status-error/10 text-status-error transition-colors hover:bg-status-error/20"
           >
             <Trash2 size={13} strokeWidth={2.2} />
           </button>
@@ -513,7 +515,7 @@ function VisionProviderRow({
                     type="button"
                     onClick={() => patch({ key: '' })}
                     title={t(locale, 'settings.models.clear')}
-                    className="flex h-6 w-6 items-center justify-center rounded text-fg-faint transition-colors hover:text-rose-300"
+                    className="flex h-6 w-6 items-center justify-center rounded text-fg-faint transition-colors hover:text-status-error"
                   >
                     <Trash2 size={13} />
                   </button>

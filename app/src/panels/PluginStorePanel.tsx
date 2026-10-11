@@ -364,7 +364,7 @@ export function PluginStorePanel({
         <p
           className={cn(
             'text-[11px] leading-relaxed',
-            status.tone === 'ok' ? 'text-emerald-300' : 'text-rose-300',
+            status.tone === 'ok' ? 'text-status-success' : 'text-status-error',
           )}
         >
           {status.msg}
@@ -442,7 +442,7 @@ export function PluginStorePanel({
       </div>
 
       {catalog.errors.length > 0 && (
-        <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] leading-relaxed text-amber-100">
+        <div className="rounded-lg border border-status-warning/30 bg-status-warning/10 px-3 py-2 text-[11px] leading-relaxed text-status-warning">
           部分来源加载失败：
           {catalog.errors.map((error) => `${error.sourceName}: ${error.message}`).join('；')}
         </div>

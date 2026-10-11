@@ -77,17 +77,17 @@ function ImportanceBadge({
 }) {
   const style =
     importance === 'must'
-      ? 'border-rose-500/50 bg-rose-500/10 text-rose-300'
+      ? 'border-status-error/50 bg-status-error/10 text-status-error'
       : importance === 'important'
-        ? 'border-amber-500/50 bg-amber-500/10 text-amber-300'
+        ? 'border-status-warning/50 bg-status-warning/10 text-status-warning'
         : importance === 'minor'
           ? 'border-border bg-bg-soft text-fg-faint'
           : 'border-dashed border-border bg-transparent text-fg-faint/70';
   const dot =
     importance === 'must'
-      ? 'bg-rose-400'
+      ? 'bg-status-error'
       : importance === 'important'
-        ? 'bg-amber-400'
+        ? 'bg-status-warning'
         : importance === 'minor'
           ? 'bg-fg-faint/60'
           : 'bg-transparent border border-dashed border-fg-faint/60';
@@ -293,17 +293,17 @@ export default function MemorySettings({ locale, workspaceId }: MemorySettingsPr
       </div>
 
       {error && (
-        <p className="rounded border border-rose-500/60 bg-rose-500/10 px-2 py-1.5 text-[11px] text-rose-300">
+        <p className="rounded border border-status-error/60 bg-status-error/10 px-2 py-1.5 text-[11px] text-status-error">
           {error}
         </p>
       )}
 
       {pending.length > 0 && (
-        <div className="space-y-2 rounded-lg border border-amber-500/50 bg-amber-500/5 p-3">
+        <div className="space-y-2 rounded-lg border border-status-warning/50 bg-status-warning/5 p-3">
           <div className="flex items-center justify-between gap-2">
             <h4 className="text-xs font-semibold text-fg">
               {t(locale, 'settings.memory.pendingTitle')}
-              <span className="ml-1.5 rounded-full bg-amber-500/30 px-1.5 py-0.5 text-[10px] tabular-nums text-amber-200">
+              <span className="ml-1.5 rounded-full bg-status-warning/30 px-1.5 py-0.5 text-[10px] tabular-nums text-status-warning">
                 {pending.length}
               </span>
             </h4>
@@ -323,7 +323,7 @@ export default function MemorySettings({ locale, workspaceId }: MemorySettingsPr
               </button>
               <button
                 type="button"
-                className="rounded border border-border px-2 py-1 text-[11px] text-fg-dim transition-colors hover:border-rose-500/60 hover:text-rose-300 disabled:opacity-40"
+                className="rounded border border-border px-2 py-1 text-[11px] text-fg-dim transition-colors hover:border-status-error/60 hover:text-status-error disabled:opacity-40"
                 onClick={() =>
                   void resolvePending(
                     pending.map((p) => p.id),
@@ -377,7 +377,7 @@ export default function MemorySettings({ locale, workspaceId }: MemorySettingsPr
                 <button
                   type="button"
                   title={t(locale, 'settings.memory.pendingApprove')}
-                  className="rounded p-1 text-emerald-400 hover:bg-bg-soft"
+                  className="rounded p-1 text-status-success hover:bg-bg-soft"
                   onClick={() => void resolvePending([p.id], 'approve')}
                 >
                   <Check size={13} />
@@ -385,7 +385,7 @@ export default function MemorySettings({ locale, workspaceId }: MemorySettingsPr
                 <button
                   type="button"
                   title={t(locale, 'settings.memory.pendingReject')}
-                  className="rounded p-1 text-fg-faint hover:bg-bg-soft hover:text-rose-400"
+                  className="rounded p-1 text-fg-faint hover:bg-bg-soft hover:text-status-error"
                   onClick={() => void resolvePending([p.id], 'reject')}
                 >
                   <X size={13} />
@@ -662,7 +662,7 @@ function MemoryStoreSection({
 
       <div className="h-1 overflow-hidden rounded-full bg-border">
         <div
-          className={cn('h-full rounded-full transition-all', pct >= 90 ? 'bg-rose-400' : 'bg-accent')}
+          className={cn('h-full rounded-full transition-all', pct >= 90 ? 'bg-status-error' : 'bg-accent')}
           style={{ width: `${pct}%` }}
         />
       </div>
@@ -689,7 +689,7 @@ function MemoryStoreSection({
                   <button
                     type="button"
                     title={t(locale, 'settings.memory.save')}
-                    className="rounded p-1 text-emerald-400 hover:bg-bg-soft"
+                    className="rounded p-1 text-status-success hover:bg-bg-soft"
                     onClick={async () => {
                       const next = editText.trim();
                       if (next && next !== entry.text) {
@@ -741,7 +741,7 @@ function MemoryStoreSection({
                   <button
                     type="button"
                     title={t(locale, 'settings.memory.delete')}
-                    className="rounded p-1 text-fg-faint opacity-0 transition-opacity hover:bg-bg-soft hover:text-rose-400 group-hover:opacity-100"
+                    className="rounded p-1 text-fg-faint opacity-0 transition-opacity hover:bg-bg-soft hover:text-status-error group-hover:opacity-100"
                     onClick={() => void onRemove(entry.text)}
                   >
                     <Trash2 size={13} />

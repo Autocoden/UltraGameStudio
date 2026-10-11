@@ -43,6 +43,13 @@ import {
   Zap,
 } from "lucide-react";
 import Select from "@/components/Select";
+import ComposerOptions from "@/components/ComposerOptions";
+import EditedFilesCard from "@/components/ai/EditedFilesCard";
+import SessionChangesSummary from "@/components/ai/SessionChangesSummary";
+import ChatTaskProgress from "@/components/ai/ChatTaskProgress";
+import { collectChatTaskProgress } from "@/lib/chatTasks";
+import { MessageArtifacts } from "@/components/ai/GeneratedArtifactsCard";
+import { collectSessionFileChanges, collectTurnFileChanges } from "@/lib/turnFileChanges";
 import { summarizeAnswer, type InteractionAnswer } from "@/core/interaction";
 import { readStartUserInputs } from "@/core/startInputs";
 import {
@@ -153,6 +160,8 @@ import {
   type Locale,
 } from "@/lib/i18n";
 import type { Message } from "@/store/types";
+import type { SkillReviewState } from "@/runtime/skills/types";
+import SkillLearningCard from "@/components/ai/SkillLearningCard";
 import {
   buildSlashSuggestions,
   buildGameSkillSuggestions,
@@ -250,7 +259,8 @@ import StudioRunCard from "@/panels/StudioRunCard";
 import GameTeamPanel, {
   OPEN_GAME_TEAM_DETAILS_EVENT,
 } from "@/panels/GameTeamPanel";
-import { requestProjectRightPanelFilePreview } from "@/panels/projectRightPanelEvents";
+import { requestProjectRightPanelFilePreview, requestProjectRightPanelToggle, requestProjectRightPanelSessionFiles,
+  PROJECT_RIGHT_PANEL_VISIBILITY_EVENT } from "@/panels/projectRightPanelEvents";
 import { activeChatTitle, formatMessageTime } from "@/panels/aidock/chatTitle";
 import {
   fileMentionEntryForTarget,
@@ -307,7 +317,7 @@ import FileChip, {
   type OpenFileIntent,
 } from "@/components/ai/FileChip";
 import { shallow } from "zustand/shallow";
-import { isActiveAiEditingSession, useStore } from "@/store/useStore";
+import { isActiveAiEditingSession, useStore, retryPersistedSkillLearning } from "@/store/useStore";
 import {
   getRemoteWorkspace,
   getCachedRemoteWorkspaceSkills,
@@ -774,7 +784,7 @@ function MessageActionToolbar({
               return (
                 <div key={option.id}>
                   {showGroup && (
-                    <div className="px-3 pb-1 pt-1.5 font-mono text-[9px] uppercase tracking-wider text-fg-faint">
+                    <div className="px-3 pb-1 pt-1.5 text-[11px] font-semibold uppercase tracking-wide text-fg-faint">
                       {option.group}
                     </div>
                   )}
@@ -1852,6 +1862,17 @@ export default function AIDock({
   const isChat = layout === "chat";
   const messages = useStore((s) => s.messages);
   const sendPrompt = useStore((s) => s.sendPrompt);
+  const learnSkills = useStore((s) => s.learnSkills);
+  const reviewSkillLearningAction = useStore((s) => s.reviewSkillLearningAction);
+  const updateSkillLearningState = useStore((s) => s.updateSkillLearningState);
+  const handleSkillReviewAction = async (messageId: string, state: SkillReviewState, action: "approve" | "reject" | "rollback", id: string) => {
+    const result = await reviewSkillLearningAction(state, action, id);
+    if ((["hostId", "workspaceId", "sessionId", "turnId", "runId"] as const).some((key) => result.origin[key] !== state.origin[key])
+      || result.origin.cwd !== state.origin.cwd
+      || (action !== "rollback" && result.batchId !== state.result?.batchId)) throw new Error("SKILL_RESULT_ORIGIN_MISMATCH");
+    await updateSkillLearningState(messageId, { ...state, status: result.status, action, result, error: result.error });
+    return result;
+  };
   const ensureSessionStartupWorkspace = useStore(
     (s) => s.ensureSessionStartupWorkspace,
   );
@@ -1911,6 +1932,7 @@ export default function AIDock({
   const [shortcutSettings, setShortcutSettingsState] =
     useState(loadShortcutSettings);
   const gameExpertSettings = useStore((s) => s.gameExpertSettings);
+  const composerHintRowVisible = useStore((s) => s.composerHintRowVisible);
   // 「提及文件 / 组织架构 / 知识库」三个入口默认隐藏，设置 → 常规 里可打开。
   const composerToolButtonsVisible = useStore(
     (s) => s.composerToolButtonsVisible,
@@ -3982,6 +4004,18 @@ export default function AIDock({
   // Open a local file referenced by an AI-message chip in the right preview pane.
   // Paths resolve against the active workspace folder in the Tauri command.
   const workspaceCwd = composer.workspace;
+  const sessionFileChanges = useMemo(
+    () => collectSessionFileChanges(messages, workspaceCwd || undefined),
+    [messages, workspaceCwd],
+  );
+  const [projectFilePanelOpen, setProjectFilePanelOpen] = useState(false);
+  useEffect(() => {
+    const onVisibility = (event: Event) => {
+      setProjectFilePanelOpen(Boolean((event as CustomEvent<{ open: boolean }>).detail?.open));
+    };
+    window.addEventListener(PROJECT_RIGHT_PANEL_VISIBILITY_EVENT, onVisibility);
+    return () => window.removeEventListener(PROJECT_RIGHT_PANEL_VISIBILITY_EVENT, onVisibility);
+  }, []);
   const fileMentionRootFolders = useMemo(
     () => {
       if (activeRemoteWorkspaceRoot) return [activeRemoteWorkspaceRoot];
@@ -4483,6 +4517,15 @@ export default function AIDock({
   // one exception: they keep their store position (just above the reply they
   // interrupted) instead of being re-sorted by their send-time createdAt.
   const displayMessages = useMemo(() => orderDisplayMessages(messages), [messages]);
+  const taskProgress = useMemo(() => collectChatTaskProgress(messages.filter(
+    (message) => !queuedChatMessageIds.includes(message.id),
+  )), [messages, queuedChatMessageIds]);
+  const jobDetails = useStore((s) => s.jobDetails);
+  const currentJobs = useMemo(() => jobDetails.filter((job) =>
+    job.manifest.workspaceId === (activeWorkspaceId ?? null)
+    && job.manifest.sessionId === (activeSessionId ?? null)
+    && job.manifest.startedAt >= taskProgress.startedAt,
+  ), [jobDetails, activeWorkspaceId, activeSessionId, taskProgress.startedAt]);
   const scrollSnapshotForWindow =
     streamScrollSnapshotsRef.current.get(activeStreamScrollKey);
   const anchorMessageIndex = scrollSnapshotForWindow?.anchorMessageId
@@ -4560,6 +4603,8 @@ export default function AIDock({
   const [chatInputHeight, setChatInputHeight] = useState<number>(
     () => loadPaneWidth(CHAT_INPUT_HEIGHT_KEY) ?? CHAT_INPUT_HEIGHT,
   );
+  const [renderedChatInputHeight, setRenderedChatInputHeight] =
+    useState(chatInputHeight);
   const dockRef = useRef<HTMLDivElement>(null);
   const orgPanelRef = useRef<HTMLDivElement>(null);
   const inputSectionRef = useRef<HTMLElement>(null);
@@ -5215,47 +5260,82 @@ export default function AIDock({
     draftRef.current = draft;
   }, [draft]);
 
-  // Empty-session centered composer auto-grow: the card is a fixed min-h-[14rem]
-  // box, so long drafts would only scroll inside the textarea. Measure the
-  // textarea's natural content height and grow the card up to 2.5x the base
-  // height, then let it scroll internally.
-  // Height reserved by the toolbar + paddings inside the card, so the base
-  // 14rem card leaves this much visible text area before growing.
-  const CENTER_INPUT_CHROME = 96;
-  const CENTER_TEXTAREA_BASE = CENTER_INPUT_BASE_HEIGHT - CENTER_INPUT_CHROME;
-  const CENTER_TEXTAREA_MAX = CENTER_INPUT_MAX_HEIGHT - CENTER_INPUT_CHROME;
+  // Both chat layouts grow with the draft. Measure the actual chrome so file
+  // chips and wrapping toolbars cannot take space away from the last text line.
+  const CENTER_TEXTAREA_BASE = CENTER_INPUT_BASE_HEIGHT - 96;
   const [centerInputTextareaHeight, setCenterInputTextareaHeight] = useState(
     CENTER_TEXTAREA_BASE,
   );
-  useLayoutEffect(() => {
-    if (!centerInput) {
-      setCenterInputTextareaHeight(CENTER_TEXTAREA_BASE);
-      return;
-    }
+  const fitChatInput = useCallback(() => {
+    if (!isChat) return;
     const el = inputRef.current;
-    if (!el) return;
-    // Reset height, min-height and flex-grow so scrollHeight reports the true
-    // natural content height. The previous (larger) minHeight would otherwise
-    // inflate scrollHeight, so the box never shrinks back when text is deleted.
+    const section = inputSectionRef.current;
+    if (!el || !section) return;
+    const chrome = Math.max(
+      0,
+      section.getBoundingClientRect().height - el.getBoundingClientRect().height,
+    );
     const prevHeight = el.style.height;
     const prevMinHeight = el.style.minHeight;
+    const prevMaxHeight = el.style.maxHeight;
     const prevFlex = el.style.flex;
-    el.style.height = "auto";
+    el.style.overflowY = "hidden";
+    el.style.height = "0px";
     el.style.minHeight = "0";
+    el.style.maxHeight = "none";
     el.style.flex = "0 0 auto";
     const content = el.scrollHeight;
     el.style.height = prevHeight;
     el.style.minHeight = prevMinHeight;
+    el.style.maxHeight = prevMaxHeight;
     el.style.flex = prevFlex;
-    setCenterInputTextareaHeight(
-      Math.min(Math.max(content, CENTER_TEXTAREA_BASE), CENTER_TEXTAREA_MAX),
+    const dockHeight = dockRef.current?.getBoundingClientRect().height;
+    const viewportMax = Math.max(
+      MIN_CHAT_INPUT_HEIGHT,
+      (dockHeight || window.innerHeight) - MIN_CHAT_RETURN_HEIGHT,
     );
-  }, [
-    centerInput,
-    draft,
-    CENTER_TEXTAREA_BASE,
-    CENTER_TEXTAREA_MAX,
-  ]);
+    const maximum = Math.min(
+      viewportMax,
+      Math.max(CENTER_INPUT_MAX_HEIGHT, centerInput ? 0 : chatInputHeight),
+    );
+    const available = Math.max(0, maximum - chrome);
+    if (centerInput) {
+      setCenterInputTextareaHeight(
+        Math.min(Math.max(content, CENTER_TEXTAREA_BASE), available),
+      );
+    } else {
+      setRenderedChatInputHeight(
+        Math.min(Math.max(content + chrome, chatInputHeight), maximum),
+      );
+    }
+    el.style.overflowY = content > available + 1 ? "auto" : "hidden";
+    if (el.style.overflowY === "hidden") el.scrollTop = 0;
+  }, [isChat, centerInput, chatInputHeight, CENTER_TEXTAREA_BASE]);
+
+  useLayoutEffect(fitChatInput, [draft, fitChatInput]);
+
+  useLayoutEffect(() => {
+    if (!isChat) return;
+    const section = inputSectionRef.current;
+    const card = inputDropRef.current;
+    const observer = typeof ResizeObserver === "undefined"
+      ? null
+      : new ResizeObserver(fitChatInput);
+    // Section/dock changes catch wrapping, side panels and viewport changes;
+    // card children catch asynchronous previews and toolbar height changes.
+    if (section) observer?.observe(section);
+    if (dockRef.current) observer?.observe(dockRef.current);
+    if (card) {
+      for (const child of Array.from(card.children)) observer?.observe(child);
+    }
+    window.addEventListener("resize", fitChatInput);
+    document.fonts?.addEventListener("loadingdone", fitChatInput);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", fitChatInput);
+      document.fonts?.removeEventListener("loadingdone", fitChatInput);
+    };
+  }, [fitChatInput, draftFileRefs.length, composerTipText]);
 
   const rememberSelection = useCallback(
     (target: HTMLTextAreaElement | null = inputRef.current) => {
@@ -6534,7 +6614,7 @@ export default function AIDock({
     (e: React.MouseEvent) => {
       e.preventDefault();
       const startY = e.clientY;
-      const startHeight = chatInputHeight;
+      const startHeight = renderedChatInputHeight;
       document.body.style.userSelect = "none";
       document.body.style.cursor = "row-resize";
 
@@ -6558,7 +6638,7 @@ export default function AIDock({
       window.addEventListener("mouseup", onUp);
       window.addEventListener("blur", onUp);
     },
-    [chatInputHeight],
+    [renderedChatInputHeight],
   );
 
   // Capture the whole conversation as a long screenshot. Forces every message
@@ -6831,6 +6911,20 @@ export default function AIDock({
       return;
     }
     if (isReadOnly || activeAiEditing) return;
+    const learningCommand = /^\/(learn|refine)(?:\s+([\s\S]*))?$/i.exec(text);
+    if (learningCommand) {
+      const kind = learningCommand[1].toLowerCase() as "learn" | "refine";
+      const lesson = (learningCommand[2] ?? "").trim();
+      if (kind === "learn" && !lesson) {
+        useStore.setState({ blockedSendTip: {
+          kind: "slash-command-unavailable",
+          message: locale === "zh-CN" ? "/learn 需要填写要学习的经验文本。" : "/learn requires the lesson text to learn.",
+        } });
+        return;
+      }
+      if (learnSkills(kind, lesson)) clearDraftIfNeeded();
+      return;
+    }
     const gddModeStart = /^\/gdd-mode-start(?:\s+([\s\S]*))?$/i.exec(text);
     if (gddModeStart) {
       const wasGddMode = composer.gddMode;
@@ -7806,7 +7900,7 @@ export default function AIDock({
     }
   }, [messages, locale, chatTitle]);
   const headerActionButtonClass =
-    "flex h-7 shrink-0 items-center gap-1 rounded-md border border-border bg-panel-2 px-2 text-xs text-fg-dim transition-colors hover:border-accent hover:text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent disabled:cursor-not-allowed disabled:opacity-40";
+    "ugs-control flex h-8 shrink-0 items-center gap-1.5 rounded-md bg-transparent px-2.5 text-[13px] text-fg-dim transition-colors hover:bg-border-soft hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:cursor-not-allowed disabled:opacity-40";
   const openTeamDetailsFromMain = useCallback((nodeId: string) => {
     window.dispatchEvent(
       new CustomEvent(OPEN_GAME_TEAM_DETAILS_EVENT, { detail: { nodeId } }),
@@ -7814,6 +7908,15 @@ export default function AIDock({
   }, []);
   const conversationActions = isChat && (
     <>
+      <button type="button" data-ugs-file-panel-toggle
+        onClick={requestProjectRightPanelToggle}
+        title={locale === "zh-CN" ? "文件面板" : "File panel"}
+        aria-label={locale === "zh-CN" ? "文件面板" : "File panel"}
+        aria-expanded={projectFilePanelOpen} aria-controls="ugs-project-file-panel"
+        className={headerActionButtonClass + " hidden lg:flex"}>
+        <Folder size={14} />
+        <span>{locale === "zh-CN" ? "文件" : "Files"}</span>
+      </button>
       <button
         type="button"
         onClick={() => void handleCopyConversation()}
@@ -7865,7 +7968,7 @@ export default function AIDock({
     </button>
   );
   const composerToolButtonClass =
-    "flex h-7 shrink-0 items-center justify-center rounded-md border border-transparent bg-transparent px-2 text-xs text-fg-dim transition-colors hover:bg-border-soft/55 hover:text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent disabled:cursor-not-allowed disabled:opacity-40";
+    "ugs-control flex h-8 shrink-0 items-center justify-center rounded-md border border-transparent bg-transparent px-2 text-[13px] text-fg-dim transition-colors hover:bg-border-soft hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:cursor-not-allowed disabled:opacity-40";
   const streamNavigation = isChat && timelineMarkers.length > 0 && (
     <div
       className="ugs-stream-nav absolute bottom-4 right-2 top-4 z-20 w-8"
@@ -8619,7 +8722,7 @@ export default function AIDock({
                             (isChatUser
                               ? "ai-stream-user-bubble max-w-[86%] rounded-md px-3 py-2 text-left"
                               : isChat
-                                ? "ai-stream-text w-[min(100%,calc(100%_-_2rem))]"
+                                ? "ai-stream-text w-full"
                                 : "ai-stream-text")
                           }
                         >
@@ -8637,13 +8740,7 @@ export default function AIDock({
                         // opening a long history doesn't block on parsing every one.
                         // During search, inline <mark> highlights are applied via
                         // searchState without losing the rich rendering.
-                        <div
-                          className={
-                            isChat
-                              ? "w-[min(100%,calc(100%_-_2rem))]"
-                              : "w-full"
-                          }
-                        >
+                        <div className="min-w-0 w-full">
                           <LazyMessageContent
                             text={renderMessageText(m.text)}
                             fallback={cleanMessageText(m.text)}
@@ -8660,6 +8757,22 @@ export default function AIDock({
                             cwd={workspaceCwd || undefined}
                             searchState={searchState}
                           />
+                          {m.skillLearning && (() => {
+                            const state = m.skillLearning;
+                            return <SkillLearningCard state={state} locale={locale}
+                              onApprove={(id) => handleSkillReviewAction(m.id, state, "approve", id)}
+                              onReject={(id) => handleSkillReviewAction(m.id, state, "reject", id)}
+                              onRetry={state.resume ? () => retryPersistedSkillLearning(state) : undefined}
+                              onRollback={(id) => handleSkillReviewAction(m.id, state, "rollback", id)} />;
+                          })()}
+                          {!isSystem && !m.localOnly && !(aiBusy && m.id === lastAssistantId) && (() => {
+                            const changes = m.fileChanges ?? collectTurnFileChanges([m], null, workspaceCwd || undefined);
+                            return <>
+                              {changes && <EditedFilesCard changes={changes} locale={locale}
+                                cwd={workspaceCwd || undefined} onOpenFile={onOpenFile} />}
+                              <MessageArtifacts text={m.text} cwd={workspaceCwd || undefined} onOpenFile={onOpenFile} />
+                            </>;
+                          })()}
                         </div>
                       )}
                       {assistantActions && actionText && (
@@ -8733,6 +8846,7 @@ export default function AIDock({
           left = + (add file), permission, workspace; right = runtime + send. */}
       <section
         ref={inputSectionRef}
+        data-ugs-composer
         className={
           "relative flex shrink-0 flex-col bg-transparent p-3 " +
           (centerInput ? "mx-auto w-full max-w-6xl px-4 sm:px-6" : "")
@@ -8747,7 +8861,7 @@ export default function AIDock({
                     "translateX(calc(var(--ugs-chat-visible-right-inset) / -2))",
                 }
               : {
-                  height: chatInputHeight,
+                  height: renderedChatInputHeight,
                   marginRight: "var(--ugs-chat-visible-right-inset)",
                 }
             : { width: renderedInputWidth }
@@ -9040,12 +9154,20 @@ export default function AIDock({
           </div>
         )}
 
+        {isChat && <ChatTaskProgress key={`${activeWorkspaceId}:${activeSessionId}:${taskProgress.startedAt}`}
+          progress={taskProgress} jobs={currentJobs} active={activeAiEditing || activeChatting}
+          locale={locale} cwd={workspaceCwd} onOpenFile={onOpenFile} />}
+
+        {isChat && <SessionChangesSummary key={activeSessionId}
+          changes={sessionFileChanges} locale={locale} onOpenSessionFiles={requestProjectRightPanelSessionFiles} />}
+
         {/* Hint/permission row — floats above the input card (over the return
             stream), as its own line rather than inside the card. Left: composer
             input hints with the user's real shortcuts. Right: flat segmented
             permission control (ordered low→high privilege, left→right) plus
             send/newline shortcut hints. */}
-        <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-[11px] leading-none text-fg-faint">
+        {composerHintRowVisible && (
+        <div data-testid="composer-hint-row" className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-[11px] leading-none text-fg-faint">
           <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
             <span className="inline-flex items-center gap-1">
               <span className="font-mono text-fg-dim">/</span>
@@ -9077,8 +9199,8 @@ export default function AIDock({
               className={
                 "flex shrink-0 items-center gap-0.5 rounded-md border p-0.5 transition-colors " +
                 (permissionVisual(composer.permission).tone === "danger"
-                  ? "border-status-error/60 bg-status-error/10"
-                  : "border-border bg-panel-2")
+                  ? "border-status-warning/30 bg-transparent"
+                  : "border-border-soft bg-transparent")
               }
             >
               {[...permissionOptions]
@@ -9087,9 +9209,7 @@ export default function AIDock({
                   const localized = localizeSelectOption(opt, locale);
                   const { Icon, tone, color } = permissionVisual(opt.id);
                   const active = composer.permission === opt.id;
-                  // The most permissive ("danger") segment, when active, fills
-                  // solid like the mockup's yolo state; safer segments just tint
-                  // their label with the tone color on a neutral chip.
+                  // Risk is a persistent label + shield, not a solid error button.
                   const activeDanger = active && tone === "danger";
                   return (
                     <button
@@ -9103,12 +9223,12 @@ export default function AIDock({
                       }`}
                       onClick={() => setComposer({ permission: opt.id })}
                       className={
-                        "flex items-center gap-1 rounded px-1.5 py-1 text-[11px] font-medium leading-none transition-colors disabled:cursor-not-allowed disabled:opacity-50 " +
+                        "ugs-control flex min-h-7 items-center gap-1.5 rounded px-2 py-1 text-xs font-medium leading-none transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:cursor-not-allowed disabled:opacity-50 " +
                         (activeDanger
-                          ? "bg-status-error text-status-error-contrast"
+                          ? "bg-status-warning/10 text-status-warning"
                           : active
-                            ? "bg-bg"
-                            : "text-fg-faint hover:text-fg-dim")
+                            ? "bg-panel-2"
+                            : "text-fg-dim hover:bg-border-soft hover:text-fg")
                       }
                       style={active && !activeDanger ? { color } : undefined}
                     >
@@ -9150,6 +9270,7 @@ export default function AIDock({
           </div>
         </div>
 
+        )}
         {/* `z-30`：卡片带 backdrop-filter（global.css 的 .ugs-ai-input-card），
             本身就是一个层叠上下文，里面下拉菜单的 z-index 压不过 DOM 靠后的
             兄弟面板（右栏「会话文件」）。给卡片一个正的 z-index，菜单才能画在
@@ -9426,13 +9547,11 @@ export default function AIDock({
             style={
               centerInput
                 ? {
-                    // flex-1 lets the textarea absorb the card's min-h-[14rem]
-                    // slack so the toolbar stays flush with the bottom edge (no
-                    // empty gap). minHeight tracks the measured content so short
-                    // drafts still fill the base height and long ones grow the
-                    // card up to the 2.5x cap, then scroll internally.
+                    // Keep flex growth free to absorb the card's min-h-[14rem]
+                    // slack and anchor the toolbar at its bottom edge. The
+                    // measured minimum caps content growth; maxHeight here
+                    // would strand unused base height below the toolbar.
                     minHeight: centerInputTextareaHeight,
-                    maxHeight: CENTER_INPUT_MAX_HEIGHT - 96,
                   }
                 : undefined
             }
@@ -9477,7 +9596,7 @@ export default function AIDock({
               the parent's rounded bottom corners. */}
           <div
             className={
-              "ugs-ai-input-toolbar flex flex-wrap items-center gap-2 rounded-b-lg px-2 py-2"
+              "ugs-ai-input-toolbar flex shrink-0 flex-wrap items-center gap-2 rounded-b-lg px-2 py-2"
             }
           >
             {!generationMode && !simpleChatMode && activeSessionIsWorkflow && (
@@ -9633,6 +9752,7 @@ export default function AIDock({
               </>
             )}
 
+            <ComposerOptions label={locale === "zh-CN" ? "会话选项" : "Session options"}>
             {activeRemoteWorkspaceRoot ? (
               <>
                 <Select
@@ -9710,8 +9830,9 @@ export default function AIDock({
                 />
               </>
             )}
+            </ComposerOptions>
 
-            <div className="ml-auto flex items-center gap-2">
+            <div className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-2">
               <Select
                 title={t(locale, "dock.channelTitle")}
                 options={channelOptions}
@@ -9811,10 +9932,10 @@ export default function AIDock({
                         : sendShortcutHint
                 }
                 className={
-                  "flex h-7 w-7 shrink-0 items-center justify-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-40 " +
+                  "ugs-composer-send flex h-8 w-8 shrink-0 items-center justify-center rounded-md transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-panel disabled:cursor-not-allowed disabled:opacity-40 " +
                   (chatRunActive && !chatFollowUp
-                    ? "border border-border bg-panel-2 text-fg-dim hover:border-accent hover:text-fg"
-                    : "bg-fg-dim text-bg hover:bg-fg")
+                    ? "border border-border bg-panel-2 text-fg-dim hover:bg-border-soft hover:text-fg"
+                    : "bg-accent text-[var(--ugs-accent-contrast)] hover:brightness-110")
                 }
               >
                 {chatFollowUp ? (
@@ -10030,7 +10151,7 @@ export default function AIDock({
 
             <div className="mt-4 space-y-3">
               {localSetupMessage && (
-                <p className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] leading-relaxed text-amber-200">
+                <p className="rounded-md border border-status-warning/30 bg-status-warning/10 px-3 py-2 text-[11px] leading-relaxed text-status-warning">
                   {localSetupMessage}
                 </p>
               )}

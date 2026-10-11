@@ -68,9 +68,12 @@ export function FileChipBudgetProvider({
   );
 }
 
-function useFileChipSlot(): FileChipSlot {
+function useFileChipSlot(bypass: boolean): FileChipSlot {
   const budget = useFileChipBudget();
   const idRef = useRef<symbol | null>(null);
+  // Hooks must run unconditionally; bypass only skips the budget *claim*.
+  // The ref allocation above is harmless and keeps the call order stable.
+  if (bypass) return 'visible';
   if (!budget) return 'visible';
 
   if (!idRef.current) idRef.current = Symbol('file-chip');
@@ -282,13 +285,15 @@ export function FoldedFileChip({
   onOpenFile,
   cwd,
   fallback,
+  label: linkLabel,
 }: {
   refData: FileRef;
   onOpenFile?: OpenFileFn;
   cwd?: string;
   fallback?: ReactNode;
+  label?: ReactNode;
 }) {
-  const label = `${refData.path}${fileRefLineSuffix(refData)}`;
+  const label = linkLabel ?? `${refData.path}${fileRefLineSuffix(refData)}`;
   const locale = useStore((s) => s.locale);
   const [copied, copyToClipboard] = useCopyToClipboard();
   const { open: openActionsMenu, element: actionsMenu } = useFileActionsMenu();
@@ -339,6 +344,7 @@ export function FoldedFileChip({
       <button
         type="button"
         onClick={() => void onOpenFile(refData)}
+        data-file-preview-trigger="true"
         onContextMenu={openContextMenu}
         title={`${displayFileRefLabel(refData, cwd)}\n${t(locale, 'chat.revealHint')}`}
         className="ai-file-chip ai-file-chip--folded ai-file-chip--interactive cursor-pointer"
@@ -359,17 +365,47 @@ export default function FileChip({
   overflowFallback,
   thumbnailOnly,
   onRemove,
+  label,
 }: {
   refData: FileRef;
   onOpenFile?: OpenFileFn;
   cwd?: string;
   overflowFallback?: ReactNode;
+  /**
+   * Composer preview strip mode: render the thumbnail tile alone, with no path
+   * text beside it. The path stays in the textarea, so repeating it in the chip
+   * only burns a full row per pasted screenshot.
+   */
   thumbnailOnly?: boolean;
+  /** Composer preview strip mode: drop this reference from the draft text. */
   onRemove?: () => void;
+  /** Preserve a Markdown link's descriptive label for generated deliverables. */
+  label?: ReactNode;
 }) {
-  const slot = useFileChipSlot();
-  if (slot === 'notice') return overflowFallback ?? <FileChipLimitNotice />;
+  // Images bypass the chip budget in the message stream: a long AI reply can
+  // legitimately carry dozens of code/text references (where the budget
+  // prevents an IPC storm), but image thumbnails are the visual payload of
+  // the message — folding a screenshot path into a plain text chip hides
+  // exactly what the user wants to see. The thumbnail hook downscales in
+  // Rust, so the per-image cost is a few KB rather than a full-resolution
+  // payload, and real-world replies don't stack hundreds of images the way
+  // they stack file paths.
+  //
+  // The composer strip (`thumbnailOnly`) keeps the budget for images too:
+  // pasting 30 screenshots into the draft input would otherwise fill the
+  // whole card with thumbnails and push the textarea off-screen.
+  const bypass = isImageFileRef(refData) && !thumbnailOnly;
+  const slot = useFileChipSlot(bypass);
+  if (slot === 'notice') {
+    if (label != null) {
+      return <><FileChipLimitNotice /><FoldedFileChip refData={refData} onOpenFile={onOpenFile} cwd={cwd} label={label} /></>;
+    }
+    return overflowFallback ?? <FileChipLimitNotice />;
+  }
   if (slot === 'hidden') {
+    // Over-budget slots in the composer strip stay invisible: falling back to a
+    // raw path chip would reintroduce exactly the wall of path rows the strip
+    // replaced. The paths themselves are still in the draft.
     if (thumbnailOnly) return null;
     return (
       <FoldedFileChip
@@ -377,6 +413,7 @@ export default function FileChip({
         onOpenFile={onOpenFile}
         cwd={cwd}
         fallback={overflowFallback}
+        label={label}
       />
     );
   }
@@ -388,6 +425,7 @@ export default function FileChip({
       cwd={cwd}
       thumbnailOnly={thumbnailOnly}
       onRemove={onRemove}
+      label={label}
     />
   );
 }
@@ -398,12 +436,14 @@ export function VisibleFileChip({
   cwd,
   thumbnailOnly,
   onRemove,
+  label,
 }: {
   refData: FileRef;
   onOpenFile?: OpenFileFn;
   cwd?: string;
   thumbnailOnly?: boolean;
   onRemove?: () => void;
+  label?: ReactNode;
 }) {
   const locale = useStore((s) => s.locale);
   const lineSuffix = fileRefLineSuffix(refData);
@@ -509,6 +549,11 @@ export function VisibleFileChip({
   // preview drawer opens exactly as before. While the thumbnail loads we show
   // a spinner inside the card; if it can't be loaded (browser mode, missing
   // file) we fall through to just the plain path chip below.
+  //
+  // `thumbnailOnly` (composer preview strip) keeps the tile and the open
+  // affordance but drops the path text: a pasted screenshot path is ~90 chars
+  // wide, so one image per row is what made a stack of pastes fill the card.
+  // The path stays recoverable via the tooltip and the right-click menu.
   if (isImage && (thumbnailOnly || thumb.status !== 'error')) {
     return (
       <span
@@ -521,6 +566,7 @@ export function VisibleFileChip({
         <button
           type="button"
           disabled={!interactive || fileMissing}
+          data-file-preview-trigger="true"
           onClick={interactive && !fileMissing ? openFile : undefined}
           onContextMenu={openContextMenu}
           title={
@@ -571,6 +617,7 @@ export function VisibleFileChip({
           <button
             type="button"
             disabled={!interactive || fileMissing}
+            data-file-preview-trigger="true"
             onClick={interactive && !fileMissing ? openFile : undefined}
             onContextMenu={openContextMenu}
             title={chipTitle}
@@ -582,7 +629,7 @@ export function VisibleFileChip({
             }
           >
             <span className="ai-file-chip__label min-w-0 whitespace-normal break-all text-left">
-              {originalPath}
+              {label ?? originalPath}
               {lineSuffix && (
                 <span className={interactive ? 'opacity-75' : 'text-fg-faint'}>
                   {lineSuffix}
@@ -601,6 +648,7 @@ export function VisibleFileChip({
       <button
         type="button"
         disabled={!interactive || fileMissing}
+        data-file-preview-trigger="true"
         onClick={interactive && !fileMissing ? openFile : undefined}
         onContextMenu={openContextMenu}
         title={chipTitle}
@@ -619,7 +667,7 @@ export function VisibleFileChip({
           <FileCode size={11} className="shrink-0 opacity-70" />
         ))}
         <span className="ai-file-chip__label min-w-0 whitespace-normal break-all text-left">
-          {originalPath}
+          {label ?? originalPath}
           {lineSuffix && (
             <span className={interactive ? 'opacity-75' : 'text-fg-faint'}>
               {lineSuffix}

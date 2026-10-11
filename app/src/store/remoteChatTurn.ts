@@ -47,7 +47,11 @@ import { shortId } from '@/lib/id';
 import type { AiEditChannel } from './channelTypes';
 import type { Message } from './types';
 import type { IRGraph, IRRunStatus } from '@/core/ir';
-import { REMOTE_JOB_TERMINAL_STATUSES } from '@ugs/protocol';
+import { REMOTE_JOB_TERMINAL_STATUSES, REMOTE_SKILL_HOST_ID } from '@ugs/protocol';
+import { beginRemoteSkillForeground, finishRemoteLearning, requestRemoteContext } from '@/lib/remoteSkillLearning';
+import type { FinishRemoteLearningOptions } from '@/lib/remoteSkillLearning';
+import type { LoadedSkillContext } from '@/runtime/skills/context';
+import type { SkillOrigin, SkillReviewState } from '@/runtime/skills/types';
 import {
   encodeToolPatch,
   extractToolSentinels,
@@ -58,6 +62,14 @@ import {
 export interface StartRemoteChatTurnOptions {
   ch: AiEditChannel;
   prompt: string;
+  /** Exact user-message source captured at dispatch; never the active view. */
+  sourceMessageId?: string;
+  explicitSkillIds?: string[];
+  /** Captured source session AND exact user-message persistence before job submission. */
+  ready?: Promise<void>;
+  /** Await durable source metadata before subscribing or finishing learning. */
+  onSkillContext?: (context: NonNullable<Message['skillContext']>) => Promise<void>;
+  onSkillReviewState?: (state: SkillReviewState) => void;
   workspacePath: string;
   locale: string;
   projectEngineGuidance: string;
@@ -731,6 +743,17 @@ export function resolveRemoteRoute(
 }
 
 export function startRemoteChatTurn(options: StartRemoteChatTurnOptions): void {
+  const sourceSessionId = options.ch.sessionId;
+  const sourceSessionKey = Object.freeze({ workspaceId: options.ch.workspaceId, sessionId: sourceSessionId });
+  const sourceMessageId = options.sourceMessageId;
+  const hasSource = typeof sourceSessionId === 'string' && sourceSessionId.length > 0 && sourceSessionId.length <= 200 &&
+    typeof sourceMessageId === 'string' && sourceMessageId.length > 0 && sourceMessageId.length <= 200 &&
+    options.ch.messages.some((message) => message.id === sourceMessageId && message.role === 'user');
+  const sourceReady = options.ready;
+  void sourceReady?.catch(() => {});
+  const explicitSkillIds = options.explicitSkillIds ? [...options.explicitSkillIds] : undefined;
+  const selection = options.ch.gatewaySelection ? { ...options.ch.gatewaySelection } : undefined;
+  const userPrompt = options.prompt;
   const workspaceId = remoteWorkspaceIdFromPath(options.workspacePath);
   let config = getRemoteWorkspace(workspaceId);
   const secrets = readRemoteSecrets(workspaceId);
@@ -755,6 +778,30 @@ export function startRemoteChatTurn(options: StartRemoteChatTurnOptions): void {
   let liveMessages: RemoteJobMessage[] = [];
   let unsubscribe: (() => void) | null = null;
   let finalJob: RemoteJob | null = null;
+  let learningSource: Omit<FinishRemoteLearningOptions, 'finalAnswer'> | undefined;
+  const releaseForeground = beginRemoteSkillForeground();
+  const signal = options.ch.abortController.signal;
+  let foregroundEnded = false;
+  let submittedJob: { client: RunnerClient; id: string } | undefined;
+  let cancellationSent = false;
+  let settleForeground!: (job?: RemoteJob) => void;
+  const foregroundDone = new Promise<RemoteJob | undefined>((resolve) => { settleForeground = resolve; });
+  const cleanupForeground = () => {
+    unsubscribe?.();
+    signal.removeEventListener('abort', onAbort);
+    releaseForeground();
+  };
+  const cancelSubmittedJob = () => {
+    if (!submittedJob || cancellationSent) return;
+    cancellationSent = true;
+    void submittedJob.client.cancelJob(submittedJob.id).catch(() => {});
+  };
+  const onAbort = () => {
+    if (foregroundEnded) return;
+    foregroundEnded = true;
+    cancelSubmittedJob();
+    settleForeground();
+  };
 
   const render = (body: string): string => {
     const elapsed = `${options.formatClock(startedAt)} → ${options.formatClock(Date.now())} · 耗时 ${options.formatDuration(Date.now() - startedAt)}`;
@@ -804,8 +851,10 @@ export function startRemoteChatTurn(options: StartRemoteChatTurnOptions): void {
     );
   };
   const finish = (job: RemoteJob) => {
+    if (foregroundEnded || finalJob || !TERMINAL_STATUSES.has(job.status)) return;
+    foregroundEnded = true;
     finalJob = job;
-    unsubscribe?.();
+    try {
     const status = job.status;
     const patch = job.result?.patch?.trim();
     const pushed = job.result?.pushed
@@ -839,20 +888,41 @@ export function startRemoteChatTurn(options: StartRemoteChatTurnOptions): void {
       options.appendStartUserInputs(options.ch.workflow, [options.prompt]),
     );
     options.syncAndPersistSessionRunStatus(
-      { workspaceId: options.ch.workspaceId, sessionId: options.ch.sessionId },
+      sourceSessionKey,
       finalStatus(status),
     );
     options.removeAiEditChannel(options.ch);
+    } finally {
+      settleForeground(job);
+    }
   };
   const fail = (err: unknown) => {
-    const msg = err instanceof Error ? err.message : String(err);
-    setMessage(render(`✗ 远程任务启动失败：${msg}`), true);
-    options.syncAndPersistSessionRunStatus(
-      { workspaceId: options.ch.workspaceId, sessionId: options.ch.sessionId },
-      'error',
-    );
-    options.removeAiEditChannel(options.ch);
+    if (foregroundEnded) return;
+    foregroundEnded = true;
+    try {
+      const msg = err instanceof Error ? err.message : String(err);
+      setMessage(render(`✗ 远程任务启动失败：${msg}`), true);
+      options.syncAndPersistSessionRunStatus(sourceSessionKey, 'error');
+      options.removeAiEditChannel(options.ch);
+    } finally {
+      cancelSubmittedJob();
+      settleForeground();
+    }
   };
+
+  signal.addEventListener('abort', onAbort, { once: true });
+  void (async () => {
+    let job: RemoteJob | undefined;
+    try { job = await foregroundDone; }
+    finally { cleanupForeground(); }
+    if (learningSource && job && !signal.aborted) {
+      await finishRemoteLearning({ ...learningSource,
+        finalAnswer: extractRemoteAssistantMessages(liveMessages, job.messages ?? []) });
+    }
+  })().catch(() => {
+    // Learning is advisory and must not rewrite the actual task result.
+  });
+  if (signal.aborted) { onAbort(); return; }
 
   options.ch.messages = [
     ...options.ch.messages,
@@ -870,17 +940,36 @@ export function startRemoteChatTurn(options: StartRemoteChatTurnOptions): void {
   void (async () => {
     if (!config) throw new Error('云端项目不存在。');
     const connection = await resolveRemoteRunnerConnectionAsync(config);
+    if (foregroundEnded) return;
     if (!connection) throw new Error('云端服务未配置。请先配置服务器地址和访问 Token。');
     const client = new RunnerClient(connection.serverUrl, connection.token);
     if (config.projectId || config.repoUrl) {
       config = await ensureRemoteWorkspaceProject(config, client);
     }
+    if (foregroundEnded) return;
     // config 可能在上面被 ensureRemoteWorkspaceProject 补全过，按最新 config 重解。
     const route = resolveRemoteRoute(
       config,
       workspaceId,
-      options.ch.gatewaySelection,
+      selection,
     );
+    // Pre-task receipts stay scoped to this read-only run; the review reads anew.
+    let skillContext: LoadedSkillContext = { prompt: userPrompt, loadedSkills: [], catalogRevision: '' };
+    const skillSource = hasSource && sourceReady
+      ? Object.freeze({ sessionId: sourceSessionId, turnId: sourceMessageId }) : undefined;
+    if (explicitSkillIds?.length && (!skillSource || !config.projectId)) throw new Error('REMOTE_SKILL_SOURCE_UNAVAILABLE');
+    if (skillSource && config.projectId) {
+      const prelaunchOrigin: SkillOrigin = Object.freeze({ hostId: REMOTE_SKILL_HOST_ID,
+        workspaceId: config.projectId, ...skillSource, runId: shortId('skill-prelaunch') });
+      try {
+        skillContext = await requestRemoteContext({ client, projectId: config.projectId,
+          origin: prelaunchOrigin, prompt: userPrompt, explicitSkillIds, signal: options.ch.abortController.signal });
+      } catch (error) {
+        if (explicitSkillIds?.length || options.ch.abortController.signal.aborted) throw error;
+        // Automatic reuse is advisory; a failed read never supplies partial context.
+      }
+    }
+    if (foregroundEnded) return;
     // 用最终解析出的渠道/模型刷新头部路由标签。
     routeLabel = buildRemoteRouteLabel({
       config,
@@ -888,9 +977,13 @@ export function startRemoteChatTurn(options: StartRemoteChatTurnOptions): void {
       providerName: route.providerName,
       model: route.model,
     });
+    const prompt = await buildRemotePrompt({ ...options, prompt: skillContext.prompt });
+    await sourceReady;
+    if (foregroundEnded) return;
     const job = await client.createJob({
-      prompt: await buildRemotePrompt(options),
+      prompt,
       projectId: config.projectId,
+      ...(skillSource ? { skillSource } : {}),
       repoUrl: config.projectId ? undefined : config.repoUrl,
       branch: config.branch,
       adapter: route.adapter,
@@ -904,6 +997,24 @@ export function startRemoteChatTurn(options: StartRemoteChatTurnOptions): void {
         route.baseUrl ?? (config.useOwnModelKey ? secrets.baseUrl : undefined),
       gitToken: config.projectId ? undefined : secrets.gitToken,
     });
+    submittedJob = { client, id: job.id };
+    if (foregroundEnded) { cancelSubmittedJob(); return; }
+    if (skillSource && config.projectId) {
+      const expectedOrigin: SkillOrigin = { hostId: REMOTE_SKILL_HOST_ID,
+        workspaceId: config.projectId, ...skillSource, runId: job.id };
+      if (job.projectId !== config.projectId || !job.skillOrigin || Object.keys(job.skillOrigin).length !== 5 ||
+        Object.entries(expectedOrigin).some(([key, value]) => job.skillOrigin![key as keyof SkillOrigin] !== value)) {
+        throw new Error('REMOTE_SKILL_JOB_ORIGIN_MISMATCH');
+      }
+      if (options.onSkillContext) {
+        await options.onSkillContext({ origin: structuredClone(job.skillOrigin),
+          loadedSkills: structuredClone(skillContext.loadedSkills), catalogRevision: skillContext.catalogRevision });
+        if (foregroundEnded) return;
+        learningSource = { client, projectId: config.projectId, origin: Object.freeze({ ...job.skillOrigin }),
+          userText: userPrompt, loadedSkills: structuredClone(skillContext.loadedSkills), selection,
+          signal: options.ch.abortController.signal, onState: options.onSkillReviewState };
+      }
+    }
     currentStatus = job.status;
     setMessage(render(`⟳ ${statusLabel(job.status)}…\n任务 ID：${job.id}`), true);
     unsubscribe = client.streamJob(job.id, {
@@ -924,13 +1035,6 @@ export function startRemoteChatTurn(options: StartRemoteChatTurnOptions): void {
       onResult: finish,
       onError: fail,
     });
-    options.ch.abortController.signal.addEventListener(
-      'abort',
-      () => {
-        if (finalJob) return;
-        void client.cancelJob(job.id).catch(() => {});
-      },
-      { once: true },
-    );
+
   })().catch(fail);
 }

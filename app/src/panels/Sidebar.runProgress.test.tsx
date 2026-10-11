@@ -32,6 +32,7 @@ type MockSession = {
     lastRunAt?: number;
   };
   runStatus?: 'success' | 'error' | 'interrupted';
+  contextCompressed?: boolean;
 };
 
 type MockWorkspace = {
@@ -277,6 +278,33 @@ async function renderSidebar(): Promise<{
   };
 }
 
+describe('session context compression marker', () => {
+  it('keeps compression visible beside the running status and after completion', async () => {
+    resetSidebarStore();
+    const session = { ...SESSION, contextCompressed: true };
+    mockState.sessions = [session];
+    mockState.sessionTree = { [WORKSPACE.id]: [session] };
+    mockState.chattingSessions = [SESSION_KEY];
+    const view = await renderSidebar();
+    try {
+      expect(view.container.querySelector('[data-context-compressed="true"]')?.getAttribute('title')).toBe('上下文已压缩');
+      expect(view.container.querySelector('[data-status="running"]')).not.toBeNull();
+      mockState.chattingSessions = [];
+      mockState.sessions = [{ ...session, runStatus: 'success' }];
+      mockState.sessionTree = { [WORKSPACE.id]: mockState.sessions };
+      await view.rerender();
+      expect(view.container.querySelector('[data-context-compressed="true"]')).not.toBeNull();
+      expect(view.container.querySelector('[data-status="success"]')).not.toBeNull();
+    } finally { await view.cleanup(); }
+  });
+  it('omits the marker for an uncompressed session', async () => {
+    resetSidebarStore();
+    const view = await renderSidebar();
+    try { expect(view.container.querySelector('[data-context-compressed]')).toBeNull(); }
+    finally { await view.cleanup(); }
+  });
+});
+
 function runningDot(
   container: HTMLElement,
   percent: number,
@@ -295,6 +323,7 @@ function statusDot(
     | 'running'
     | 'draft'
     | 'success'
+    | 'interrupted'
     | 'failed',
 ): HTMLElement | null {
   return container.querySelector(`[data-status="${status}"]`);
@@ -461,6 +490,15 @@ async function flushAsyncWork(): Promise<void> {
   await act(async () => {
     await Promise.resolve();
     await Promise.resolve();
+  });
+}
+
+async function waitForNoSearchResults(container: HTMLElement): Promise<void> {
+  await vi.waitFor(async () => {
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 20));
+    });
+    expect(container.textContent).toContain('没有找到匹配的会话');
   });
 }
 
@@ -1210,8 +1248,8 @@ describe('Sidebar workflow rename', () => {
   });
 });
 
-describe('Sidebar running progress dot', () => {
-  it('keeps the running indicator green and spinning while progress changes', async () => {
+describe('Sidebar running progress indicator', () => {
+  it('keeps the blue activity indicator and border live while real progress changes', async () => {
     resetSidebarStore();
     mockState.runningSessions = [SESSION_KEY];
     mockState.runningSessionProgress = {
@@ -1229,9 +1267,11 @@ describe('Sidebar running progress dot', () => {
       expect(zeroDot).not.toBeNull();
       const zeroSpinner = statusIndicator(zeroDot);
       expect(zeroSpinner).not.toBeNull();
-      expect(zeroSpinner?.classList.contains('ugs-status-spinner')).toBe(true);
+      expect(zeroSpinner?.classList.contains('ugs-status-spinner')).toBe(false);
+      expect(zeroSpinner?.querySelector('.lucide-loader-circle')).not.toBeNull();
+      expect(sessionButton(view.container, SESSION.title).classList.contains('ugs-sidebar-session--live')).toBe(true);
       expect(zeroSpinner?.style.getPropertyValue('--ugs-status-color')).toBe(
-        'var(--status-success)',
+        'var(--status-ai-edit)',
       );
 
       mockState.runningSessionProgress = {
@@ -1248,9 +1288,9 @@ describe('Sidebar running progress dot', () => {
       expect(completeDot?.getAttribute('title')).toBe('正在运行，进度 100%');
       const completeSpinner = statusIndicator(completeDot);
       expect(completeSpinner).not.toBeNull();
-      expect(completeSpinner?.classList.contains('ugs-status-spinner')).toBe(true);
+      expect(completeSpinner?.classList.contains('ugs-status-spinner')).toBe(false);
       expect(completeSpinner?.style.getPropertyValue('--ugs-status-color')).toBe(
-        'var(--status-success)',
+        'var(--status-ai-edit)',
       );
       expect(statusDot(view.container, 'success')).toBeNull();
     } finally {
@@ -1258,7 +1298,7 @@ describe('Sidebar running progress dot', () => {
     }
   });
 
-  it('renders unrun workflow sessions as a static blue dot', async () => {
+  it('renders unrun workflow sessions as a quiet hollow circle', async () => {
     resetSidebarStore();
     const view = await renderSidebar();
 
@@ -1269,15 +1309,16 @@ describe('Sidebar running progress dot', () => {
       const indicator = statusIndicator(dot);
       expect(indicator).not.toBeNull();
       expect(indicator?.classList.contains('ugs-status-spinner')).toBe(false);
+      expect(indicator?.querySelector('.lucide-circle')).not.toBeNull();
       expect(indicator?.style.getPropertyValue('--ugs-status-color')).toBe(
-        'var(--status-ai-edit)',
+        'var(--fg-faint)',
       );
     } finally {
       await view.cleanup();
     }
   });
 
-  it('renders a session with an unsent draft as a static purple dot', async () => {
+  it('renders a session with an unsent draft as a static pencil', async () => {
     resetSidebarStore();
     // Idle session (not the active one) that still holds composer text.
     mockState.activeSessionId = null;
@@ -1295,6 +1336,7 @@ describe('Sidebar running progress dot', () => {
       expect(indicator).not.toBeNull();
       // Draft is a static marker, never a spinner.
       expect(indicator?.classList.contains('ugs-status-spinner')).toBe(false);
+      expect(indicator?.querySelector('.lucide-pencil')).not.toBeNull();
       expect(indicator?.style.getPropertyValue('--ugs-status-color')).toBe(
         'var(--status-draft)',
       );
@@ -1303,7 +1345,7 @@ describe('Sidebar running progress dot', () => {
     }
   });
 
-  it('keeps the running spinner over a draft when a session is both', async () => {
+  it('keeps the live running treatment over a draft when a session is both', async () => {
     resetSidebarStore();
     // Active session that is running AND has live composer text: running wins.
     mockState.composerDraft = 'unsent text';
@@ -1316,7 +1358,8 @@ describe('Sidebar running progress dot', () => {
       const dot = statusDot(view.container, 'running');
       expect(dot).not.toBeNull();
       const indicator = statusIndicator(dot);
-      expect(indicator?.classList.contains('ugs-status-spinner')).toBe(true);
+      expect(indicator?.classList.contains('ugs-status-spinner')).toBe(false);
+      expect(sessionButton(view.container, SESSION.title).classList.contains('ugs-sidebar-session--live')).toBe(true);
     } finally {
       await view.cleanup();
     }
@@ -1347,7 +1390,7 @@ describe('Sidebar running progress dot', () => {
     }
   });
 
-  it('renders an in-flight chat session as a green running spinner', async () => {
+  it('renders an in-flight chat session with the same blue activity treatment', async () => {
     resetSidebarStore();
     const chatSession = { ...SESSION, isWorkflow: false };
     mockState.sessionTree = {
@@ -1364,9 +1407,10 @@ describe('Sidebar running progress dot', () => {
       expect(dot?.getAttribute('title')).toBe('正在运行，进度未知');
       const indicator = statusIndicator(dot);
       expect(indicator).not.toBeNull();
-      expect(indicator?.classList.contains('ugs-status-spinner')).toBe(true);
+      expect(indicator?.classList.contains('ugs-status-spinner')).toBe(false);
+      expect(indicator?.querySelector('.lucide-loader-circle')).not.toBeNull();
       expect(indicator?.style.getPropertyValue('--ugs-status-color')).toBe(
-        'var(--status-success)',
+        'var(--status-ai-edit)',
       );
       expect(statusDot(view.container, 'thinking')).toBeNull();
     } finally {
@@ -1377,7 +1421,7 @@ describe('Sidebar running progress dot', () => {
   it.each([
     ['success', 'success', '已完成', 'var(--status-success)'],
     ['error', 'failed', '已失败', 'var(--status-error)'],
-    ['interrupted', 'failed', '已失败', 'var(--status-error)'],
+    ['interrupted', 'interrupted', '已中断', 'var(--fg-dim)'],
   ] as const)(
     'renders the %s terminal status indicator',
     async (status, tone, label, color) => {
@@ -1495,7 +1539,7 @@ describe('Sidebar running progress dot', () => {
     }
   });
 
-  it('renders a blue spinning indicator while AI is thinking', async () => {
+  it('renders a static blue thinking icon with a live border', async () => {
     resetSidebarStore();
     mockState.aiEditingSessions = [SESSION_KEY];
 
@@ -1507,7 +1551,9 @@ describe('Sidebar running progress dot', () => {
       expect(dot?.getAttribute('title')).toBe('AI 思考中');
       const indicator = statusIndicator(dot);
       expect(indicator).not.toBeNull();
-      expect(indicator?.classList.contains('ugs-status-spinner')).toBe(true);
+      expect(indicator?.classList.contains('ugs-status-spinner')).toBe(false);
+      expect(indicator?.querySelector('.lucide-sparkles')).not.toBeNull();
+      expect(sessionButton(view.container, SESSION.title).classList.contains('ugs-sidebar-session--live')).toBe(true);
       expect(indicator?.style.getPropertyValue('--ugs-status-color')).toBe(
         'var(--status-ai-edit)',
       );
@@ -2110,7 +2156,7 @@ describe('Sidebar session search', () => {
     try {
       await changeInputValue(historySearchInput(view.container), 'missing');
 
-      expect(view.container.textContent).toContain('没有找到匹配的会话');
+      await waitForNoSearchResults(view.container);
       expect(view.container.textContent).not.toContain('Workflow run');
 
       const clearButton = Array.from(
@@ -2182,7 +2228,7 @@ describe('Sidebar session search', () => {
         deploySession.id,
         WORKSPACE.id,
       );
-      expect(view.container.textContent).toContain('没有找到匹配的会话');
+      await waitForNoSearchResults(view.container);
       expect(view.container.textContent).not.toContain('Deploy Pipeline');
       expect(view.container.textContent).not.toContain('Review Notes');
     } finally {
@@ -2249,7 +2295,7 @@ describe('Sidebar session search', () => {
         WORKSPACE.id,
         'Published Workflow',
       );
-      expect(view.container.textContent).toContain('没有找到匹配的会话');
+      await waitForNoSearchResults(view.container);
       expect(view.container.textContent).not.toContain('Draft Workflow');
       expect(view.container.textContent).not.toContain('Archive Workflow');
     } finally {

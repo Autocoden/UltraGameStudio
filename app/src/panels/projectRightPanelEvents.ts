@@ -1,5 +1,22 @@
 import type { FileRef } from '@/components/ai/lib/filePath';
 
+export const TOGGLE_PROJECT_RIGHT_PANEL_EVENT = 'ugs:project-right-panel-toggle';
+export const PROJECT_RIGHT_PANEL_VISIBILITY_EVENT = 'ugs:project-right-panel-visibility';
+export const OPEN_PROJECT_RIGHT_PANEL_SESSION_FILES_EVENT =
+  'ugs:project-right-panel-open-session-files';
+
+export function requestProjectRightPanelSessionFiles(): void {
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new Event(OPEN_PROJECT_RIGHT_PANEL_SESSION_FILES_EVENT));
+  }
+}
+
+export function requestProjectRightPanelToggle(): void {
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new Event(TOGGLE_PROJECT_RIGHT_PANEL_EVENT));
+  }
+}
+
 export const OPEN_PROJECT_RIGHT_PANEL_FILE_PREVIEW_EVENT =
   'ugs:project-right-panel-open-file-preview';
 

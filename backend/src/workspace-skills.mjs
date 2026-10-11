@@ -1,3 +1,5 @@
+import { createWorkspaceSkillService, assertSafeSkillPath, parseSkillFrontmatter } from './workspace-skill-service.mjs';
+import { REMOTE_SKILL_HOST_ID } from '../../packages/protocol/index.js';
 import { readFile, readdir, realpath, stat } from 'node:fs/promises';
 import { basename, extname, isAbsolute, join, relative, sep } from 'node:path';
 
@@ -39,59 +41,6 @@ const SKIP_DIRS = new Set([
 function isPathInside(parent, child) {
   const rel = relative(parent, child);
   return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
-}
-
-function cleanFrontmatterValue(value) {
-  return String(value ?? '')
-    .trim()
-    .replace(/^["']|["']$/g, '')
-    .trim();
-}
-
-// Parse a SKILL.md / command .md frontmatter for `name` + `description`.
-function parseSkillFrontmatter(text, fallbackName) {
-  const normalized = text.replace(/^﻿/, '');
-  let name = '';
-  let description = '';
-  const lines = normalized.split(/\r?\n/);
-
-  if (lines[0]?.trim() === '---') {
-    const yaml = [];
-    for (let i = 1; i < lines.length; i += 1) {
-      if (lines[i].trim() === '---') break;
-      yaml.push(lines[i]);
-    }
-    for (let i = 0; i < yaml.length; i += 1) {
-      const trimmed = yaml[i].trim();
-      if (trimmed.startsWith('name:')) {
-        name = cleanFrontmatterValue(trimmed.slice('name:'.length));
-      } else if (trimmed.startsWith('description:')) {
-        const rest = cleanFrontmatterValue(trimmed.slice('description:'.length));
-        if (rest === '>' || rest === '|' || rest === '>-' || rest === '|-') {
-          const parts = [];
-          i += 1;
-          while (i < yaml.length) {
-            const next = yaml[i];
-            if (!/^\s/.test(next) && next.trim() !== '') {
-              i -= 1;
-              break;
-            }
-            const part = next.trim();
-            if (part) parts.push(part);
-            i += 1;
-          }
-          description = parts.join(' ');
-        } else {
-          description = rest;
-        }
-      }
-    }
-  }
-
-  return {
-    name: (name || fallbackName).trim(),
-    description: description.trim(),
-  };
 }
 
 function markdownSummary(text) {
@@ -146,7 +95,10 @@ function sameText(value) {
 
 function skillEntryFromFile(text, skillDir, relSource, sourceAdapter) {
   const fallback = basename(skillDir);
-  const { name, description } = parseSkillFrontmatter(text, fallback);
+  return skillEntryFromMeta(parseSkillFrontmatter(text, fallback), fallback, relSource, sourceAdapter);
+}
+
+function skillEntryFromMeta({ name, description }, fallback, relSource, sourceAdapter) {
   const token = slashToken(name, fallback);
   const slashName = `/${token}`;
   const detail = description.trim() ? description : relSource;
@@ -309,7 +261,7 @@ async function dirExistsInside(workspaceRoot, candidate) {
  * etc.) — never the server host's global config — so the catalog is scoped to the
  * project the client is viewing. Returns a snapshot the client caches per project.
  */
-export async function listWorkspaceSkills({ dir }) {
+export async function listWorkspaceSkills({ dir, hostId = REMOTE_SKILL_HOST_ID, workspaceId = dir }) {
   const out = [];
   const seen = new Set();
   let root;
@@ -317,6 +269,20 @@ export async function listWorkspaceSkills({ dir }) {
     root = await realpath(dir);
   } catch {
     return { scannedAtMs: Date.now(), ready: true, entries: [] };
+  }
+
+  await assertSafeSkillPath(dir);
+  const catalog = await createWorkspaceSkillService({ dir, hostId, workspaceId }).request({
+    action: 'list', origin: { hostId, workspaceId, sessionId: 'catalog', turnId: 'catalog', runId: 'catalog' }, mode: 'off',
+  });
+  for (const managed of catalog.entries.filter((entry) => entry.source === 'ugs-managed' && entry.state !== 'archived')) {
+    const source = `.ultragamestudio/skills/${managed.relativePath}`;
+    const entry = skillEntryFromMeta(managed, managed.relativePath, source, null);
+    entry.skillId = managed.skillId;
+    entry.revision = managed.revision;
+    entry.hash = managed.hash;
+    seen.add(`${entry.kind}|${entry.name}`.toLowerCase());
+    out.push(entry);
   }
 
   // Project-root skills/ dir (source-agnostic).
@@ -334,5 +300,9 @@ export async function listWorkspaceSkills({ dir }) {
     }
   }
 
-  return { scannedAtMs: Date.now(), ready: true, entries: out };
+  for (const entry of out) if (entry.kind === 'skill' && !entry.skillId) {
+    const match = catalog.entries.find((item) => item.scope === 'external' && slashToken(item.name, item.relativePath) === entry.name.slice(1));
+    if (match) { entry.skillId = match.skillId; entry.revision = match.revision; entry.hash = match.hash; }
+  }
+  return { scannedAtMs: Date.now(), ready: true, revision: catalog.revision, entries: out };
 }

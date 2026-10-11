@@ -95,8 +95,11 @@ export interface FilePreviewDrawerLayoutDetail {
 const FILE_PREVIEW_DEFAULT_WIDTH = 760;
 const FILE_PREVIEW_MIN_WIDTH = 360;
 const FILE_PREVIEW_MAX_WIDTH = 1280;
+// Keep preview entries in place until their click switches the file; closing
+// on pointerdown would reflow the chat before pointerup reaches the entry.
 const FILE_PREVIEW_OUTSIDE_POINTER_IGNORE_SELECTOR =
-  '[data-file-preview-ignore-outside-pointer="true"]';
+  '[data-file-preview-ignore-outside-pointer="true"], ' +
+  '[data-file-preview-trigger="true"]:not(:disabled)';
 
 function publishFilePreviewDrawerLayout(
   detail: FilePreviewDrawerLayoutDetail,

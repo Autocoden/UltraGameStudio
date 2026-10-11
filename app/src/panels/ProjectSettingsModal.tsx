@@ -131,6 +131,7 @@ import type { WorkspaceRecord, WorkspaceSummary } from '@/store/history/types';
 import { useStore } from '@/store/useStore';
 import { PluginStorePanel } from '@/panels/PluginStorePanel';
 import KnowledgeBaseSettings from '@/panels/settings/KnowledgeBaseSettings';
+import SkillLearningPanel from '@/panels/settings/SkillLearningPanel';
 import CapabilityTranslateDialog from '@/components/CapabilityTranslateDialog';
 import { type Locale } from '@/lib/i18n';
 
@@ -195,6 +196,7 @@ const PROJECT_SETTINGS_EN: Record<string, string> = {
     'When enabled, /sprite-mode-start or /sprite generates a normalizable raw sheet with the parameters below and prepares input for postprocess and acceptance checks.',
   '可用': 'Available',
   '知识库': 'Knowledge Base',
+  '技能学习': 'Skill learning',
   '空格分隔；按 LSP stdio 启动参数填写':
     'Space-separated; follow the LSP stdio launch arguments',
   '空格分隔；工作区可用 {workspace}':
@@ -339,11 +341,13 @@ type ProjectSettingsTab =
   | 'mcp'
   | 'lsp'
   | 'skills'
+  | 'skillLearning'
   | 'automation';
 
 const tabs: { id: ProjectSettingsTab; label: string; Icon: LucideIcon }[] = [
   { id: 'overview', label: '概览', Icon: Info },
   { id: 'knowledgeBase', label: '知识库', Icon: BookOpen },
+  { id: 'skillLearning', label: '技能学习', Icon: BookOpen },
   { id: 'environment', label: '远程环境', Icon: Server },
   { id: 'blueprint', label: '蓝图', Icon: FileText },
   { id: 'automation', label: '权限/自动化', Icon: SlidersHorizontal },
@@ -633,8 +637,8 @@ function InstalledSkillCard({
     scope === 'project' ? tr('项目', locale) : tr('全局', locale);
   const scopeClass =
     scope === 'project'
-      ? 'border-sky-500/40 bg-sky-500/10 text-sky-300'
-      : 'border-violet-500/40 bg-violet-500/10 text-violet-300';
+      ? 'border-status-info/40 bg-status-info/10 text-status-info'
+      : 'border-status-draft/40 bg-status-draft/10 text-status-draft';
 
   return (
     <div
@@ -753,8 +757,8 @@ function ProbeBadge({ result }: { result?: ProjectMcpProbeResult }) {
       className={cn(
         'rounded border px-2 py-0.5 text-[11px]',
         result.ok
-          ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
-          : 'border-red-500/40 bg-red-500/10 text-red-300',
+          ? 'border-status-success/40 bg-status-success/10 text-status-success'
+          : 'border-status-error/40 bg-status-error/10 text-status-error',
       )}
       title={result.message}
     >
@@ -777,8 +781,8 @@ function LspProbeBadge({ result }: { result?: ProjectLspProbeResult }) {
       className={cn(
         'rounded border px-2 py-0.5 text-[11px]',
         result.ok
-          ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
-          : 'border-red-500/40 bg-red-500/10 text-red-300',
+          ? 'border-status-success/40 bg-status-success/10 text-status-success'
+          : 'border-status-error/40 bg-status-error/10 text-status-error',
       )}
       title={result.message}
     >
@@ -861,7 +865,7 @@ function McpRegistryView({
       </div>
 
       {error ? (
-        <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] leading-relaxed text-amber-100">
+        <div className="rounded-lg border border-status-warning/30 bg-status-warning/10 px-3 py-2 text-[11px] leading-relaxed text-status-warning">
           {locale === 'zh-CN'
             ? `在线 MCP 仓库加载失败：${error}`
             : `Failed to load online MCP catalog: ${error}`}
@@ -926,7 +930,7 @@ function McpRegistryView({
                     {mcpCategoryLabel(server.category, locale)}
                   </span>
                   {!installable ? (
-                    <span className="rounded border border-sky-500/30 bg-sky-500/10 px-1.5 py-0.5 text-[10px] text-sky-300">
+                    <span className="rounded border border-status-info/30 bg-status-info/10 px-1.5 py-0.5 text-[10px] text-status-info">
                       {hasRemoteUrl
                         ? locale === 'zh-CN'
                           ? `远程 ${server.transport}`
@@ -944,7 +948,7 @@ function McpRegistryView({
                   {requiredEnv(server).map((spec) => (
                     <span
                       key={spec.key}
-                      className="rounded border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-300"
+                      className="rounded border border-status-warning/40 bg-status-warning/10 px-1.5 py-0.5 text-[10px] text-status-warning"
                       title={
                         locale === 'zh-CN'
                           ? `需要配置 ${spec.label}`
@@ -966,14 +970,14 @@ function McpRegistryView({
                   <div className="flex flex-wrap items-center gap-1.5">
                     {installed ? (
                       <>
-                        <span className="inline-flex items-center gap-1 rounded-md border border-emerald-500/40 bg-emerald-500/10 px-2 py-1 text-[11px] font-semibold text-emerald-300">
+                        <span className="inline-flex items-center gap-1 rounded-md border border-status-success/40 bg-status-success/10 px-2 py-1 text-[11px] font-semibold text-status-success">
                           <Check size={12} />
                           {tr('已安装', locale)}
                         </span>
                         <button
                           type="button"
                           onClick={() => onUninstall(server.id)}
-                          className="inline-flex items-center gap-1 rounded-md border border-border bg-bg-alt px-2 py-1 text-[11px] text-fg-dim hover:border-red-400 hover:text-red-300"
+                          className="inline-flex items-center gap-1 rounded-md border border-border bg-bg-alt px-2 py-1 text-[11px] text-fg-dim hover:border-status-error hover:text-status-error"
                         >
                           <Trash2 size={12} />
                           {tr('卸载', locale)}
@@ -1103,7 +1107,7 @@ function UnrealMcpQuickSetup({
               </span>
             ) : null}
             {configured ? (
-              <span className="rounded border border-emerald-500/40 bg-emerald-500/10 px-1.5 py-0.5 text-[10px] text-emerald-300">
+              <span className="rounded border border-status-success/40 bg-status-success/10 px-1.5 py-0.5 text-[10px] text-status-success">
                 {tr('已配置', locale)}
               </span>
             ) : null}
@@ -1157,15 +1161,15 @@ function UnrealMcpQuickSetup({
       ) : null}
 
       {error ? (
-        <div className="flex items-start gap-2 rounded border border-red-500/40 bg-red-500/10 px-3 py-2 text-[11px] text-red-300">
+        <div className="flex items-start gap-2 rounded border border-status-error/40 bg-status-error/10 px-3 py-2 text-[11px] text-status-error">
           <TriangleAlert size={13} className="mt-0.5 shrink-0" />
           <span className="min-w-0 break-words">{error}</span>
         </div>
       ) : null}
 
       {result?.ok ? (
-        <div className="grid gap-2 rounded border border-emerald-500/30 bg-emerald-500/5 px-3 py-2.5 text-[11px] text-fg-dim">
-          <div className="flex items-center gap-1.5 text-emerald-300">
+        <div className="grid gap-2 rounded border border-status-success/30 bg-status-success/5 px-3 py-2.5 text-[11px] text-fg-dim">
+          <div className="flex items-center gap-1.5 text-status-success">
             <Check size={13} />
             {locale === 'zh-CN' ? '配置完成' : 'Setup complete'}
             {result.engineAssociation
@@ -1200,7 +1204,7 @@ function UnrealMcpQuickSetup({
             </div>
           ) : null}
           {restartNotice ? (
-            <div className="mt-1 flex items-start gap-2 rounded border border-amber-500/40 bg-amber-500/10 px-2.5 py-2 text-amber-300">
+            <div className="mt-1 flex items-start gap-2 rounded border border-status-warning/40 bg-status-warning/10 px-2.5 py-2 text-status-warning">
               <TriangleAlert size={13} className="mt-0.5 shrink-0" />
               <span>
                 {restartNeeded
@@ -1226,7 +1230,7 @@ function UnrealMcpQuickSetup({
             </div>
           ) : null}
           {visibleWarnings.length > 0 ? (
-            <div className="text-amber-300/90">
+            <div className="text-status-warning/90">
               {locale === 'zh-CN'
                 ? `提示：${visibleWarnings.join('；')}`
                 : `Tips: ${visibleWarnings.join('; ')}`}
@@ -1293,7 +1297,7 @@ function GenericGameMcpQuickSetup({
               </span>
             ) : null}
             {configured ? (
-              <span className="rounded border border-emerald-500/40 bg-emerald-500/10 px-1.5 py-0.5 text-[10px] text-emerald-300">
+              <span className="rounded border border-status-success/40 bg-status-success/10 px-1.5 py-0.5 text-[10px] text-status-success">
                 {tr('已配置', locale)}
               </span>
             ) : null}
@@ -1340,14 +1344,14 @@ function GenericGameMcpQuickSetup({
         </div>
       ) : null}
       {error ? (
-        <div className="flex items-start gap-2 rounded border border-red-500/40 bg-red-500/10 px-3 py-2 text-[11px] text-red-300">
+        <div className="flex items-start gap-2 rounded border border-status-error/40 bg-status-error/10 px-3 py-2 text-[11px] text-status-error">
           <TriangleAlert size={13} className="mt-0.5 shrink-0" />
           <span className="min-w-0 break-words">{error}</span>
         </div>
       ) : null}
       {result?.ok ? (
-        <div className="grid gap-2 rounded border border-emerald-500/30 bg-emerald-500/5 px-3 py-2.5 text-[11px] text-fg-dim">
-          <div className="flex items-center gap-1.5 text-emerald-300">
+        <div className="grid gap-2 rounded border border-status-success/30 bg-status-success/5 px-3 py-2.5 text-[11px] text-fg-dim">
+          <div className="flex items-center gap-1.5 text-status-success">
             <Check size={13} />
             {locale === 'zh-CN' ? '配置完成' : 'Setup complete'}
           </div>
@@ -1384,7 +1388,7 @@ function GenericGameMcpQuickSetup({
             </div>
           ) : null}
           {result.warnings.length > 0 ? (
-            <div className="text-amber-300/90">
+            <div className="text-status-warning/90">
               {locale === 'zh-CN'
                 ? `提示：${result.warnings.join('；')}`
                 : `Tips: ${result.warnings.join('; ')}`}
@@ -1438,7 +1442,7 @@ function UnityMcpQuickSetup({
               </span>
             ) : null}
             {configured ? (
-              <span className="rounded border border-emerald-500/40 bg-emerald-500/10 px-1.5 py-0.5 text-[10px] text-emerald-300">
+              <span className="rounded border border-status-success/40 bg-status-success/10 px-1.5 py-0.5 text-[10px] text-status-success">
                 {tr('已配置', locale)}
               </span>
             ) : null}
@@ -1490,15 +1494,15 @@ function UnityMcpQuickSetup({
       ) : null}
 
       {error ? (
-        <div className="flex items-start gap-2 rounded border border-red-500/40 bg-red-500/10 px-3 py-2 text-[11px] text-red-300">
+        <div className="flex items-start gap-2 rounded border border-status-error/40 bg-status-error/10 px-3 py-2 text-[11px] text-status-error">
           <TriangleAlert size={13} className="mt-0.5 shrink-0" />
           <span className="min-w-0 break-words">{error}</span>
         </div>
       ) : null}
 
       {result?.ok ? (
-        <div className="grid gap-2 rounded border border-emerald-500/30 bg-emerald-500/5 px-3 py-2.5 text-[11px] text-fg-dim">
-          <div className="flex items-center gap-1.5 text-emerald-300">
+        <div className="grid gap-2 rounded border border-status-success/30 bg-status-success/5 px-3 py-2.5 text-[11px] text-fg-dim">
+          <div className="flex items-center gap-1.5 text-status-success">
             <Check size={13} />
             {locale === 'zh-CN' ? '配置完成' : 'Setup complete'}
           </div>
@@ -1539,7 +1543,7 @@ function UnityMcpQuickSetup({
             </div>
           ) : null}
           {result.warnings.length > 0 ? (
-            <div className="text-amber-300/90">
+            <div className="text-status-warning/90">
               {locale === 'zh-CN'
                 ? `提示：${result.warnings.join('；')}`
                 : `Tips: ${result.warnings.join('; ')}`}
@@ -3518,13 +3522,13 @@ export default function ProjectSettingsModal({
                 className={cn(
                   'rounded border px-2 py-1 text-xs',
                   health.tone === 'connected'
-                    ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
+                    ? 'border-status-success/40 bg-status-success/10 text-status-success'
                     : health.tone === 'failed'
-                      ? 'border-red-500/40 bg-red-500/10 text-red-300'
+                      ? 'border-status-error/40 bg-status-error/10 text-status-error'
                       : health.tone === 'configured'
-                        ? 'border-amber-500/40 bg-amber-500/10 text-amber-300'
+                        ? 'border-status-warning/40 bg-status-warning/10 text-status-warning'
                         : health.tone === 'detected'
-                          ? 'border-sky-500/40 bg-sky-500/10 text-sky-300'
+                          ? 'border-status-info/40 bg-status-info/10 text-status-info'
                           : 'border-border-soft bg-bg-alt text-fg-faint',
                 )}
                 title={health.detail}
@@ -3752,8 +3756,8 @@ export default function ProjectSettingsModal({
                   className={cn(
                     'rounded border px-2 py-0.5',
                     envReport.gitReady
-                      ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
-                      : 'border-red-500/40 bg-red-500/10 text-red-300',
+                      ? 'border-status-success/40 bg-status-success/10 text-status-success'
+                      : 'border-status-error/40 bg-status-error/10 text-status-error',
                   )}
                 >
                   {envReport.gitReady
@@ -3768,14 +3772,14 @@ export default function ProjectSettingsModal({
             ) : null}
 
             {envError ? (
-              <div className="mt-3 flex items-start gap-2 rounded border border-red-500/40 bg-red-500/10 px-3 py-2 text-[11px] text-red-300">
+              <div className="mt-3 flex items-start gap-2 rounded border border-status-error/40 bg-status-error/10 px-3 py-2 text-[11px] text-status-error">
                 <TriangleAlert size={13} className="mt-0.5 shrink-0" />
                 <span className="min-w-0 break-words">{envError}</span>
               </div>
             ) : null}
 
             {noPackageManager ? (
-              <div className="mt-3 rounded border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-200">
+              <div className="mt-3 rounded border border-status-warning/40 bg-status-warning/10 px-3 py-2 text-[11px] text-status-warning">
                 {locale === 'zh-CN'
                   ? '远程主机上未检测到受支持的包管理器（apt/dnf/yum/apk/pacman/zypper/brew/winget/choco），无法自动安装。请在云端主机手动安装 git、Node.js、Python。'
                   : 'No supported package manager (apt/dnf/yum/apk/pacman/zypper/brew/winget/choco) was found on the remote host, so auto-install is unavailable. Install git, Node.js and Python manually on the cloud host.'}
@@ -3790,14 +3794,14 @@ export default function ProjectSettingsModal({
             ) : null}
 
             {refreshStep && !refreshStep.ok ? (
-              <details className="mt-3 rounded border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-200" open>
+              <details className="mt-3 rounded border border-status-warning/40 bg-status-warning/10 px-3 py-2 text-[11px] text-status-warning" open>
                 <summary className="cursor-pointer font-semibold">
                   {locale === 'zh-CN'
                     ? `软件源刷新失败（apt-get update）${refreshStep.error ? `：${refreshStep.error}` : ''}。安装包失败（exit code 100）通常源于此。`
                     : `Package index refresh failed (apt-get update)${refreshStep.error ? `: ${refreshStep.error}` : ''}. This usually causes the later install "exit code 100".`}
                 </summary>
                 {refreshStep.log ? (
-                  <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-black/30 p-2 font-mono text-[10px] leading-relaxed text-amber-100/90">
+                  <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-black/30 p-2 font-mono text-[10px] leading-relaxed text-status-warning/90">
                     {refreshStep.log}
                   </pre>
                 ) : null}
@@ -3818,8 +3822,8 @@ export default function ProjectSettingsModal({
                         className={cn(
                           'rounded border px-1.5 py-0.5 text-[10px]',
                           item.installed
-                            ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
-                            : 'border-red-500/40 bg-red-500/10 text-red-300',
+                            ? 'border-status-success/40 bg-status-success/10 text-status-success'
+                            : 'border-status-error/40 bg-status-error/10 text-status-error',
                         )}
                       >
                         {item.installed
@@ -3836,7 +3840,7 @@ export default function ProjectSettingsModal({
                         </span>
                       ) : null}
                       {item.required === false ? (
-                        <span className="rounded border border-sky-500/40 bg-sky-500/10 px-1.5 py-0.5 text-[10px] text-sky-300">
+                        <span className="rounded border border-status-info/40 bg-status-info/10 px-1.5 py-0.5 text-[10px] text-status-info">
                           {locale === 'zh-CN' ? '可选 · AI 代理' : 'Optional · AI agent'}
                         </span>
                       ) : null}
@@ -3862,8 +3866,8 @@ export default function ProjectSettingsModal({
                         className={cn(
                           'rounded border px-2 py-1 text-[10px]',
                           step.ok
-                            ? 'border-emerald-500/30 bg-emerald-500/5 text-emerald-300'
-                            : 'border-red-500/30 bg-red-500/5 text-red-300',
+                            ? 'border-status-success/30 bg-status-success/5 text-status-success'
+                            : 'border-status-error/30 bg-status-error/5 text-status-error',
                         )}
                       >
                         {step.ok ? (
@@ -3879,10 +3883,10 @@ export default function ProjectSettingsModal({
                             }`}
                             {step.log ? (
                               <details className="mt-1">
-                                <summary className="cursor-pointer text-red-200/80">
+                                <summary className="cursor-pointer text-status-error/80">
                                   {locale === 'zh-CN' ? '查看安装日志' : 'View install log'}
                                 </summary>
-                                <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-black/30 p-2 font-mono text-[10px] leading-relaxed text-red-100/90">
+                                <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-black/30 p-2 font-mono text-[10px] leading-relaxed text-status-error/90">
                                   {step.log}
                                 </pre>
                               </details>
@@ -3962,7 +3966,7 @@ export default function ProjectSettingsModal({
                     : 'Shown only for Unreal Engine projects. Install the BlueprintMode plugin here, then use /blueprint-mode-start for Blueprint creation, wiring, compilation, and verification.'}
                 </div>
               </div>
-              <span className="rounded border border-emerald-500/40 bg-emerald-500/10 px-2 py-0.5 text-[11px] text-emerald-300">
+              <span className="rounded border border-status-success/40 bg-status-success/10 px-2 py-0.5 text-[11px] text-status-success">
                 Unreal Engine
               </span>
             </div>
@@ -4045,7 +4049,7 @@ export default function ProjectSettingsModal({
                     type="button"
                     onClick={() => void uninstallBlueprintModePlugin()}
                     disabled={!desktop || blueprintAnyBusy}
-                    className="inline-flex items-center gap-1.5 rounded-md border border-border bg-bg-alt px-3 py-1.5 text-xs text-fg-dim hover:border-red-400 hover:text-red-200 disabled:opacity-50"
+                    className="inline-flex items-center gap-1.5 rounded-md border border-border bg-bg-alt px-3 py-1.5 text-xs text-fg-dim hover:border-status-error hover:text-status-error disabled:opacity-50"
                   >
                     {blueprintUninstallBusy ? (
                       <RefreshCw size={13} className="animate-spin" />
@@ -4083,12 +4087,12 @@ export default function ProjectSettingsModal({
             </div>
 
             {!desktop ? (
-              <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+              <div className="rounded-md border border-status-warning/30 bg-status-warning/10 px-3 py-2 text-xs text-status-warning">
                 {tr('一键安装需要在桌面应用中运行。', locale)}
               </div>
             ) : null}
             {blueprintInstallError ? (
-              <div className="rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-200">
+              <div className="rounded-md border border-status-error/30 bg-status-error/10 px-3 py-2 text-xs text-status-error">
                 {blueprintInstallError}
               </div>
             ) : null}
@@ -4112,7 +4116,7 @@ export default function ProjectSettingsModal({
                   <div key={`${index}:${note}`}>{note}</div>
                 ))}
                 {blueprintReportWarnings.map((warning, index) => (
-                  <div key={`${index}:${warning}`} className="text-amber-200">
+                  <div key={`${index}:${warning}`} className="text-status-warning">
                     {warning}
                   </div>
                 ))}
@@ -4350,7 +4354,7 @@ export default function ProjectSettingsModal({
                               title={tr('卸载', locale)}
                               aria-label={tr('卸载', locale)}
                               onClick={() => removeServer(server.id)}
-                              className="flex h-7 w-7 items-center justify-center rounded border border-border-soft bg-bg-alt text-fg-faint hover:border-red-400 hover:text-red-300"
+                              className="flex h-7 w-7 items-center justify-center rounded border border-border-soft bg-bg-alt text-fg-faint hover:border-status-error hover:text-status-error"
                             >
                               <Trash2 size={13} />
                             </button>
@@ -4496,7 +4500,7 @@ export default function ProjectSettingsModal({
                     : `Current languages: ${languageText}. Recommendations are ranked by detected language and relevance; search across all LSPs.`}
                 </div>
                 {languageScan.error ? (
-                  <div className="mt-2 text-[11px] text-amber-300">
+                  <div className="mt-2 text-[11px] text-status-warning">
                     {locale === 'zh-CN'
                       ? `语言扫描降级：${languageScan.error}`
                       : `Language scan degraded: ${languageScan.error}`}
@@ -4518,7 +4522,7 @@ export default function ProjectSettingsModal({
                     ? `推荐 ${recommendedLspIds.size}`
                     : `${recommendedLspIds.size} recommended`}
                 </span>
-                <span className="rounded border border-emerald-500/40 bg-emerald-500/10 px-2 py-1 text-emerald-300">
+                <span className="rounded border border-status-success/40 bg-status-success/10 px-2 py-1 text-status-success">
                   {locale === 'zh-CN'
                     ? `已启用 ${enabledCount}`
                     : `${enabledCount} enabled`}
@@ -4615,7 +4619,7 @@ export default function ProjectSettingsModal({
                 </span>
               ))}
               {languageScan.truncated ? (
-                <span className="rounded border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[11px] text-amber-300">
+                <span className="rounded border border-status-warning/40 bg-status-warning/10 px-2 py-0.5 text-[11px] text-status-warning">
                   {locale === 'zh-CN' ? '扫描已截断' : 'Scan truncated'}
                 </span>
               ) : null}
@@ -4769,7 +4773,7 @@ export default function ProjectSettingsModal({
                             <div
                               className={cn(
                                 'truncate',
-                                installResult.ok ? 'text-emerald-300' : 'text-red-300',
+                                installResult.ok ? 'text-status-success' : 'text-status-error',
                               )}
                               title={[
                                 installResult.commandLine,
@@ -4880,7 +4884,7 @@ export default function ProjectSettingsModal({
                           className={cn(
                             'rounded border px-1.5 py-0.5 text-[10px]',
                             server.matchedLanguageIds.includes(id)
-                              ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
+                              ? 'border-status-success/40 bg-status-success/10 text-status-success'
                               : 'border-border-soft bg-bg-alt text-fg-faint',
                           )}
                         >
@@ -4988,7 +4992,7 @@ export default function ProjectSettingsModal({
                         <div
                           className={cn(
                             'truncate',
-                            installResult.ok ? 'text-emerald-300' : 'text-red-300',
+                            installResult.ok ? 'text-status-success' : 'text-status-error',
                           )}
                           title={[
                             installResult.commandLine,
@@ -5015,6 +5019,12 @@ export default function ProjectSettingsModal({
           )}
         </div>
       );
+    }
+
+    if (tab === 'skillLearning') {
+      return <SkillLearningPanel key={workspace.id} scope="workspace" workspaceId={workspace.id}
+        locale={locale} remote={isRemoteWorkspace} initialWorkspaceLearning={settings.skills.learning}
+        onWorkspaceLearningChange={(learning) => updateSkills({ learning })} />;
     }
 
     if (tab === 'skills') {
@@ -5078,7 +5088,7 @@ export default function ProjectSettingsModal({
                   <span className="text-sm font-semibold text-fg">
                     {locale === 'zh-CN' ? '本项目 Skill' : 'This project’s Skills'}
                   </span>
-                  <span className="rounded border border-sky-500/40 bg-sky-500/10 px-1.5 py-0.5 text-[10px] text-sky-300">
+                  <span className="rounded border border-status-info/40 bg-status-info/10 px-1.5 py-0.5 text-[10px] text-status-info">
                     {tr('项目', locale)}
                   </span>
                 </div>
@@ -5112,7 +5122,7 @@ export default function ProjectSettingsModal({
                             <span className="truncate text-sm font-semibold text-fg">
                               {root.label}
                             </span>
-                            <span className="rounded border border-sky-500/40 bg-sky-500/10 px-1.5 py-0.5 text-[10px] text-sky-300">
+                            <span className="rounded border border-status-info/40 bg-status-info/10 px-1.5 py-0.5 text-[10px] text-status-info">
                               {tr('项目', locale)}
                             </span>
                           </label>
@@ -5120,7 +5130,7 @@ export default function ProjectSettingsModal({
                             className={cn(
                               'rounded border px-2 py-0.5 text-[11px]',
                               root.exists
-                                ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
+                                ? 'border-status-success/40 bg-status-success/10 text-status-success'
                                 : 'border-border-soft bg-bg-alt text-fg-faint',
                             )}
                           >
@@ -5178,7 +5188,7 @@ export default function ProjectSettingsModal({
                   <span className="text-sm font-semibold text-fg">
                     {locale === 'zh-CN' ? '全局 Skill' : 'Global Skills'}
                   </span>
-                  <span className="rounded border border-violet-500/40 bg-violet-500/10 px-1.5 py-0.5 text-[10px] text-violet-300">
+                  <span className="rounded border border-status-draft/40 bg-status-draft/10 px-1.5 py-0.5 text-[11px] text-status-draft">
                     {tr('全局', locale)}
                   </span>
                 </div>
@@ -5205,7 +5215,7 @@ export default function ProjectSettingsModal({
                           <span className="truncate text-sm font-semibold text-fg">
                             {target.label}
                           </span>
-                          <span className="rounded border border-violet-500/40 bg-violet-500/10 px-1.5 py-0.5 text-[10px] text-violet-300">
+                          <span className="rounded border border-status-draft/40 bg-status-draft/10 px-1.5 py-0.5 text-[11px] text-status-draft">
                             {tr('全局', locale)}
                           </span>
                         </div>
@@ -5213,7 +5223,7 @@ export default function ProjectSettingsModal({
                           className={cn(
                             'rounded border px-2 py-0.5 text-[11px]',
                             target.exists
-                              ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
+                              ? 'border-status-success/40 bg-status-success/10 text-status-success'
                               : 'border-border-soft bg-bg-alt text-fg-faint',
                           )}
                         >

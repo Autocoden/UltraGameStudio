@@ -23,29 +23,33 @@ export function remoteWorkspaceConnectionLabel(
 export function remoteWorkspaceConnectionDotClassName(
   status: RemoteWorkspaceConnectionStatus,
 ): string {
+  // The glow ring used to be a literal rgba() sampled from Tailwind's palette
+  // (emerald-400/red-400/amber-400/sky-400), so it stayed green/red/amber/sky even
+  // when the theme's status colors are teal/pink/violet. Derive it from the same
+  // token as the dot instead.
   if (status === 'connected') {
-    return 'bg-emerald-400 shadow-[0_0_0_2px_rgba(52,211,153,0.16)]';
+    return 'bg-status-success ring-2 ring-status-success/20';
   }
   if (status === 'failed') {
-    return 'bg-red-400 shadow-[0_0_0_2px_rgba(248,113,113,0.16)]';
+    return 'bg-status-error ring-2 ring-status-error/20';
   }
   if (status === 'unconfigured') {
-    return 'bg-amber-400 shadow-[0_0_0_2px_rgba(251,191,36,0.16)]';
+    return 'bg-status-warning ring-2 ring-status-warning/20';
   }
-  return 'animate-pulse bg-sky-400 shadow-[0_0_0_2px_rgba(56,189,248,0.16)]';
+  return 'animate-pulse bg-status-info ring-2 ring-status-info/20';
 }
 
 function badgeClassName(status: RemoteWorkspaceConnectionStatus): string {
   if (status === 'connected') {
-    return 'border-emerald-400/40 bg-emerald-400/10 text-emerald-300';
+    return 'border-status-success/40 bg-status-success/10 text-status-success';
   }
   if (status === 'failed') {
-    return 'border-red-400/50 bg-red-400/10 text-red-300';
+    return 'border-status-error/50 bg-status-error/10 text-status-error';
   }
   if (status === 'unconfigured') {
-    return 'border-amber-400/45 bg-amber-400/10 text-amber-300';
+    return 'border-status-warning/45 bg-status-warning/10 text-status-warning';
   }
-  return 'border-sky-400/40 bg-sky-400/10 text-sky-300';
+  return 'border-status-info/40 bg-status-info/10 text-status-info';
 }
 
 function statusIcon(status: RemoteWorkspaceConnectionStatus) {
@@ -74,13 +78,13 @@ export default function RemoteWorkspaceStatusBadge({
     <span
       title={state?.detail ? `${label}：${state.detail}` : label}
       className={cn(
-        'inline-flex h-5 shrink-0 items-center gap-1 rounded border px-1.5 text-[9px] font-medium leading-none',
+        'inline-flex h-5 shrink-0 items-center gap-1 rounded border px-1.5 text-[11px] font-medium leading-none',
         badgeClassName(status),
         className,
       )}
     >
       <Icon
-        size={10}
+        size={12}
         aria-hidden="true"
         className={cn('shrink-0', status === 'checking' && 'animate-spin')}
       />

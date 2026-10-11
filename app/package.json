@@ -45,7 +45,9 @@
     "remark-breaks": "^4.0.0",
     "remark-gfm": "^4.0.1",
     "remark-math": "^6.0.0",
+    "remark-parse": "^11.0.0",
     "three": "^0.184.0",
+    "unified": "^11.0.5",
     "zustand": "^4.5.5"
   },
   "devDependencies": {

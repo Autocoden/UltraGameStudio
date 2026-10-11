@@ -135,6 +135,42 @@ program
   .action((file: string, local: RunCommandOptions) => dispatch(() => runRun(file, withGlobals(local))));
 */
 
+program
+  .command('skills <action> [skillId]')
+  .description('list or fully view host-managed skills; never executes their scripts')
+  .option('--cwd <path>', 'trusted workspace path')
+  .option('--file <relative-path>', 'support file to view inside the selected skill')
+  .action((action: string, skillId: string | undefined, local: import('../commands/skills').SkillsOptions) =>
+    dispatch(async () => {
+      const { runSkills } = await import('../commands/skills');
+      return runSkills(action, skillId, withGlobals(local));
+    }),
+  );
+
+for (const action of ['learn', 'refine'] as const) {
+  program
+    .command(`${action} <text>`)
+    .description('review explicit user lesson/correction text; unsafe CLI channels remain unavailable')
+    .option('--cwd <path>', 'trusted workspace path')
+    .option('--review-url <url>', 'explicit completion-only HTTP endpoint; no agent fallback')
+    .option('--review-adapter <adapter>', 'independent reviewer adapter (never the foreground CLI default)')
+    .option('--review-provider <id>', 'exact existing single-channel reviewer provider id')
+    .option('--review-channel <id>', 'exact reviewer channel; rejected by single-channel CLI config')
+    .option('--review-model <id>', 'model identifier for the dedicated reviewer')
+    .option('--review-transport <type>', 'openai-compatible or anthropic (default openai-compatible)')
+    .option('--review-key-env <name>', 'env variable containing the HTTP credential; never pass the key itself')
+    .action((text: string, local: import('../commands/skills').SkillLearnOptions) =>
+      dispatch(async () => {
+        const { runSkillLearn } = await import('../commands/skills');
+        const { loadNodeSkillLearningConfig } = await import('../config/providers');
+        const options = withGlobals(local);
+        if (!options.reviewUrl) options.skillConfig = loadNodeSkillLearningConfig(options.cwd, options.skillConfig,
+          local as import('../config/providers').NodeSkillReviewSelectionFlags);
+        return runSkillLearn(action, text, options);
+      }),
+    );
+}
+
 if (STUDIO_ENABLED) {
   program
     .command('studio <task>')
@@ -158,6 +194,11 @@ if (STUDIO_ENABLED) {
     .option('--timeout <seconds>', 'per-node timeout seconds')
     .option('--cwd <path>', 'working directory')
     .option('--run-id <id>', 'explicit run directory id under .ugs-run/')
+    .option('--review-adapter <adapter>', 'independent completion-only reviewer adapter')
+    .option('--review-provider <id>', 'exact existing single-channel reviewer provider id')
+    .option('--review-channel <id>', 'exact reviewer channel; rejected by single-channel CLI config')
+    .option('--review-model <id>', 'concrete model identifier for the independent HTTP reviewer')
+    .option('--review-transport <type>', 'explicit openai-compatible or anthropic review protocol')
     .action((task: string, local: StudioOptions) =>
       dispatch(async () => {
         const { runStudio } = await import('../commands/studio');

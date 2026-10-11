@@ -58,22 +58,22 @@ export default class ErrorBoundary extends Component<
       .join('\n');
 
     return (
-      <div className="space-y-3 rounded-lg border border-rose-500/40 bg-rose-500/10 p-4">
-        <div className="text-sm font-semibold text-rose-200">
+      <div className="space-y-3 rounded-lg border border-status-error/40 bg-status-error/10 p-4">
+        <div className="text-sm font-semibold text-status-error">
           {this.props.label
             ? `「${this.props.label}」渲染出错 / failed to render`
             : '渲染出错 / failed to render'}
         </div>
-        <p className="text-[11px] leading-relaxed text-rose-200/80">
+        <p className="text-[11px] leading-relaxed text-status-error/80">
           这一部分崩溃了，所以它的输入框无法使用。下面是具体错误，请反馈给开发者。
         </p>
-        <pre className="max-h-64 overflow-auto whitespace-pre-wrap rounded border border-rose-500/30 bg-black/30 p-2 font-mono text-[10px] leading-relaxed text-rose-100">
+        <pre className="max-h-64 overflow-auto whitespace-pre-wrap rounded border border-status-error/30 bg-black/30 p-2 font-mono text-[10px] leading-relaxed text-status-error">
           {detail}
         </pre>
         <button
           type="button"
           onClick={this.reset}
-          className="inline-flex items-center rounded border border-rose-500/40 bg-rose-500/10 px-2.5 py-1 text-xs text-rose-100 transition-colors hover:bg-rose-500/20"
+          className="inline-flex items-center rounded border border-status-error/40 bg-status-error/10 px-2.5 py-1 text-xs text-status-error transition-colors hover:bg-status-error/20"
         >
           重试 / Retry
         </button>

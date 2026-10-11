@@ -61,7 +61,7 @@ export default function SmartLink({
     );
   }
 
-  if (ref) return <FileChip refData={ref} onOpenFile={onOpenFile} cwd={cwd} />;
+  if (ref) return <FileChip refData={ref} onOpenFile={onOpenFile} cwd={cwd} label={children} />;
 
   if (isVideoUrl) {
     return <VideoPlayer src={url} label={labelText} />;
@@ -76,6 +76,7 @@ export default function SmartLink({
       <button
         type="button"
         onClick={() => void onOpenFile(createImagePreviewRef(url, labelText))}
+        data-file-preview-trigger="true"
         title="在右侧预览"
         className="inline-flex items-center gap-0.5 text-accent underline decoration-accent/40 underline-offset-2 hover:decoration-accent"
       >
@@ -88,7 +89,7 @@ export default function SmartLink({
   if (!isExternal) {
     const childRef = resolveLabelRef(labelText);
     if (childRef) {
-      return <FileChip refData={childRef} onOpenFile={onOpenFile} cwd={cwd} />;
+      return <FileChip refData={childRef} onOpenFile={onOpenFile} cwd={cwd} label={children} />;
     }
   }
 

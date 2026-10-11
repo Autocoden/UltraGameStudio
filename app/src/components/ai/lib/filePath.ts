@@ -300,6 +300,15 @@ function stripFileMentionPrefix(path: string): string {
   return path.startsWith('@') ? path.slice(1) : path;
 }
 
+// Codex links use /E:/... on Windows. Strip the link's leading slash before
+// parsing drive letters and line hints or passing the path to the filesystem.
+function normalizeFileRefPath(raw: string): string {
+  return (pathFromFileUrl(raw) ?? decodePercentPath(raw)).replace(
+    /^\/([A-Za-z]:[\\/])/,
+    '$1',
+  );
+}
+
 function pathFromFileUrl(raw: string): string | null {
   if (!/^file:\/\//i.test(raw)) return null;
   try {
@@ -317,7 +326,7 @@ function pathFromFileUrl(raw: string): string | null {
 
 /** Cheap pre-filter: reject obvious non-paths before the precise regex. */
 export function looksLikePath(raw: string, opts: FileRefParseOptions = {}): boolean {
-  const s = decodePercentPath(raw.trim());
+  const s = normalizeFileRefPath(raw.trim());
   if (!s || s.length > 240) return false;
   if (!opts.allowSpaces && /\s/.test(s)) return false;
   const fileUrlPath = pathFromFileUrl(s);
@@ -357,7 +366,7 @@ export function parseFileRef(
   opts: FileRefParseOptions = {},
 ): FileRef | null {
   const trimmed = raw.trim();
-  const s = pathFromFileUrl(trimmed) ?? decodePercentPath(trimmed);
+  const s = normalizeFileRefPath(trimmed);
   if (!looksLikePath(s, opts)) return null;
   const candidate = stripFileMentionPrefix(s);
 

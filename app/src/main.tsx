@@ -4,6 +4,7 @@ import "./lib/legacyStorageMigration";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import "@xyflow/react/dist/style.css";
+import "./styles/fonts.css";
 import "./styles/global.css";
 import { initializeSecureStorage } from "@/lib/secureStorage";
 import { installQuitFlushHandler, registerQuitFlushTask } from "@/lib/quitFlush";

@@ -225,6 +225,7 @@ function resetStore(
     // 该用例比较 `/命令` 与 `@提及` 的先后顺序，需要把默认隐藏的三个进阶
     // 入口按钮打开（见 useStore.composerToolButtonsVisible）。
     composerToolButtonsVisible: true,
+    composerHintRowVisible: true,
     promptGroups: samplePromptGroups,
     composer: defaultComposer,
     composerDraft: "",

@@ -26,6 +26,7 @@ import {
   List,
   Loader2,
   RefreshCw,
+  X,
 } from 'lucide-react';
 import FilePreviewDrawer from '@/components/ai/FilePreviewDrawer';
 import type { FileRef } from '@/components/ai/lib/filePath';
@@ -36,28 +37,24 @@ import GameTeamPanel, {
 } from '@/panels/GameTeamPanel';
 import {
   OPEN_PROJECT_RIGHT_PANEL_FILE_PREVIEW_EVENT,
+  OPEN_PROJECT_RIGHT_PANEL_SESSION_FILES_EVENT,
+  TOGGLE_PROJECT_RIGHT_PANEL_EVENT,
+  PROJECT_RIGHT_PANEL_VISIBILITY_EVENT,
   type OpenProjectRightPanelFilePreviewEventDetail,
 } from '@/panels/projectRightPanelEvents';
 import { t, type Locale } from '@/lib/i18n';
 import {
   buildSessionFileTree,
   countSessionFileChanges,
-  extractSessionFiles,
-  mergeSessionFilesWithWorkspaceChanges,
   type SessionFileEntry,
   type SessionFileTreeNode,
 } from '@/lib/sessionFiles';
+import { collectSessionEditedFiles } from '@/lib/turnFileChanges';
 import {
   SESSION_CHANGES_UPDATED_EVENT,
   readPersistedSessionChanges,
   sessionChangesCacheKey,
 } from '@/lib/sessionChanges';
-import {
-  buildSessionIgnorePredicate,
-  sessionIgnoreRootFromContents,
-  type SessionIgnoreRoot,
-} from '@/lib/sessionFileIgnore';
-import { IGNORE_FILE_NAMES } from '@/lib/ignoreRules';
 import {
   applyProjectFileDragDropEffect,
   finishProjectFileDrag,
@@ -79,7 +76,7 @@ import {
   type WorkspaceTreeEntry,
 } from '@/lib/tauri';
 import { useResizableWidth } from '@/lib/useResizableWidth';
-import { useAutoHideScroll } from '@/hooks/useAutoHideScroll';
+import { attachAutoHideScroll } from '@/hooks/useAutoHideScroll';
 import {
   normalizeWorkspacePath,
   uniqueWorkspaceHistory,
@@ -627,6 +624,7 @@ function ProjectEntryContextMenu({
   return (
     <div
       role="menu"
+      data-ugs-project-file-menu="true"
       className="fixed z-[70] min-w-[176px] rounded-md border border-border bg-panel py-1 text-xs text-fg shadow-xl"
       style={{ left: x, top: y }}
       onPointerDown={(event) => event.stopPropagation()}
@@ -753,9 +751,9 @@ function sessionFileBadgeLabel(locale: Locale, entry: SessionFileEntry): string 
 }
 
 function sessionFileBadgeClass(entry: SessionFileEntry): string {
-  if (entry.changeStatus === 'added') return 'border-emerald-400/45 text-emerald-300';
+  if (entry.changeStatus === 'added') return 'border-status-success/45 text-status-success';
   if (entry.changeStatus === 'deleted') return 'border-status-error/45 text-status-error';
-  if (entry.changeStatus === 'renamed') return 'border-amber-300/45 text-amber-300';
+  if (entry.changeStatus === 'renamed') return 'border-status-warning/45 text-status-warning';
   if (entry.changeStatus === 'modified') return 'border-accent/45 text-accent';
   return entry.action === 'edited'
     ? 'border-accent/45 text-accent'
@@ -788,12 +786,11 @@ export default function ProjectFileTree() {
   const activeSessionId = useStore((s) => s.activeSessionId);
   const composerWorkspace = useStore((s) => s.composer.workspace);
   const composerWorkspaceFolders = useStore((s) => s.composer.workspaceFolders);
-  // 「会话文件」标签的数据来源：当前会话里 AI 工具调用（<<UGS_TOOL>> 内联事件）
-  // 修改过的文件，并合并运行结束时已经持久化的会话改动缓存。
+  // 与输入框上方的会话改动汇总共用累计确认改动记录。
   const sessionToolActivityKey = useStore((s) =>
     s.messages
-      .filter((message) => message.role === 'assistant' && hasToolSentinel(message.text))
-      .map((message) => `${message.id}:${message.createdAt ?? 0}:${message.text}`)
+      .filter((message) => message.role === 'assistant' && !message.localOnly && (hasToolSentinel(message.text) || message.fileChanges))
+      .map((message) => `${message.id}:${message.createdAt ?? 0}:${message.text}:${JSON.stringify(message.fileChanges ?? null)}`)
       .join('\n'),
   );
   const sessionActivityVersion = useStore(
@@ -803,6 +800,8 @@ export default function ProjectFileTree() {
   const [cache, setCache] = useState<WorkspaceTreeCache>({});
   const cacheRef = useRef(cache);
   const [previewRef, setPreviewRef] = useState<FileRef | null>(null);
+  const [panelOpen, setPanelOpen] = useState(false);
+  const panelRef = useRef<HTMLElement | null>(null);
   const [teamDetailsPreview, setTeamDetailsPreview] = useState<{
     nodeId?: string;
   } | null>(null);
@@ -811,6 +810,26 @@ export default function ProjectFileTree() {
   // 避免会话文件因为文件夹下拉条被切到子目录而解析到错误的绝对路径。
   const [previewCwd, setPreviewCwd] = useState<string | undefined>(undefined);
   const [previewDiffEnabled, setPreviewDiffEnabled] = useState(false);
+  useEffect(() => {
+    const toggle = () => {
+      if (!projectRightPanelVisible()) return;
+      setPreviewRef(null);
+      setTeamDetailsPreview(null);
+      setPreviewDiffEnabled(false);
+      setPanelOpen((open) => !open);
+    };
+    window.addEventListener(TOGGLE_PROJECT_RIGHT_PANEL_EVENT, toggle);
+    return () => window.removeEventListener(TOGGLE_PROJECT_RIGHT_PANEL_EVENT, toggle);
+  }, []);
+  useEffect(() => {
+    window.dispatchEvent(new CustomEvent(PROJECT_RIGHT_PANEL_VISIBILITY_EVENT, { detail: { open: panelOpen } }));
+  }, [panelOpen]);
+  useEffect(() => {
+    setPanelOpen(false);
+    setPreviewRef(null);
+    setTeamDetailsPreview(null);
+    setPreviewDiffEnabled(false);
+  }, [activeWorkspaceId, activeSessionId]);
   // 「工作区改动」tab 已停用（会触发 P4 reconcile 洪水）。改为「会话文件」tab：
   // 只展示当前会话里 AI 修改过的文件；新增/修改/删除来自已落盘缓存。
   const [panelTab, setPanelTab] = useState<ProjectPanelTab>(() => {
@@ -833,6 +852,28 @@ export default function ProjectFileTree() {
   const [contextMenu, setContextMenu] = useState<ProjectEntryContextMenuState>(null);
   const [collapsedSessionDirs, setCollapsedSessionDirs] = useState<Record<string, true>>({});
   const visibleThumbnailsRef = useRef<ThumbnailVisibility>({});
+
+  useEffect(() => {
+    // Embedded previews already own their outside-pointer handling.
+    if (!panelOpen || previewRef || teamDetailsPreview) return;
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node) || panelRef.current?.contains(target)) return;
+      const element = target instanceof Element ? target : target.parentElement;
+      // Keep the entry in place until click toggles/opens the panel. Closing on
+      // pointerdown would reflow the chat and can also make a toggle reopen it.
+      if (element?.closest(
+        '[aria-controls~="ugs-project-file-panel"]:not(:disabled), ' +
+        '[data-file-preview-trigger="true"]:not(:disabled), ' +
+        '[data-file-preview-ignore-outside-pointer="true"], ' +
+        '[data-ugs-project-file-menu="true"]',
+      )) return;
+      setPanelOpen(false);
+      setContextMenu(null);
+    };
+    document.addEventListener('pointerdown', onPointerDown, true);
+    return () => document.removeEventListener('pointerdown', onPointerDown, true);
+  }, [panelOpen, previewRef, teamDetailsPreview]);
 
   useEffect(() => {
     cacheRef.current = cache;
@@ -932,6 +973,7 @@ export default function ProjectFileTree() {
   useEffect(() => {
     let cancelled = false;
     if (
+      !panelOpen ||
       panelTab !== 'session' ||
       !sessionChangesRootPath ||
       !activeSessionChangesCacheKey
@@ -964,50 +1006,8 @@ export default function ProjectFileTree() {
     activeSessionChangesCacheKey,
     sessionChangesVersion,
     sessionActivityVersion,
+    panelOpen,
   ]);
-
-  // 会话文件过滤：读取每个根目录下的 .gitignore/.p4ignore/.svnignore（纯文本读取，
-  // 不调用任何 git/p4/svn 指令），编译成忽略匹配器，用于隐藏不在版本管理中的文件。
-  const [ignoreRoots, setIgnoreRoots] = useState<SessionIgnoreRoot[]>([]);
-  const rootFoldersKey = useMemo(
-    () => rootFolders.map((path) => workspacePathKey(path)).join('|'),
-    [rootFolders],
-  );
-  useEffect(() => {
-    let cancelled = false;
-    const roots = rootFolders.filter((path) => path.trim());
-    if (roots.length === 0) {
-      setIgnoreRoots([]);
-      return;
-    }
-    void (async () => {
-      const loaded = await Promise.all(
-        roots.map(async (root): Promise<SessionIgnoreRoot> => {
-          if (isRemoteWorkspacePath(root)) {
-            return sessionIgnoreRootFromContents(root, []);
-          }
-          const contents = await Promise.all(
-            IGNORE_FILE_NAMES.map(async (name) => {
-              try {
-                const preview = await previewLocalFile(name, { cwd: root });
-                return preview.kind === 'text' && preview.text ? preview.text : '';
-              } catch {
-                // Missing ignore file (or no desktop backend) → no rules from it.
-                return '';
-              }
-            }),
-          );
-          return sessionIgnoreRootFromContents(root, contents);
-        }),
-      );
-      if (!cancelled) setIgnoreRoots(loaded);
-    })();
-    return () => {
-      cancelled = true;
-    };
-    // rootFoldersKey captures the identity of the root set; reload on change.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rootFoldersKey]);
 
   const sessionFilesViewKey = `${activeWorkspaceId ?? ''}:${
     activeSessionId ?? ''
@@ -1017,7 +1017,7 @@ export default function ProjectFileTree() {
   // 当前会话修改文件：解析消息流和合并持久快照都可能很重。切换会话时先让
   // 信息流完成首帧渲染，再异步填充右侧“会话文件”。
   useEffect(() => {
-    if (panelTab !== 'session') return;
+    if (!panelOpen || panelTab !== 'session') return;
 
     let cancelled = false;
     const key = sessionFilesViewKey;
@@ -1032,15 +1032,7 @@ export default function ProjectFileTree() {
     );
     const cancelWork = scheduleSessionPanelWork(() => {
       if (cancelled) return;
-      const isIgnored = buildSessionIgnorePredicate(ignoreRoots);
-      const activityFiles = extractSessionFiles(useStore.getState().messages, {
-        isIgnored,
-      });
-      const files = mergeSessionFilesWithWorkspaceChanges(
-        activityFiles,
-        sessionChangesSnapshot,
-        { isIgnored },
-      ).filter((entry) => entry.action === 'edited' || entry.changeStatus);
+      const files = collectSessionEditedFiles(useStore.getState().messages, composerWorkspace || undefined);
       if (cancelled) return;
       const nextState: SessionFilesViewState = {
         key,
@@ -1069,8 +1061,8 @@ export default function ProjectFileTree() {
     panelTab,
     sessionFilesViewKey,
     sessionToolActivityKey,
-    ignoreRoots,
-    sessionChangesSnapshot,
+    composerWorkspace,
+    panelOpen,
   ]);
   const sessionFilesReady = sessionFilesState.key === sessionFilesViewKey;
   const sessionFiles = sessionFilesReady
@@ -1130,7 +1122,11 @@ export default function ProjectFileTree() {
     max: projectFileTreeMaxWidth(),
     edge: 'left',
   });
-  const fileScrollRef = useAutoHideScroll<HTMLDivElement>(900, 24, 'both');
+  const fileScrollRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const element = fileScrollRef.current;
+    if (element) return attachAutoHideScroll(element, 900, 24, 'both');
+  }, [panelOpen, previewRef, teamDetailsPreview]);
 
   const loadDirectory = useCallback(
     async (
@@ -1239,8 +1235,21 @@ export default function ProjectFileTree() {
   }, []);
 
   useEffect(() => {
+    const openSessionFiles = () => {
+      setPreviewRef(null);
+      setTeamDetailsPreview(null);
+      setPreviewDiffEnabled(false);
+      updatePanelTab('session');
+      setPanelOpen(true);
+    };
+    window.addEventListener(OPEN_PROJECT_RIGHT_PANEL_SESSION_FILES_EVENT, openSessionFiles);
+    return () => window.removeEventListener(OPEN_PROJECT_RIGHT_PANEL_SESSION_FILES_EVENT, openSessionFiles);
+  }, [updatePanelTab]);
+
+  useEffect(() => {
     const openTeamDetails = (event: Event) => {
       const detail = (event as CustomEvent<OpenGameTeamDetailsEventDetail>).detail;
+      setPanelOpen(true);
       setPreviewRef(null);
       setPreviewDiffEnabled(false);
       setTeamDetailsPreview({ nodeId: detail?.nodeId });
@@ -1259,6 +1268,7 @@ export default function ProjectFileTree() {
       if (!detail?.ref) return;
 
       event.preventDefault();
+      setPanelOpen(true);
       setTeamDetailsPreview(null);
       setPreviewCwd(detail.cwd || undefined);
       setPreviewDiffEnabled(true);
@@ -1297,11 +1307,11 @@ export default function ProjectFileTree() {
   }, []);
 
   useEffect(() => {
-    if (!activeRootKey || !selectedRootPath) return;
+    if (!panelOpen || !activeRootKey || !selectedRootPath) return;
     const tree = cacheRef.current[activeRootKey];
     if (tree?.rootPath === selectedRootPath && tree.directories['']) return;
     void loadDirectory(activeRootKey, selectedRootPath, '');
-  }, [activeRootKey, selectedRootPath, loadDirectory]);
+  }, [activeRootKey, selectedRootPath, loadDirectory, panelOpen]);
 
   useEffect(() => {
     if (
@@ -2107,9 +2117,14 @@ export default function ProjectFileTree() {
   const folderBarMaxHeight = FOLDER_ROW_HEIGHT * MAX_VISIBLE_FOLDERS;
   const previewPanelOpen = Boolean(previewRef || teamDetailsPreview);
 
+  if (!panelOpen) return null;
+
   return (
     <>
       <aside
+        ref={panelRef}
+        id="ugs-project-file-panel"
+        data-ugs-project-file-panel="true"
         className="relative flex h-full shrink-0 flex-col border-l border-border bg-panel"
         style={{ width }}
       >
@@ -2148,6 +2163,7 @@ export default function ProjectFileTree() {
             canOpenExternally={!previewCwd || !isRemoteWorkspacePath(previewCwd)}
             variant="embedded"
             onClose={() => {
+              setPanelOpen(false);
               setPreviewRef(null);
               setTeamDetailsPreview(null);
               setPreviewDiffEnabled(false);
@@ -2157,6 +2173,12 @@ export default function ProjectFileTree() {
           <>
         <header className="shrink-0 border-b border-border-soft px-3 py-2">
           <div className="flex min-w-0 items-center gap-2">
+            <button type="button" onClick={() => setPanelOpen(false)}
+              aria-label={locale === 'zh-CN' ? '收起文件面板' : 'Close file panel'}
+              title={locale === 'zh-CN' ? '收起文件面板' : 'Close file panel'}
+              className="ugs-control flex h-7 w-7 shrink-0 items-center justify-center rounded text-fg-faint hover:bg-border-soft hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">
+              <X size={14} />
+            </button>
             <div
               role="tablist"
               aria-label="右侧项目面板"

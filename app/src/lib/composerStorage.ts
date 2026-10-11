@@ -32,6 +32,9 @@ const LOCALE_KEY = 'ultragamestudio.locale.v1';
 const PROMPT_AUTO_TRANSLATE_KEY = 'ultragamestudio.promptAutoTranslate.v1';
 const COMPOSER_TOOL_BUTTONS_VISIBLE_KEY =
   'ultragamestudio.composerToolButtonsVisible.v1';
+const COMPOSER_HINT_ROW_VISIBLE_KEY =
+  'ultragamestudio.composerHintRowVisible.v1';
+const ASSET_CENTER_ENABLED_KEY = 'ultragamestudio.assetCenterEnabled.v1';
 const PERSONAL_INSTRUCTIONS_KEY = 'ultragamestudio.personalInstructions.v1';
 const PERSONAL_INSTRUCTIONS_BY_MODEL_KEY =
   'ultragamestudio.personalInstructionsByModel.v1';
@@ -205,6 +208,44 @@ export function saveThinkingLevelsEnabled(enabled: boolean): void {
   if (!hasStorage()) return;
   try {
     window.localStorage.setItem(THINKING_LEVELS_ENABLED_KEY, String(enabled));
+  } catch {
+    // non-fatal
+  }
+}
+
+/** 输入框上方的提示与权限栏默认隐藏；设置 → 通用可开启。 */
+export function loadComposerHintRowVisible(): boolean {
+  if (!hasStorage()) return false;
+  try {
+    return window.localStorage.getItem(COMPOSER_HINT_ROW_VISIBLE_KEY) === 'true';
+  } catch {
+    return false;
+  }
+}
+
+export function saveComposerHintRowVisible(visible: boolean): void {
+  if (!hasStorage()) return;
+  try {
+    window.localStorage.setItem(COMPOSER_HINT_ROW_VISIBLE_KEY, String(visible));
+  } catch {
+    // non-fatal
+  }
+}
+
+/** 资产中心默认关闭；仅在设置中明确启用后显示入口并扫描缓存。 */
+export function loadAssetCenterEnabled(): boolean {
+  if (!hasStorage()) return false;
+  try {
+    return window.localStorage.getItem(ASSET_CENTER_ENABLED_KEY) === 'true';
+  } catch {
+    return false;
+  }
+}
+
+export function saveAssetCenterEnabled(enabled: boolean): void {
+  if (!hasStorage()) return;
+  try {
+    window.localStorage.setItem(ASSET_CENTER_ENABLED_KEY, String(enabled));
   } catch {
     // non-fatal
   }

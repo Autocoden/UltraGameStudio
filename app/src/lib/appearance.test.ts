@@ -73,6 +73,10 @@ const REQUIRED_TOKENS = [
   '--ugs-status-success-contrast',
   '--ugs-status-error',
   '--ugs-status-error-contrast',
+  // Eight presets used to omit the draft pair, so the draft indicator silently
+  // inherited :root's violet from a different palette.
+  '--ugs-status-draft',
+  '--ugs-status-draft-contrast',
   '--ugs-status-interrupted',
   '--ugs-status-interrupted-contrast',
 ] as const;
@@ -214,13 +218,19 @@ describe('appearance presets', () => {
     expect(byId['solarized-dark']).toBe('dark');
   });
 
-  it.each(NEW_PRESETS)(
+  it.each([...BUILTIN_STYLE_PRESETS])(
     'global.css defines the full token contract for "%s"',
     (id) => {
       const block = presetCssBlock(id);
       expect(block, `missing CSS block for ${id}`).not.toBe('');
       for (const token of REQUIRED_TOKENS) {
         expect(block, `${id} missing ${token}`).toContain(`${token}:`);
+        // Exactly once: a duplicate declaration is how the draft token went wrong
+        // (the later value silently won).
+        expect(
+          block.split(`${token}:`).length - 1,
+          `${id} declares ${token} more than once`,
+        ).toBe(1);
       }
     },
   );
@@ -427,6 +437,58 @@ describe('appearance presets', () => {
     expect(root.style.getPropertyValue('--ugs-font-family')).toContain(
       'Microsoft YaHei',
     );
+    // The reader face drives streamed answers and reasoning. If the appearance
+    // layer stops writing it, the font picker goes back to being a no-op on the
+    // product's main reading surface.
+    expect(root.style.getPropertyValue('--ugs-reader-font-family')).toContain(
+      'Microsoft YaHei',
+    );
     expect(root.style.getPropertyValue('--ugs-font-size')).toBe('18px');
+  });
+
+  it('keeps the code face independent of the UI font choice', () => {
+    applyAppearance({
+      ...DEFAULT_APPEARANCE_SETTINGS,
+      fontFamilyId: 'mono',
+    });
+    const root = document.documentElement;
+    // Choosing a monospace UI font must not rewrite the code/token face: that is
+    // what keeps code columns aligned (see global.css `code, pre, .mono`).
+    expect(root.style.getPropertyValue('--ugs-mono-font-family')).toBe('');
+    expect(root.style.getPropertyValue('--ugs-reader-font-family')).toContain(
+      'JetBrains Mono',
+    );
+  });
+
+  it('self-hosts the interface fonts so the app renders offline', () => {
+    // UGS is local-first: a CDN font request degrades silently on an offline,
+    // intranet or blocked network, and the app then looks nothing like the design.
+    expect(indexHtml).not.toMatch(/fonts\.googleapis\.com|fonts\.gstatic\.com/);
+    const fontsCss = readFileSync('src/styles/fonts.css', 'utf8');
+    expect(fontsCss).toContain("font-family: 'Inter'");
+    expect(fontsCss).toContain("font-family: 'JetBrains Mono'");
+    // Every @font-face must point at a bundled file, never at a remote URL.
+    for (const [, url] of fontsCss.matchAll(/src:\s*url\(([^)]+)\)/g)) {
+      expect(url, `remote font source: ${url}`).not.toMatch(/^https?:/);
+    }
+  });
+
+  it('keeps every Tailwind token color alpha-capable', async () => {
+    // A color declared as a bare `var(--x)` cannot carry an alpha channel, so
+    // Tailwind silently emits *no rule* for `bg-accent/10`, `border-status-error/40`,
+    // `ring-status-success/20`, … — 48 such classes existed in the source with zero
+    // generated rules. `color-mix(… calc(<alpha-value> * 100%) …)` restores them.
+    const { default: tailwindConfig } = await import('../../tailwind.config');
+    const colors = (tailwindConfig.theme?.extend?.colors ?? {}) as Record<
+      string,
+      unknown
+    >;
+    expect(Object.keys(colors).length).toBeGreaterThan(20);
+    for (const [name, value] of Object.entries(colors)) {
+      expect(
+        String(value),
+        `Tailwind color "${name}" would drop every /NN opacity modifier`,
+      ).toContain('<alpha-value>');
+    }
   });
 });

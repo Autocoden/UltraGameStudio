@@ -1,3 +1,4 @@
+import { sessionHasContextCompression, CONTEXT_COMPRESSION_TOOL } from '@/lib/contextCompression';
 import { create } from 'zustand';
 import {
   type GatewaySelection,
@@ -98,6 +99,9 @@ import {
   setActiveGatewaySelection,
 } from '@/lib/gatewayConfig';
 import { getCliRuntimeSnapshot } from '@/lib/cliConfig';
+import { beginSkillLearningTurn, performSkillReviewAction, requestExplicitSkillLearning, resumeSkillLearningReview, isSkillReviewLive } from '@/lib/skillLearningDesktop';
+import { loadSkillLearningConfig } from '@/lib/skillLearningConfig';
+import type { SkillMutationResult, SkillOrigin, SkillReviewState } from '@/runtime/skills/types';
 import { ensureFreeProxy, isFreeChannelSelection } from '@/lib/freeChannels';
 import { getManifestModeEnabled } from '@/lib/manifestMode';
 import {
@@ -185,7 +189,9 @@ import {
   isTauri,
   previewLocalFile,
   steerAiCli,
+  tauriAvailable,
   ugsJobWrapperPath,
+  type NativeCliSkillToolsOptions,
 } from '@/lib/tauri';
 import {
   linkManagedAssetsFromMessageText,
@@ -379,7 +385,10 @@ import {
   remoteModelForAdapter,
   remoteRunnerProviderMatchesWorkspace,
   remoteWorkspaceIdFromPath,
+  RunnerClient,
 } from '@/lib/remoteWorkspace';
+import { REMOTE_SKILL_HOST_ID } from '@ugs/protocol';
+import { createRemoteSkillControlHost } from '@/lib/remoteSkillLearning';
 import {
   autosave,
   exportWorkflowToFile,
@@ -390,6 +399,8 @@ import {
   refreshCachedSessionChanges,
   sessionChangesCacheKey,
 } from '@/lib/sessionChanges';
+import { collectTurnFileChanges, supportsNativeFileChanges } from '@/lib/turnFileChanges';
+import { ensureWorkspaceChangesBaseline, listWorkspaceChanges } from '@/lib/tauri';
 import {
   historyStore,
   isAutoTitlePlaceholder,
@@ -2126,6 +2137,7 @@ export function sessionFromSummary(summary: SessionSummary): Session {
     messageCount: summary.messageCount,
     ...(runStatus ? { runStatus } : {}),
     ...(summary.unreadCompletion === true ? { unreadCompletion: true } : {}),
+    ...(summary.contextCompressed === true ? { contextCompressed: true } : {}),
     ...(summary.favorite === true ? { favorite: true } : {}),
     ...(scheduledTask ? { scheduledTask } : {}),
   };
@@ -2176,6 +2188,7 @@ export function summaryFromRecord(record: SessionRecord): SessionSummary {
     messageCount: record.messages.length,
     ...(runStatus ? { runStatus } : {}),
     ...(record.meta?.unreadCompletion === true ? { unreadCompletion: true } : {}),
+    ...(sessionHasContextCompression(record.messages, record.meta) ? { contextCompressed: true } : {}),
     ...(record.meta?.favorite === true ? { favorite: true } : {}),
     ...(scheduledTask ? { scheduledTask } : {}),
   };
@@ -2757,6 +2770,7 @@ function activeMessageSummaryPatch(
           updatedAt,
           preview: last ? previewFromText(last.text) : undefined,
           messageCount: messages.length,
+          ...(sessionHasContextCompression(messages) ? { contextCompressed: true } : {}),
         }
       : session;
   return {
@@ -3415,6 +3429,14 @@ async function createNewChatSession(): Promise<void> {
     workspace?.path,
     workspaceFoldersFromMetadata(workspace?.metadata),
   );
+  // Publish the persistence barrier before the optimistic session is visible.
+  // Skill bindings must never race the first history record into existence.
+  const persistenceKey = runKey(workspaceId, sessionId);
+  const sessionPersisted = historyStore.createSession({
+    workspaceId, id: sessionId, isWorkflow: false, messages: [], title,
+  }).then(() => {});
+  pendingSessionCreations.set(persistenceKey, sessionPersisted);
+  void sessionPersisted.catch(() => {});
   useStore.setState((s) => {
     if (s.activeWorkspaceId !== workspaceId) return {};
     const sessionKey = { workspaceId, sessionId };
@@ -3453,13 +3475,7 @@ async function createNewChatSession(): Promise<void> {
   // Persist + reconcile in the background. UI is already on the new session.
   void (async () => {
     try {
-      await historyStore.createSession({
-        workspaceId,
-        id: sessionId,
-        isWorkflow: false,
-        messages: [],
-        title,
-      });
+      await sessionPersisted;
       const current = useStore.getState();
       if (
         current.activeWorkspaceId === workspaceId &&
@@ -3472,6 +3488,10 @@ async function createNewChatSession(): Promise<void> {
       }
     } catch (err) {
       console.error('[new-session] failed to persist new chat session', err);
+    } finally {
+      if (pendingSessionCreations.get(persistenceKey) === sessionPersisted) {
+        pendingSessionCreations.delete(persistenceKey);
+      }
     }
   })();
 }
@@ -3836,6 +3856,9 @@ async function activateHistorySession(
   // deliberately excludes for read-only-lock purposes) and falls back to the
   // retained snapshot so a finished stream still restores its final messages.
   const aiEditSnapshot = getAiEditViewSource(targetWorkspaceId, session.id);
+  const liveAiEdit = aiEditSnapshot && activeAiEdits.get(aiEditSnapshot.key) === aiEditSnapshot
+    ? aiEditSnapshot
+    : null;
 
   const recordWorkflow = record.workflow
     ? restoreWorkflowRunSnapshot(record.workflow, record.meta)
@@ -3869,7 +3892,16 @@ async function activateHistorySession(
   const viewMessages = liveRun
     ? liveRun.messages
     : aiEditSnapshot
-      ? mergeMessagesById(record.messages, aiEditSnapshot.messages, newerMessage)
+      ? mergeMessagesById(record.messages, aiEditSnapshot.messages, (base, update) => {
+          // Streaming chunks keep createdAt unchanged; the debounced disk copy
+          // can therefore have the same timestamp while still being empty.
+          // The live turn owns its messages. Retained snapshots and messages
+          // belonging to other turns still use persisted freshness arbitration.
+          if (liveAiEdit && (!liveAiEdit.chat || liveAiEdit.ownedMessageIds?.has(update.id))) {
+            return update;
+          }
+          return newerMessage(base, update);
+        })
       : record.messages;
   // Converge the RETAINED snapshot (channel already torn down) onto what we just
   // rendered. Without this the stale snapshot keeps winning on every later
@@ -4573,6 +4605,7 @@ export const useStore = create<StoreState>((set, get) => ({
   runningWorkspaceId: null,
   jobSessions: [],
   jobSessionProgress: {},
+  jobDetails: [],
 
   initHistory: () => {
     initHistorySlice();
@@ -4827,8 +4860,8 @@ export const useStore = create<StoreState>((set, get) => ({
   runScheduledTaskSession: (sessionId, workspaceId, scheduledTask) =>
     runScheduledTaskHistorySession(sessionId, workspaceId, scheduledTask),
 
-  setBackgroundJobState: (jobSessions, jobSessionProgress) =>
-    useStore.setState({ jobSessions, jobSessionProgress }),
+  setBackgroundJobState: (jobSessions, jobSessionProgress, jobDetails = []) =>
+    useStore.setState({ jobSessions, jobSessionProgress, jobDetails }),
 
   // AI-driven graph edit (design mode only).
   //
@@ -5129,6 +5162,14 @@ export const useStore = create<StoreState>((set, get) => ({
     void branchChatSessionFromMessage(messageId);
   },
 
+  learnSkills: (kind, text) => startExplicitSkillLearning(kind, text),
+
+  reviewSkillLearningAction: (state, action, id) => reviewPersistedSkillLearningAction(state, action, id),
+
+  updateSkillLearningState: async (messageId, state) => {
+    await persistSkillLearningStateForSource(skillHistorySource(state), state, messageId);
+  },
+
   sendPrompt: (text, options) => {
     const trimmed = text.trim();
     if (!trimmed) return false;
@@ -5139,6 +5180,7 @@ export const useStore = create<StoreState>((set, get) => ({
     // /游戏专家/编程/引擎程序 or /引擎程序), gameExpertIds pins exactly those.
     const forceGameExperts = options?.forceGameExperts === true;
     const pinnedGameExpertIds = options?.gameExpertIds ?? [];
+    const selectedSkillIds = [...new Set(options?.skillIds ?? [])];
     const state = useStore.getState();
     if (isWorkflowReadOnly(state)) return false;
     // Image generation is routed explicitly (the /image-mode-* sticky mode and
@@ -5215,6 +5257,9 @@ export const useStore = create<StoreState>((set, get) => ({
         ? { chat: true, ownedMessageIds: new Set<string>([userMsg.id]) }
         : {}),
     };
+    let skillLearningTurn: ReturnType<typeof beginSkillLearningTurn> | undefined;
+    let skillExecutionOrigin: SkillOrigin | undefined;
+    let nativeSkillTools: NativeCliSkillToolsOptions | undefined;
     addAiEditChannel(ch);
     if (aiEditViewActive(ch)) {
       set({
@@ -5647,10 +5692,11 @@ ${previousReply.slice(0, 4000)}
         opts.cliCommand,
         opts.permission,
       ).catch(() => false);
-      // Always expose a steer surface so the lightning action works on every
-      // adapter. `native` marks the ones with a real in-turn steer channel
-      // (codex/claude/zcode); the rest fall back to queue-steer semantics —
-      // see trySteerQueuedCliTurn.
+      // Always record the steer surface for the running turn. Only `native`
+      // adapters (codex/claude/zcode — the ones with a real in-turn channel,
+      // per the Rust `ai_cli_steer_channel`) surface the ⚡ 插话 action; for the
+      // rest it stays hidden and the queued message simply keeps its place in
+      // the FIFO — see trySteerQueuedCliTurn.
       ch.liveSteer = {
         adapter: cli.adapter,
         runId,
@@ -5669,6 +5715,9 @@ ${previousReply.slice(0, 4000)}
           timeoutSeconds: policy.timeoutSeconds,
           idleTimeoutSeconds: policy.idleTimeoutSeconds,
           runId,
+          onTool: (event) => skillLearningTurn?.onTool(event),
+          skillTools: nativeSkillTools,
+          signal: ch.abortController.signal,
           onUsage: (raw) => {
             realUsage = mergeUsageReports(realUsage, usageReportFromCliUsage(raw));
           },
@@ -5753,6 +5802,8 @@ ${previousReply.slice(0, 4000)}
           maxTokens: 8192,
           signal: ch.abortController.signal,
           runId,
+          onToolEvent: (event) => skillLearningTurn?.onTool(event),
+          skillTools: nativeSkillTools,
           usageContext: { workspaceId: ch.workspaceId, sessionId: ch.sessionId },
           permission: state.composer.permission || 'full',
           cwd: ch.workspaceRootPath ?? undefined,
@@ -6214,10 +6265,26 @@ ${previousReply.slice(0, 4000)}
       // into an active CLI turn when that adapter exposes real steering.
       // Favorite reruns mint a fresh session per turn, so they need no queue.
       const runChatTurn = async () => {
+        // Capture at FIFO execution time, not send time: queued turns must not
+        // inherit writes from the preceding turn. Native tool metadata wins.
+        const turnChangesKey = `turn:${ch.workspaceId ?? ''}:${ch.sessionId ?? ''}:${userMsg.id}`;
+        let turnBaselineReady = false;
+        let turnToolTrace = '';
+        const ensureTurnBaseline = async (adapter: string) => {
+          if (turnBaselineReady || supportsNativeFileChanges(adapter) || !workspaceRootPath ||
+            isRemoteWorkspacePath(workspaceRootPath)) return;
+          try {
+            await ensureWorkspaceChangesBaseline(workspaceRootPath, turnChangesKey);
+            turnBaselineReady = true;
+          } catch (error) {
+            console.warn('[session-files] 本轮文件基线读取失败', error);
+          }
+        };
         const turnText =
           ch.messages.find((message) => message.id === userMsg.id)?.text.trim() ??
           userMsg.text.trim();
         if (!turnText) return;
+        const skillConfig = loadSkillLearningConfig(ch.workspaceId ?? '__default__');
         const simpleAssetCapabilityBlock = shouldUseAssetCapabilityBlockForPrompt(turnText)
           ? assetCapabilityBlock
           : '';
@@ -6374,7 +6441,8 @@ ${previousReply.slice(0, 4000)}
         const interruptedContinuationDirective = interruptedContinuation
           ? '上一轮任务被用户中断且尚未完成。请保留此前对话中的原始目标、已完成工作和工具结果，把当前用户消息视为对原任务的新约束或补充；除非用户明确取消原任务，否则在新约束下继续完成原任务。不要把当前消息当成孤立的新任务。'
           : '';
-        const chatPrompt = prior.length
+        let requestTurnText = turnText;
+        let chatPrompt = prior.length
           ? interruptedContinuation
             ? `${interruptedContinuationDirective}\n\n以下是中断前的对话：\n\n${prior}\n\n用户补充：${turnText}`
             : `以下是之前的对话，请结合上下文继续回答最后一个「用户」消息：\n\n${prior}\n\n用户：${turnText}`
@@ -6401,8 +6469,53 @@ ${previousReply.slice(0, 4000)}
           if (bodyStart < 0) return;
           setActive(withAiTiming(current.text.slice(bodyStart + 1)));
         }, 1_000);
+        let skillFinalAnswer = '';
+        let skillTerminal: 'completed' | 'cancelled' | 'failed' = 'failed';
         try {
+          if (tauriAvailable()) {
+            const ready = waitForPersistedSkillSource(ch.workspaceId, ch.sessionId);
+            // Automatic context is advisory when history is unavailable; explicit
+            // selection remains fail-closed through the host's same barrier.
+            void ready.catch(() => {});
+            skillExecutionOrigin = Object.freeze({
+              hostId: 'local', workspaceId: ch.workspaceId ?? '__default__',
+              sessionId: ch.sessionId ?? '', turnId: userMsg.id, runId: userMsg.id,
+              ...(workspaceRootPath ? { cwd: workspaceRootPath } : {}),
+            });
+            skillLearningTurn = beginSkillLearningTurn({
+              origin: skillExecutionOrigin,
+              prompt: turnText, selection: { ...gatewaySelection },
+              config: skillConfig,
+              explicitSkillIds: selectedSkillIds,
+              signal: ch.abortController.signal,
+              ...{ ready },
+              onState: (reviewState) => {
+                void persistSkillLearningStateForSource(ch, reviewState).catch((error) => {
+                  console.warn('[skills] 来源会话学习结果回存失败', error);
+                });
+              },
+            });
+          }
           newBubble(withAiTiming('⟳ 生成中…'));
+          if (skillLearningTurn) {
+            try {
+              const context = await skillLearningTurn.loadContext();
+              requestTurnText = context.prompt;
+              chatPrompt += context.prompt.slice(turnText.length);
+              const contextPersisted = persistSkillContextForSource(ch, userMsg.id, {
+                origin: skillExecutionOrigin!, loadedSkills: context.loadedSkills,
+                catalogRevision: context.catalogRevision,
+              });
+              await contextPersisted;
+              if (skillConfig.enabled && skillConfig.mode !== 'off') {
+                nativeSkillTools = { source: { ...skillExecutionOrigin! },
+                  config: { enabled: skillConfig.enabled, mode: skillConfig.mode }, ready: contextPersisted };
+              }
+            } catch (error) {
+              if (selectedSkillIds.length || ch.abortController.signal.aborted) throw error;
+              console.warn('[skills] 本轮技能上下文不可用', error);
+            }
+          }
           let routeLine = gatewayRouteLine(directRoute);
           // The model may emit a click-to-choose interaction block instead of a
           // final answer (see core/interaction.ts). Loop: call → if it asked,
@@ -6455,11 +6568,11 @@ ${previousReply.slice(0, 4000)}
                 nativeSession && nativeResume
                   ? unseenTranscript
                     ? interruptedContinuation
-                      ? `${interruptedContinuationDirective}\n\n以下是你这个模型会话尚未看到的中间对话：\n\n${unseenTranscript}\n\n用户补充：${turnText}`
-                      : `以下是你这个模型会话尚未看到的中间对话，请先吸收上下文，再回答最后一个「用户」消息：\n\n${unseenTranscript}\n\n用户：${turnText}`
+                      ? `${interruptedContinuationDirective}\n\n以下是你这个模型会话尚未看到的中间对话：\n\n${unseenTranscript}\n\n用户补充：${requestTurnText}`
+                      : `以下是你这个模型会话尚未看到的中间对话，请先吸收上下文，再回答最后一个「用户」消息：\n\n${unseenTranscript}\n\n用户：${requestTurnText}`
                     : interruptedContinuation
-                      ? `${interruptedContinuationDirective}\n\n用户补充：${turnText}`
-                      : turnText
+                      ? `${interruptedContinuationDirective}\n\n用户补充：${requestTurnText}`
+                      : requestTurnText
                   : chatPrompt;
               // On a continuation round, a live native session already carries
               // the prior context via --resume, so send only the user's answer.
@@ -6476,8 +6589,9 @@ ${previousReply.slice(0, 4000)}
                 body: string,
                 session: ChatNativeSession | null,
                 resume: boolean,
-              ) =>
-                aiEditViaCliWithSpeed(
+              ) => {
+                await ensureTurnBaseline(cli.adapter);
+                return aiEditViaCliWithSpeed(
                   `${
                     cli.adapter === 'deepseek-harness'
                       ? dshChatSystem
@@ -6497,6 +6611,14 @@ ${previousReply.slice(0, 4000)}
                   languageDirective: languageDirectiveReminder(state.locale),
                   onProgress: (chunk) => {
                     live += chunk;
+                    turnToolTrace += chunk;
+                    if (!ch.messages.find((message) => message.id === activeId)?.contextCompressed &&
+                      live.includes(CONTEXT_COMPRESSION_TOOL) && extractToolSentinels(live).patches.some((patch) =>
+                      patch.name === CONTEXT_COMPRESSION_TOOL && patch.status === 'done')) {
+                      ch.messages = ch.messages.map((message) => message.id === activeId
+                        ? { ...message, contextCompressed: true } : message);
+                      updateAiEditSessionSummary(ch);
+                    }
                     const displayLive = legacyXmlToolsToSentinels(live, {
                       streamingTail: true,
                     });
@@ -6512,6 +6634,7 @@ ${previousReply.slice(0, 4000)}
                     );
                   },
                 });
+              };
               try {
                 answer = await callNativeCli(promptBody, nativeSession, nativeResume);
               } catch (err) {
@@ -6981,10 +7104,17 @@ ${previousReply.slice(0, 4000)}
           }
           // Record the input on the node (keeps the graph a single node).
           commitAiChannelBlueprint(ch, appendStartUserInputs(ch.workflow, [turnText]));
-          syncAndPersistSessionRunStatus(
-            { workspaceId: ch.workspaceId, sessionId: ch.sessionId },
-            'success',
-          );
+          // The user hit Stop mid-turn but the underlying CLI/gateway promise still
+          // resolved (graceful exit flushed remaining text). stopActiveChat already
+          // marked the run 'interrupted'; promoting it to 'success' here would fire
+          // a bogus "会话已完成" desktop notification. Respect the abort signal and
+          // keep the interrupted status.
+          if (!ch.abortController.signal.aborted) {
+            syncAndPersistSessionRunStatus(
+              { workspaceId: ch.workspaceId, sessionId: ch.sessionId },
+              'success',
+            );
+          }
           const userImageCount = sessionTitleImageCount(
             turnText,
             ch.workspaceRootPath ?? undefined,
@@ -7008,6 +7138,8 @@ ${previousReply.slice(0, 4000)}
             cwd: ch.workspaceRootPath ?? undefined,
           });
           stampUsageOnMessage(turnMessageId, usageBefore, explicitUsageDelta());
+          skillFinalAnswer = finalProse;
+          skillTerminal = ch.abortController.signal.aborted ? 'cancelled' : 'completed';
         } catch (err) {
           const msg = (err as Error)?.message ?? String(err);
           // The CLI failed (e.g. ConnectionRefused) before the model call
@@ -7039,7 +7171,32 @@ ${previousReply.slice(0, 4000)}
           }
         } finally {
           globalThis.clearInterval(timingRefresh);
+          try {
+            const ownedMessages = ch.messages.filter((message) =>
+              ch.ownedMessageIds?.has(message.id) ?? message.id === activeId);
+            const tracedMessages: Message[] = turnToolTrace ? [{
+              id: `${userMsg.id}:tools`, role: 'assistant', createdAt: userMsg.createdAt,
+              text: legacyXmlToolsToSentinels(turnToolTrace, { streamingTail: true }),
+            }, ...ownedMessages] : ownedMessages;
+            let changes = collectTurnFileChanges(tracedMessages, null, workspaceRootPath || undefined);
+            if (!changes && turnBaselineReady && workspaceRootPath) {
+              const snapshot = await listWorkspaceChanges(workspaceRootPath, turnChangesKey);
+              changes = collectTurnFileChanges(ownedMessages, snapshot, workspaceRootPath);
+            }
+            const targetId = activeId ?? ownedMessages.filter((message) => message.role === 'assistant').at(-1)?.id;
+            if (changes && targetId) {
+              ch.messages = ch.messages.map((message) => message.id === targetId
+                ? { ...message, fileChanges: changes } : message);
+              aiEditCommitMessages(ch, true);
+            }
+          } catch (error) {
+            console.warn('[session-files] 本轮文件汇总读取失败', error);
+          }
           removeAiEditChannel(ch);
+          skillLearningTurn?.finish({
+            finalAnswer: skillFinalAnswer,
+            terminal: ch.abortController.signal.aborted ? 'cancelled' : skillTerminal,
+          });
         }
       };
       // Every simple-chat turn enters the per-session FIFO. Normal sends stay
@@ -8355,6 +8512,257 @@ function rememberAiEditSnapshot(ch: AiEditChannel): void {
 
 const AI_EDIT_PERSIST_DEBOUNCE_MS = 750;
 
+const pendingSessionCreations = new Map<string, Promise<void>>();
+
+async function waitForPersistedSkillSource(
+  workspaceId: string | null,
+  sessionId: string | null,
+): Promise<void> {
+  if (!workspaceId || !sessionId) throw new Error('SKILL_SOURCE_NOT_PERSISTED');
+  await pendingSessionCreations.get(runKey(workspaceId, sessionId));
+  const record = await historyStore.getSession(workspaceId, sessionId);
+  if (!record || record.workspaceId !== workspaceId ||
+    (record.sessionId ?? record.id) !== sessionId || record.deletedAt) {
+    throw new Error('SKILL_SOURCE_NOT_PERSISTED');
+  }
+}
+
+const skillStateWrites = new Map<string, Promise<void>>();
+
+function skillHistorySource(state: SkillReviewState): { workspaceId: string; sessionId: string } {
+  if (state.origin.hostId === 'local' && state.sourceSession === undefined) {
+    return { workspaceId: state.origin.workspaceId, sessionId: state.origin.sessionId };
+  }
+  const source = state.sourceSession;
+  if (state.origin.hostId !== REMOTE_SKILL_HOST_ID || !source?.workspaceId ||
+    source.sessionId !== state.origin.sessionId || !source.serverUrl || state.origin.cwd !== undefined ||
+    [source.workspaceId, source.sessionId].some((id) => id.length > 256 || /[\\/:]/.test(id) || id.indexOf(String.fromCharCode(0)) !== -1 || id === '.' || id === '..')) {
+    throw new Error('SKILL_SOURCE_ORIGIN_MISMATCH');
+  }
+  return { workspaceId: source.workspaceId, sessionId: source.sessionId };
+}
+
+function sameSkillSourceSession(left: SkillReviewState['sourceSession'], right: SkillReviewState['sourceSession']): boolean {
+  return left === undefined && right === undefined || !!left && !!right &&
+    left.workspaceId === right.workspaceId && left.sessionId === right.sessionId && left.serverUrl === right.serverUrl;
+}
+
+async function reviewRemoteSkillLearningAction(
+  state: SkillReviewState, action: 'approve' | 'reject' | 'rollback', id: string,
+): Promise<SkillMutationResult> {
+  const source = state.sourceSession!;
+  const workspace = await historyStore.getWorkspace(source.workspaceId);
+  if (!workspace?.path || !isRemoteWorkspacePath(workspace.path)) throw new Error('REMOTE_SKILL_SOURCE_UNAVAILABLE');
+  const remoteId = remoteWorkspaceIdFromPath(workspace.path);
+  const config = getRemoteWorkspace(remoteId);
+  if (!config?.projectId || !state.mode) throw new Error('REMOTE_SKILL_SOURCE_UNAVAILABLE');
+  const client = await RunnerClient.fromWorkspaceAsync(remoteId);
+  if (!client || client.serverUrl !== source.serverUrl) throw new Error('REMOTE_SKILL_SERVER_MISMATCH');
+  const project = await client.getProject(config.projectId);
+  if (project.id !== state.origin.workspaceId) throw new Error('REMOTE_SKILL_PROJECT_MISMATCH');
+  const host = createRemoteSkillControlHost({ client, projectId: project.id, origin: state.origin, mode: state.mode });
+  try {
+    const result = await host[action](id);
+    if (!sameSkillOrigin(result.origin, state.origin) || action !== 'rollback' && result.batchId !== id) {
+      throw new Error('SKILL_CONTROL_TARGET_MISMATCH');
+    }
+    const history = await host.history();
+    const saved = history.results.find((record) => record.batchId === result.batchId && sameSkillOrigin(record.origin, state.origin));
+    if (!saved || saved.status !== result.status || saved.operationsApplied !== result.operationsApplied) {
+      throw new Error('SKILL_MUTATION_UNCONFIRMED');
+    }
+    return result;
+  } finally {
+    await host.revoke();
+  }
+}
+
+async function reviewPersistedSkillLearningAction(
+  state: SkillReviewState, action: 'approve' | 'reject' | 'rollback', id: string,
+): Promise<SkillMutationResult> {
+  const snapshot = structuredClone(state);
+  const expectedId = action === 'rollback' ? snapshot.result?.rollbackId : snapshot.result?.batchId;
+  if (!id || id !== expectedId || !snapshot.result || !sameSkillOrigin(snapshot.origin, snapshot.result.origin)) {
+    throw new Error('SKILL_CONTROL_TARGET_MISMATCH');
+  }
+  const source = skillHistorySource(snapshot);
+  await waitForPersistedSkillSource(source.workspaceId, source.sessionId);
+  const record = await historyStore.getSession(source.workspaceId, source.sessionId);
+  const saved = record?.messages.find((message) => message.skillLearning &&
+    sameSkillOrigin(message.skillLearning.origin, snapshot.origin) &&
+    message.skillLearning.result?.batchId === snapshot.result!.batchId)?.skillLearning;
+  if (!saved || !sameSkillSourceSession(saved.sourceSession, snapshot.sourceSession) || saved.mode !== snapshot.mode || saved.status !== snapshot.status ||
+    (action === 'rollback' ? saved.result?.rollbackId : saved.result?.batchId) !== id) {
+    throw new Error('SKILL_REVIEW_MESSAGE_REQUIRED');
+  }
+  const result = saved.origin.hostId === REMOTE_SKILL_HOST_ID
+    ? await reviewRemoteSkillLearningAction(structuredClone(saved), action, id)
+    : await performSkillReviewAction(structuredClone(saved), action);
+  if (!sameSkillOrigin(result.origin, snapshot.origin) || (action !== 'rollback' && result.batchId !== id)) {
+    throw new Error('SKILL_RESULT_ORIGIN_MISMATCH');
+  }
+  return result;
+}
+
+const skillRetries = new Set<string>();
+export async function retryPersistedSkillLearning(state: SkillReviewState): Promise<void> {
+  const source = skillHistorySource(state);
+  const record = await historyStore.getSession(source.workspaceId, source.sessionId);
+  const saved = record?.messages.find((message) => message.skillLearning && sameSkillOrigin(message.skillLearning.origin, state.origin))?.skillLearning;
+  if (!saved?.resume || !['failed', 'cancelled', 'conflicted'].includes(saved.status)) throw new Error('SKILL_REVIEW_SOURCE_UNAVAILABLE');
+  if (isSkillReviewLive(saved.origin.runId) || skillRetries.has(saved.origin.runId)) return;
+  skillRetries.add(saved.origin.runId);
+  let writes = Promise.resolve();
+  try {
+    await resumeSkillLearningReview(saved, (next) => {
+      writes = writes.then(() => persistSkillLearningStateForSource(source, next));
+      void writes.catch(() => {});
+    });
+    await writes;
+  } finally { skillRetries.delete(saved.origin.runId); }
+}
+
+function startExplicitSkillLearning(kind: 'learn' | 'refine', text: string): boolean {
+  const current = useStore.getState();
+  const { workspaceId, sessionId } = activeWorkflowSessionKey(current);
+  const input = text.trim();
+  const reject = (message: string) => {
+    useStore.setState({ blockedSendTip: { kind: 'slash-command-unavailable', message } });
+    return false;
+  };
+  if (!tauriAvailable() || !current.historyReady || !workspaceId || !sessionId || isWorkflowReadOnly(current)) {
+    return reject(current.locale === 'en-US' ? 'Skill review requires an available host and an existing source session.' : '技能复盘需要可用宿主和已有来源会话。');
+  }
+  if (kind === 'learn' && !input) return reject('/learn requires lesson text.');
+  const config = loadSkillLearningConfig(workspaceId);
+  if (!config.enabled || config.mode === 'off') return reject(current.locale === 'en-US' ? 'Skill learning is disabled.' : '技能学习已关闭。');
+  const previous = [...current.messages].reverse().find((message) => message.role === 'user' &&
+    message.skillContext?.origin.hostId === 'local' && message.skillContext.origin.workspaceId === workspaceId &&
+    message.skillContext.origin.sessionId === sessionId)?.skillContext;
+  if (kind === 'refine' && !previous) return reject(current.locale === 'en-US' ? 'No persisted skill source is available to refine.' : '尚无已保存的技能来源可复盘。');
+  if (previous?.origin.cwd && isRemoteWorkspacePath(previous.origin.cwd)) return reject('REMOTE_SKILL_REVIEW_REQUIRED');
+  const commandId = shortId('m');
+  const origin: SkillOrigin = kind === 'refine' ? { ...previous!.origin } : {
+    hostId: 'local', workspaceId, sessionId, turnId: commandId, runId: commandId,
+    ...(previous?.origin.cwd ? { cwd: previous.origin.cwd } : {}),
+  };
+  const command: Message = { id: commandId, role: 'user', text: `/${kind}${input ? ` ${input}` : ''}`,
+    createdAt: Date.now(), localOnly: true, ...(kind === 'learn' ? { skillContext: {
+      origin: { ...origin }, loadedSkills: [], catalogRevision: '',
+    } } : {}) };
+  const source = { workspaceId, sessionId };
+  const selection = { ...workflowDefaultGatewaySelection(current.workflow, current.composer.model) };
+  useStore.setState({ blockedSendTip: null, messages: [...current.messages, command] });
+  const ready = (async () => {
+    await waitForPersistedSkillSource(workspaceId, sessionId);
+    await historyStore.appendMessage(workspaceId, sessionId, command);
+    const record = await historyStore.getSession(workspaceId, sessionId);
+    if (!record?.messages.some((message) => message.id === commandId && message.text === command.text)) {
+      throw new Error('SKILL_SOURCE_MESSAGE_NOT_PERSISTED');
+    }
+    if (kind === 'refine' && !record.messages.some((message) => message.skillContext && sameSkillOrigin(message.skillContext.origin, origin))) {
+      throw new Error('SKILL_SOURCE_ORIGIN_MISMATCH');
+    }
+  })();
+  void ready.then(() => requestExplicitSkillLearning({ origin, kind, text: input, selection, config, ready,
+    onState: (state) => { void persistSkillLearningStateForSource(source, state).catch((error) => console.warn('[skills] 显式学习状态回存失败', error)); },
+  })).then((result) => persistSkillLearningStateForSource(source, {
+    origin: result.origin, mode: config.mode, status: result.status, result, error: result.error,
+  })).catch((error) => {
+    console.warn('[skills] 显式学习失败', error);
+    if (useStore.getState().activeWorkspaceId === workspaceId && useStore.getState().activeSessionId === sessionId) {
+      useStore.setState({ blockedSendTip: { kind: 'slash-command-unavailable', message: String(error) } });
+    }
+  });
+  return true;
+}
+
+async function persistSkillContextForSource(
+  source: AiEditChannel, messageId: string, context: NonNullable<Message['skillContext']>,
+): Promise<void> {
+  const metadata = structuredClone(context);
+  const { workspaceId, sessionId } = source;
+  if (!workspaceId || !sessionId || metadata.origin.workspaceId !== workspaceId ||
+    metadata.origin.sessionId !== sessionId || metadata.origin.turnId !== messageId) {
+    throw new Error('SKILL_SOURCE_ORIGIN_MISMATCH');
+  }
+  await waitForPersistedSkillSource(workspaceId, sessionId);
+  const message = source.messages.find((item) => item.id === messageId);
+  if (!message || message.role !== 'user') throw new Error('SKILL_SOURCE_MESSAGE_REQUIRED');
+  const updated = { ...message, skillContext: metadata };
+  source.messages = source.messages.map((item) => item.id === messageId ? updated : item);
+  aiEditCommitMessages(source, true);
+  await historyStore.upsertMessage(workspaceId, sessionId, updated, true);
+  const saved = (await historyStore.getSession(workspaceId, sessionId))?.messages.find((item) => item.id === messageId);
+  if (!saved?.skillContext || !sameSkillOrigin(saved.skillContext.origin, metadata.origin) ||
+    saved.skillContext.catalogRevision !== metadata.catalogRevision) throw new Error('SKILL_CONTEXT_NOT_PERSISTED');
+}
+
+function sameSkillOrigin(left: SkillOrigin, right: SkillOrigin): boolean {
+  return (['hostId', 'workspaceId', 'sessionId', 'turnId', 'runId', 'cwd'] as const)
+    .every((field) => left[field] === right[field]);
+}
+
+/** Background results target the captured history bucket, never the active view. */
+export function persistSkillLearningStateForSource(
+  source: Pick<AiEditChannel, 'workspaceId' | 'sessionId'>,
+  state: SkillReviewState,
+  messageId?: string,
+): Promise<void> {
+  const frozen = structuredClone(state);
+  const workspaceId = source.workspaceId;
+  const sessionId = source.sessionId;
+  const locator = skillHistorySource(frozen);
+  if (!workspaceId || !sessionId || locator.workspaceId !== workspaceId ||
+    locator.sessionId !== sessionId || (frozen.result && !sameSkillOrigin(frozen.origin, frozen.result.origin))) {
+    return Promise.reject(new Error('SKILL_RESULT_ORIGIN_MISMATCH'));
+  }
+  const key = runKey(workspaceId, sessionId);
+  const write = (skillStateWrites.get(key) ?? Promise.resolve()).catch(() => {}).then(async () => {
+    await waitForPersistedSkillSource(workspaceId, sessionId);
+    flushAiEditPersistKey(aiEditPersistKey(workspaceId, sessionId));
+    const current = await historyStore.getSession(workspaceId, sessionId);
+    const existing = messageId === undefined ? undefined : current?.messages.find((item) => item.id === messageId);
+    if (messageId !== undefined && (!existing?.skillLearning || !sameSkillOrigin(existing.skillLearning.origin, frozen.origin) ||
+      !sameSkillSourceSession(existing.skillLearning.sourceSession, frozen.sourceSession))) {
+      throw new Error('SKILL_REVIEW_MESSAGE_REQUIRED');
+    }
+    if (existing?.skillLearning && existing.skillLearning.mode !== frozen.mode) {
+      throw new Error('SKILL_REVIEW_MODE_MISMATCH');
+    }
+    const message: Message = {
+      id: messageId ?? `skill-learning:${frozen.origin.runId}`,
+      role: 'assistant', text: '', createdAt: existing?.createdAt ?? Date.now(), localOnly: true,
+      skillLearning: frozen,
+    };
+    await historyStore.upsertMessage(workspaceId, sessionId, message, true);
+    const record = await historyStore.getSession(workspaceId, sessionId);
+    const saved = record?.messages.find((item) => item.id === message.id);
+    if (!saved?.skillLearning || !sameSkillOrigin(saved.skillLearning.origin, frozen.origin)) {
+      throw new Error('SKILL_RESULT_NOT_PERSISTED');
+    }
+    const merge = (messages: Message[]) => messages.some((item) => item.id === saved.id)
+      ? messages.map((item) => item.id === saved.id ? saved : item)
+      : [...messages, saved];
+    for (const channel of getAiEditChannelsForSession(workspaceId, sessionId)) {
+      channel.messages = merge(channel.messages);
+      rememberAiEditSnapshot(channel);
+    }
+    for (const snapshot of aiEditSnapshots.values()) {
+      if (snapshot.workspaceId === workspaceId && snapshot.sessionId === sessionId) snapshot.messages = merge(snapshot.messages);
+    }
+    const pending = pendingAiEditPersists.get(aiEditPersistKey(workspaceId, sessionId));
+    if (pending?.patch.messages) pending.patch.messages = merge(pending.patch.messages);
+    useStore.setState((current) => current.activeWorkspaceId === workspaceId && current.activeSessionId === sessionId
+      ? { messages: merge(current.messages) } : current);
+  });
+  skillStateWrites.set(key, write);
+  void write.finally(() => {
+    if (skillStateWrites.get(key) === write) skillStateWrites.delete(key);
+  }).catch(() => {});
+  return write;
+}
+
 interface PendingAiEditPersist {
   workspaceId: string;
   sessionId: string;
@@ -8404,6 +8812,7 @@ function scheduleAiEditPersist(
     sessionId: ch.sessionId ?? undefined,
     patch: {
       ...(prev?.patch ?? {}),
+      ...(ch.chat ? { mergeMessages: true } : {}),
       ...patch,
       meta: {
         ...(prev?.patch.meta ?? {}),
@@ -8578,6 +8987,7 @@ export function updateAiEditSessionSummary(ch: AiEditChannel): void {
             updatedAt,
             preview: last ? previewFromText(last) : session.preview,
             messageCount: ch.messages.length,
+            ...(sessionHasContextCompression(ch.messages) ? { contextCompressed: true } : {}),
           };
           if (ch.workflowSession && ch.workflow.meta?.simple === true) {
             return { ...next, simple: true };
