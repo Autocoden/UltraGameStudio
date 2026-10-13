@@ -386,7 +386,7 @@ export default function StatusBar() {
         >
           <Zap size={12} className="text-[var(--accent-3)]" />
           <span>{t(locale, 'statusBar.cache')}</span>
-          <span className="font-medium text-[var(--accent-4)]">
+          <span className="font-medium tabular-nums text-[var(--accent-4)]">
             {formatCachePercent(cachePercent)}
           </span>
         </span>
@@ -396,7 +396,7 @@ export default function StatusBar() {
         >
           <Hash size={12} className="text-fg-faint" />
           <span>tokens</span>
-          <span className="font-medium text-fg">
+          <span className="font-medium tabular-nums text-fg">
             {formatCompactTokenCount(usage.totals.totalTokens)}
           </span>
         </span>
@@ -423,7 +423,7 @@ export default function StatusBar() {
           title={t(locale, 'statusBar.callsTitle')}
         >
           <Database size={12} />
-          <span>{usage.totals.calls}</span>
+          <span className="tabular-nums">{usage.totals.calls}</span>
         </span>
       </div>
     </footer>

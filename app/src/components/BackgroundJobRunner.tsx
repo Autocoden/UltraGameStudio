@@ -2,7 +2,6 @@ import { useEffect } from 'react';
 import { useStore } from '@/store/useStore';
 import {
   listBackgroundJobs,
-  removeBackgroundJob,
   type BackgroundJobProbeRaw,
 } from '@/lib/tauri';
 import {
@@ -15,6 +14,7 @@ import {
 import { workflowSessionKeyId } from '@/store/sessionKey';
 import type { WorkflowSessionKey } from '@/store/storeState';
 import type { RunProgressSummary } from '@/store/runProgress';
+import type { BackgroundJobDetail } from '@/lib/chatTasks';
 
 // Poll cadence. Long external jobs (video dub takes hours) don't need a tight
 // loop; 3s keeps the Sidebar dot responsive without hammering the disk.
@@ -53,8 +53,8 @@ function jobProgressSummary(
  * status. Every tick it asks Rust to probe each workspace's
  * `.ultragamestudio/jobs/` dir, runs the pure state-machine over each manifest,
  * keeps the still-running ones in `jobSessions` (so the Sidebar dot stays
- * "running"), and deletes the terminal ones so a finished job stops re-probing
- * — letting the dot fall back to the session's own success/failed result.
+ * "running"). Terminal manifests stay on disk so details survive session
+ * switches and application restarts; only active jobs affect the Sidebar dot.
  *
  * Desktop-only: `listBackgroundJobs` is a no-op (returns []) outside Tauri, so
  * this quietly does nothing in the browser dev server.
@@ -66,6 +66,7 @@ export default function BackgroundJobRunner() {
 
   useEffect(() => {
     let cancelled = false;
+    let polling = false;
 
     // The set of workspace cwds to probe. Each workspace's `.ultragamestudio`
     // is a separate jobs dir. Dedupe by path; skip workspaces without one.
@@ -78,6 +79,8 @@ export default function BackgroundJobRunner() {
     );
 
     const poll = async () => {
+      if (polling) return;
+      polling = true;
       let probes: BackgroundJobProbeRaw[] = [];
       try {
         const perWorkspace = await Promise.all(
@@ -87,14 +90,16 @@ export default function BackgroundJobRunner() {
         );
         probes = perWorkspace.flat();
       } catch {
+        polling = false;
         return; // Never let a probe failure crash the poll loop.
       }
+      polling = false;
       if (cancelled) return;
 
       const sessions: WorkflowSessionKey[] = [];
       const progress: Record<string, RunProgressSummary> = {};
       const seenKeyIds = new Set<string>();
-      const terminal: Array<{ cwd: string | null; fileStem: string }> = [];
+      const details: BackgroundJobDetail[] = [];
 
       for (const probe of probes) {
         const manifest = parseProbeManifest(probe);
@@ -107,6 +112,9 @@ export default function BackgroundJobRunner() {
           progressTail: probe.progressTail ?? undefined,
           probedAt: probe.probedAtMs,
         });
+        details.push({ manifest, status,
+          percent: parseJobPercent(probe.progressTail ?? undefined, manifest.progressRegex),
+          progressTail: probe.progressTail ?? '', probedAt: probe.probedAtMs });
 
         if (status === 'running') {
           const key = jobSessionKey(manifest);
@@ -126,21 +134,10 @@ export default function BackgroundJobRunner() {
           ) {
             progress[keyId] = summary;
           }
-        } else {
-          // success | failed -> retire the manifest so it stops re-probing.
-          terminal.push({
-            cwd: probe.workspaceCwd,
-            fileStem: probe.fileStem,
-          });
         }
       }
 
-      setBackgroundJobState(sessions, progress);
-
-      // Fire-and-forget cleanup of finished jobs.
-      for (const job of terminal) {
-        void removeBackgroundJob(job.cwd, job.fileStem).catch(() => {});
-      }
+      setBackgroundJobState(sessions, progress, details);
     };
 
     void poll();

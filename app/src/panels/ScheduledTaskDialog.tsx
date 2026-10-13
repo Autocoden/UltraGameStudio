@@ -257,7 +257,7 @@ export default function ScheduledTaskDialog({
             />
           </label>
 
-          {error && <p className="text-sm text-rose-300">{error}</p>}
+          {error && <p className="text-sm text-status-error">{error}</p>}
         </div>
 
         <footer className="flex items-center justify-between gap-2 border-t border-border-soft px-4 py-3">
@@ -265,7 +265,7 @@ export default function ScheduledTaskDialog({
             type="button"
             disabled={!initialTask || saving}
             onClick={remove}
-            className="inline-flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm text-fg-dim transition-colors hover:border-rose-400/70 hover:text-rose-300 disabled:cursor-not-allowed disabled:opacity-50"
+            className="inline-flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm text-fg-dim transition-colors hover:border-status-error/70 hover:text-status-error disabled:cursor-not-allowed disabled:opacity-50"
           >
             <Trash2 size={14} />
             <span>{t(locale, 'schedule.delete')}</span>

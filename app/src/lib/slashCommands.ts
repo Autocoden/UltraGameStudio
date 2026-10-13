@@ -81,6 +81,21 @@ function toStaticSlashEntry(command: GameSkillCommand): StaticSlashEntry {
 // global command surface even when the backend catalog is missing app entries.
 export const STATIC_SLASH_ENTRIES: StaticSlashEntry[] = [
   ...SLASH_COMMANDS.map(toStaticSlashEntry),
+  // Native review actions, not prompt-expansion manifests or GameSkills.
+  {
+    id: 'command:app:/learn', kind: 'command', name: '/learn',
+    label: { 'zh-CN': '学习经验', 'en-US': 'Learn a lesson' },
+    detail: { 'zh-CN': '根据你提供的经验修补技能；需填写文本，不发送给主会话模型。', 'en-US': 'Repair skills from your supplied lesson; text is required and never sent to the main conversation model.' },
+    insertText: { 'zh-CN': '/learn ', 'en-US': '/learn ' },
+    source: 'app', sourceAdapter: 'app',
+  },
+  {
+    id: 'command:app:/refine', kind: 'command', name: '/refine',
+    label: { 'zh-CN': '复盘技能', 'en-US': 'Refine skills' },
+    detail: { 'zh-CN': '复盘来源会话的真实证据；可填写关注点，没有证据不会虚构经验。', 'en-US': 'Review real source-session evidence with an optional focus; missing evidence never becomes invented lessons.' },
+    insertText: { 'zh-CN': '/refine ', 'en-US': '/refine ' },
+    source: 'app', sourceAdapter: 'app',
+  },
 ];
 
 // GAME_SKILL_STATIC_ENTRIES backs the `#游戏Skill` menu and the read-only

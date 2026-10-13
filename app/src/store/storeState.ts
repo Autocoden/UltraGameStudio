@@ -42,6 +42,7 @@ import type {
   ScheduledTaskConfig,
 } from './types';
 import type { WorkspaceSummary } from './history/types';
+import type { SkillMutationResult, SkillReviewState } from '@/runtime/skills/types';
 
 export type WorkflowSessionKey = {
   workspaceId: string | null;
@@ -194,6 +195,25 @@ export interface StoreState {
   promptGroups: PromptGroup[];
   locale: Locale;
   promptAutoTranslate: boolean;
+  /**
+   * Whether the composer's inline tool buttons (提及文件 / 组织架构 / 知识库)
+   * are shown. Default false — they are opt-in from 设置 → 常规.
+   */
+  composerToolButtonsVisible: boolean;
+  /**
+   * Whether the composer's 思考深度 (thinking level) selector is shown. Default
+   * true — levels come from protocol + model-family detection.
+   */
+  thinkingLevelsEnabled: boolean;
+  /** 输入框上方提示与权限栏默认隐藏，由通用设置开启。 */
+  composerHintRowVisible: boolean;
+  /** 资产中心入口和缓存扫描默认关闭，由通用设置显式启用。 */
+  assetCenterEnabled: boolean;
+  /**
+   * 手写的档位覆盖规则（每行 `模型匹配=档位列表`），用于私有网关的档位词汇
+   * 与公开接口不一致的情况。空串 = 完全自动判定。
+   */
+  thinkingLevelOverrides: string;
   personalInstructionsByModel: PersonalInstructionsByModel;
   personalInstructions: string;
   gameExpertSettings: GameExpertSettings;
@@ -255,6 +275,8 @@ export interface StoreState {
   jobSessions: WorkflowSessionKey[];
   /** Live background-job progress (0-100) keyed by owning session. */
   jobSessionProgress: Record<string, RunProgressSummary>;
+  /** Per-job progress and log tails for the chat task disclosure. */
+  jobDetails: import('@/lib/chatTasks').BackgroundJobDetail[];
   /**
    * Compatibility marker for older UI code: the first currently executing
    * session, or null when nothing is running. Prefer `runningSessions`.
@@ -267,6 +289,11 @@ export interface StoreState {
   initHistory: () => void;
   setLocale: (locale: Locale) => void;
   setPromptAutoTranslate: (enabled: boolean) => void;
+  setComposerToolButtonsVisible: (visible: boolean) => void;
+  setThinkingLevelsEnabled: (enabled: boolean) => void;
+  setComposerHintRowVisible: (visible: boolean) => void;
+  setAssetCenterEnabled: (enabled: boolean) => void;
+  setThinkingLevelOverrides: (raw: string) => void;
   setPersonalInstructions: (
     instructions: string,
     selection?: GatewaySelection | null,
@@ -338,6 +365,7 @@ export interface StoreState {
   setBackgroundJobState: (
     jobSessions: WorkflowSessionKey[],
     jobSessionProgress: Record<string, RunProgressSummary>,
+    jobDetails?: import('@/lib/chatTasks').BackgroundJobDetail[],
   ) => void;
   runScheduledTaskSession: (
     sessionId: string,
@@ -346,8 +374,14 @@ export interface StoreState {
   ) => Promise<void>;
   sendPrompt: (
     text: string,
-    options?: { forceGameExperts?: boolean; gameExpertIds?: string[] },
+    options?: { forceGameExperts?: boolean; gameExpertIds?: string[]; skillIds?: string[] },
   ) => boolean;
+  /** Explicit skill review never falls through to the normal chat gateway. */
+  learnSkills: (kind: 'learn' | 'refine', text: string) => boolean;
+  /** User controls resolve the saved batch, not the currently displayed session. */
+  reviewSkillLearningAction: (state: SkillReviewState, action: 'approve' | 'reject' | 'rollback', id: string) => Promise<SkillMutationResult>;
+  /** Update one existing source card after a host-confirmed control result. */
+  updateSkillLearningState: (messageId: string, state: SkillReviewState) => Promise<void>;
   generateImagePrompt: (
     text: string,
     options?: {

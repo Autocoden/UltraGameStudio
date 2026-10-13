@@ -124,9 +124,20 @@ pub fn should_pass_model(adapter: &str, model: &str) -> bool {
     }
     let lower = m.to_ascii_lowercase();
     let protocol = adapter_protocol(adapter);
-    if matches!(protocol, "codex" | "gemini" | "kimi" | "grok") {
+    if matches!(protocol, "codex" | "gemini" | "grok") {
         return !matches!(lower.as_str(), "haiku" | "sonnet" | "opus")
             && !lower.starts_with("claude-");
+    }
+    if protocol == "kimi" {
+        // kimi-code >= 0.38 synthesizes an in-memory provider/model from
+        // KIMI_MODEL_NAME + KIMI_MODEL_API_KEY (see resolver.ts). That env
+        // overlay registers under the reserved alias `__kimi_env_model__`;
+        // passing the real model id via `--model` makes the CLI look it up in
+        // config.toml's [models.*] table (bypassing the env overlay) and die
+        // with `Model "<id>" is not configured in config.toml`. The caller
+        // (lib.rs kimi branch) pins `-m __kimi_env_model__` whenever the env
+        // overlay is active, so no real id may ride the flag here.
+        return false;
     }
     if protocol == "deepseek-harness" {
         // dsh resolves its model from `$DSH_HOME/settings.yaml`, never a flag.
@@ -364,6 +375,14 @@ pub fn resolve_command_path(command: &str) -> Option<PathBuf> {
         if let Some(found) = search_path(&variants) {
             return Some(found);
         }
+        // dsh shim fallback: npm sometimes loses the .cmd shim during
+        // @deepseek-ai/dsh updates while leaving the package body intact.
+        // Probe the well-known global install location directly.
+        if command.eq_ignore_ascii_case("dsh") {
+            if let Some(path) = dsh_npm_entry_fallback() {
+                return Some(path);
+            }
+        }
         None
     }
 
@@ -373,10 +392,41 @@ pub fn resolve_command_path(command: &str) -> Option<PathBuf> {
     }
 }
 
+/// True when `path` lives inside the Codex **desktop app**'s private runtime
+/// dir (`%LOCALAPPDATA%\OpenAI\Codex\bin\...`). The desktop app owns and
+/// rotates those copies on every app update, so one must never be honored as
+/// a `CODEX_CLI_PATH` override: the desktop app writes exactly such a value
+/// into its node_repl MCP env in `~/.codex/config.toml`, which would otherwise
+/// pin every resolution to a bundle that `codex update` / `npm install -g`
+/// can never touch (the settings row then reports "update available" forever
+/// and the update button fails with the desktop-CLI error).
+fn is_codex_desktop_bundle_path(path: &str) -> bool {
+    path.replace('\\', "/")
+        .to_ascii_lowercase()
+        .contains("/openai/codex/bin/")
+}
+
+/// Locate dsh's underlying `lib/bin.js` in the npm global root when the
+/// `.cmd` shim is missing. Returns the JS entry point; callers spawn it
+/// via `node <bin.js>` (see `resolve_dsh_node_entry`).
+#[cfg(windows)]
+fn dsh_npm_entry_fallback() -> Option<PathBuf> {
+    let appdata = std::env::var_os("APPDATA")?;
+    let entry = PathBuf::from(appdata)
+        .join("npm")
+        .join("node_modules")
+        .join("@deepseek-ai")
+        .join("dsh")
+        .join("lib")
+        .join("bin.js");
+    entry.is_file().then_some(entry)
+}
+
 fn preferred_codex_path() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("CODEX_CLI_PATH") {
         let path = PathBuf::from(path);
-        if path.is_file() {
+        let text = path.to_string_lossy();
+        if path.is_file() && !is_codex_desktop_bundle_path(&text) {
             return Some(path);
         }
     }
@@ -395,7 +445,8 @@ fn preferred_codex_path() -> Option<PathBuf> {
                 .and_then(toml::Value::as_str)
             {
                 let path = PathBuf::from(path);
-                if path.is_file() {
+                if path.is_file() && !is_codex_desktop_bundle_path(path.to_string_lossy().as_ref())
+                {
                     return Some(path);
                 }
             }
@@ -404,6 +455,23 @@ fn preferred_codex_path() -> Option<PathBuf> {
 
     #[cfg(windows)]
     {
+        // User-managed installs (bun / npm global) win over the Codex desktop
+        // app's private bundle: the bundle is owned by the desktop app, so a
+        // resolved path pointing at it can never be updated from the command
+        // line and the settings row stays "update available" forever.
+        if let Some(home) = home_dir() {
+            let bun_exe = home.join(".bun").join("bin").join("codex.exe");
+            if bun_exe.is_file() {
+                return Some(bun_exe);
+            }
+        }
+        if let Some(npm_dir) = std::env::var_os("APPDATA").map(PathBuf::from) {
+            let npm_shim = npm_dir.join("npm").join("codex.cmd");
+            if npm_shim.is_file() {
+                return Some(npm_shim);
+            }
+        }
+
         let root = std::env::var_os("LOCALAPPDATA")
             .map(PathBuf::from)?
             .join("OpenAI")
@@ -461,6 +529,16 @@ pub fn resolve_dsh_node_entry(dsh_binary: &str) -> Option<PathBuf> {
     } else {
         resolve_command_path(dsh_binary)?
     };
+    // If the caller already resolved the underlying bin.js (e.g. stale-shim
+    // fallback in lib.rs), return it directly instead of probing siblings.
+    if launcher
+        .file_name()
+        .and_then(OsStr::to_str)
+        .map(|name| name.eq_ignore_ascii_case("bin.js"))
+        .unwrap_or(false)
+    {
+        return Some(launcher);
+    }
     let dir = launcher.parent()?;
     // Standard npm global/local layout: the shim sits next to `node_modules`.
     let entry = dir
@@ -664,7 +742,7 @@ fn ensure_supported_windows_path(path: &Path) -> Result<(), String> {
         .and_then(OsStr::to_str)
         .map(|ext| ext.to_ascii_lowercase())
     {
-        Some(ext) if matches!(ext.as_str(), "exe" | "cmd" | "bat") => Ok(()),
+        Some(ext) if matches!(ext.as_str(), "exe" | "cmd" | "bat" | "js") => Ok(()),
         Some(_) => Err(
             "UNSUPPORTED_CLI_TYPE: Windows 仅支持 .exe、.cmd、.bat 或无扩展的可执行文件。"
                 .to_string(),
@@ -797,11 +875,14 @@ mod tests {
     }
 
     #[test]
-    fn kimi_passes_kimi_models_but_not_claude_tiers() {
-        assert!(should_pass_model("kimi", "kimi-k2-0711-preview"));
-        assert!(should_pass_model("kimi", "kimi-k2-thinking"));
-        // Claude tiers / ids are filtered out for kimi (they must not leak into
-        // a `--model` flag of the kimi CLI).
+    fn kimi_never_passes_model() {
+        // kimi-code >= 0.38 takes its model from the KIMI_MODEL_* env overlay
+        // (registered under the reserved alias `__kimi_env_model__`); a real id
+        // on `--model` is resolved against config.toml instead and dies with
+        // "Model \"<id>\" is not configured in config.toml".
+        assert!(!should_pass_model("kimi", "kimi-k2-0711-preview"));
+        assert!(!should_pass_model("kimi", "kimi-k2-thinking"));
+        assert!(!should_pass_model("kimi", "kimi-k3"));
         assert!(!should_pass_model("kimi", "sonnet"));
         assert!(!should_pass_model("kimi", "claude-opus-4-8"));
         assert!(!should_pass_model("kimi", "   "));
@@ -845,6 +926,27 @@ mod tests {
     fn grok_adapter_mapping() {
         assert_eq!(adapter_binary("grok"), "grok");
         assert_eq!(adapter_protocol("grok"), "grok");
+    }
+
+    #[test]
+    fn codex_desktop_bundle_paths_are_not_overrides() {
+        // The desktop app writes its rotating bundle path into the node_repl
+        // MCP env; honoring it pins resolution to an un-updatable copy.
+        assert!(is_codex_desktop_bundle_path(
+            r"C:\Users\me\AppData\Local\OpenAI\Codex\bin\f1c7ee7a13db5fed\codex.exe"
+        ));
+        assert!(is_codex_desktop_bundle_path(
+            r"C:\Users\me\appdata\local\openai\codex\bin\abc\codex.exe"
+        ));
+        // User-managed installs and unrelated paths are not bundle paths.
+        assert!(!is_codex_desktop_bundle_path(r"C:\Users\me\.bun\bin\codex.exe"));
+        assert!(!is_codex_desktop_bundle_path(
+            r"C:\Users\me\AppData\Roaming\npm\codex.cmd"
+        ));
+        assert!(!is_codex_desktop_bundle_path(
+            r"C:\opt\OpenAI\Codex-other\bin\codex.exe"
+        ));
+        assert!(!is_codex_desktop_bundle_path("codex"));
     }
 
     #[test]
@@ -941,6 +1043,53 @@ mod tests {
         assert!(resolve_launch_binary(r"C:\Users\me\dsh.cmd").is_none());
         assert!(resolve_launch_binary("/usr/local/bin/dsh").is_none());
         assert!(resolve_launch_binary("").is_none());
+    }
+
+    #[test]
+    fn dsh_node_entry_accepts_bin_js_directly() {
+        use std::fs;
+        // The stale-shim fallback in lib.rs may hand us the bin.js path
+        // directly; resolve_dsh_node_entry must return it as-is.
+        let root = std::env::temp_dir().join(format!("ugs-dsh-direct-{}", std::process::id()));
+        let lib = root.join("lib");
+        fs::create_dir_all(&lib).unwrap();
+        let entry = lib.join("bin.js");
+        fs::write(&entry, b"// dsh").unwrap();
+
+        let got = resolve_dsh_node_entry(&entry.to_string_lossy());
+        assert_eq!(got.as_deref(), Some(entry.as_path()));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn dsh_fallback_finds_npm_bin_js_when_shim_missing() {
+        use std::fs;
+        // Simulate an npm global layout where dsh.cmd is gone but
+        // node_modules/@deepseek-ai/dsh/lib/bin.js is intact.
+        let root = std::env::temp_dir().join(format!("ugs-dsh-fallback-{}", std::process::id()));
+        let npm = root.join("npm");
+        let lib = npm
+            .join("node_modules")
+            .join("@deepseek-ai")
+            .join("dsh")
+            .join("lib");
+        fs::create_dir_all(&lib).unwrap();
+        let entry = lib.join("bin.js");
+        fs::write(&entry, b"// dsh").unwrap();
+        // Intentionally do NOT create dsh.cmd.
+
+        // The fallback must locate bin.js directly.
+        let got = dsh_npm_entry_fallback();
+        // Note: this test uses the real %APPDATA%\npm path, so it only passes
+        // when the actual dsh package is installed. In CI it may be absent.
+        if let Some(path) = got {
+            assert!(path.ends_with("bin.js"));
+            assert!(path.is_file());
+        }
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

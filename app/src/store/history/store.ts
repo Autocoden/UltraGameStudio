@@ -1,3 +1,4 @@
+import { sessionHasContextCompression } from '@/lib/contextCompression';
 import type { IRGraph } from '@/core/ir';
 import { loadComposer } from '@/lib/composerStorage';
 import { UGS_STORAGE_KEY } from '@/lib/persist';
@@ -63,6 +64,12 @@ export interface HistoryStore {
     sessionId: string,
     msg: Message,
   ): Promise<void>;
+  upsertMessage(
+    workspaceId: string,
+    sessionId: string,
+    msg: Message,
+    preserveUpdatedAt?: boolean,
+  ): Promise<void>;
   setSessionWorkflow(
     workspaceId: string,
     sessionId: string,
@@ -75,7 +82,7 @@ const WORKSPACES_INDEX = 'workspaces/index.json';
 const FALLBACK_PREFIX = 'ultragamestudio.history.v1:';
 const SESSION_RECORD_CACHE_LIMIT = 5;
 const SESSION_RECORD_PREWARM_LIMIT = 5;
-const SESSION_SUMMARY_ACTIVITY_VERSION = 2;
+const SESSION_SUMMARY_ACTIVITY_VERSION = 3;
 
 let writeQueue: Promise<unknown> = Promise.resolve();
 const sessionRecordCache = new Map<string, Map<string, SessionRecord>>();
@@ -441,6 +448,7 @@ function sessionSummary(record: SessionRecord): SessionSummary {
     ...(record.workflow?.meta?.simple ? { simple: true } : {}),
     ...(runStatus ? { runStatus } : {}),
     ...(record.meta?.unreadCompletion === true ? { unreadCompletion: true } : {}),
+    ...(sessionHasContextCompression(record.messages, record.meta) ? { contextCompressed: true } : {}),
     ...(record.meta?.favorite === true ? { favorite: true } : {}),
     ...(record.meta?.scheduledTask
       ? { scheduledTask: record.meta.scheduledTask }
@@ -1150,7 +1158,9 @@ async function updateSessionInternal(
 
   const nextIsWorkflow =
     current.isWorkflow || patch.isWorkflow === true || !!patch.workflow;
-  const messages = patch.messages ?? current.messages;
+  const messages = patch.messages
+    ? patch.mergeMessages ? mergePersistedMessages(current.messages, patch.messages) : patch.messages
+    : current.messages;
   const updatedAt = patch.preserveUpdatedAt
     ? current.updatedAt
     : patch.messages
@@ -1169,6 +1179,29 @@ async function updateSessionInternal(
   };
 
   return writeSessionInternal(next);
+}
+
+/** Only upsertMessage advances host-owned learning metadata on an existing id. */
+function mergePersistedMessages(current: Message[], updates: Message[]): Message[] {
+  const merged = [...current];
+  let anchor = -1;
+  for (const update of updates) {
+    const index = merged.findIndex((message) => message.id === update.id);
+    if (index >= 0) {
+      const saved = merged[index];
+      const newer = (saved.completedAt ?? saved.createdAt) > (update.completedAt ?? update.createdAt) ? saved : update;
+      merged[index] = { ...saved, ...newer,
+        ...(saved.skillLearning ? { skillLearning: saved.skillLearning, localOnly: true } : {}),
+        ...(saved.skillContext && !newer.skillContext ? { skillContext: saved.skillContext } : {}),
+      };
+      anchor = index;
+    } else {
+      const insertAt = anchor < 0 ? merged.length : anchor + 1;
+      merged.splice(insertAt, 0, update);
+      anchor = insertAt;
+    }
+  }
+  return merged;
 }
 
 async function appendMessageInternal(
@@ -1384,6 +1417,31 @@ export const historyStore: HistoryStore = {
 
   appendMessage(workspaceId, sessionId, msg) {
     return enqueue(() => appendMessageInternal(workspaceId, sessionId, msg));
+  },
+
+  upsertMessage(workspaceId, sessionId, msg, preserveUpdatedAt = false) {
+    return enqueue(async () => {
+      const current = await getSessionInternal(workspaceId, sessionId);
+      if (!current) return;
+      const index = current.messages.findIndex((message) => message.id === msg.id);
+      const messages = [...current.messages];
+      if (index === -1) {
+        messages.push(msg);
+      } else {
+        messages[index] = {
+          ...messages[index],
+          ...msg,
+          createdAt: messages[index].createdAt,
+        };
+      }
+      await updateSessionInternal(workspaceId, sessionId, {
+        messages,
+        preserveUpdatedAt,
+        title: isAutoTitlePlaceholder(current.title)
+          ? titleFromMessages(messages, current.title)
+          : current.title,
+      });
+    });
   },
 
   setSessionWorkflow(workspaceId, sessionId, ir) {

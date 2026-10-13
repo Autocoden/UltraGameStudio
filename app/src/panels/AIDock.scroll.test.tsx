@@ -69,6 +69,9 @@ function resetChatSession(sessionId: string, messages: Message[]): void {
     blockedSendTip: null,
     locale: 'zh-CN',
     promptAutoTranslate: false,
+    // 这些用例直接操作「$组织架构」入口，所以显式打开三个进阶入口按钮
+    // （默认是隐藏的，见 useStore.composerToolButtonsVisible）。
+    composerToolButtonsVisible: true,
     promptGroups: samplePromptGroups,
     composer: defaultComposer,
     composerDraft: '',
@@ -180,6 +183,89 @@ async function pressCtrlEnter(el: HTMLTextAreaElement): Promise<void> {
 }
 
 describe('AIDock stream scroll state', () => {
+  it('hides the composer tool buttons until the setting turns them on', async () => {
+    resetChatSession('s_tool_buttons', []);
+    await act(async () => {
+      useStore.setState({ composerToolButtonsVisible: false });
+    });
+    const view = await renderChatDock();
+
+    try {
+      expect(
+        view.container.querySelector('button[data-org-panel-trigger]'),
+      ).toBeNull();
+      expect(
+        view.container.querySelector('button[title="提及文件"]'),
+      ).toBeNull();
+
+      await act(async () => {
+        useStore.setState({ composerToolButtonsVisible: true });
+      });
+
+      expect(
+        view.container.querySelector('button[data-org-panel-trigger]'),
+      ).toBeInstanceOf(HTMLButtonElement);
+      expect(
+        view.container.querySelector('button[title="提及文件"]'),
+      ).toBeInstanceOf(HTMLButtonElement);
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it('lists only the thinking levels the current channel supports', async () => {
+    resetChatSession('s_thinking_levels', []);
+    const view = await renderChatDock();
+
+    try {
+      // 输入卡片带 backdrop-filter，自成层叠上下文：没有正 z-index 时，
+      // 卡片内的下拉菜单会被右栏「会话文件」面板盖住。
+      const card = view.container.querySelector('.ugs-ai-input-card');
+      expect(card?.className).toContain('z-30');
+
+      // 系统默认 claude-code CLI 走 `--effort`，级别是它自己的 5 档。
+      const trigger = view.container.querySelector<HTMLButtonElement>(
+        'button[title="思考深度"]',
+      );
+      expect(trigger).toBeInstanceOf(HTMLButtonElement);
+      expect(trigger?.textContent).toContain('默认');
+
+      await act(async () => {
+        trigger?.click();
+      });
+
+      const labels = Array.from(
+        view.container.querySelectorAll<HTMLButtonElement>(
+          '[role="listbox"] button[role="option"]',
+        ),
+      ).map((option) => option.textContent ?? '');
+      expect(labels.some((label) => label.includes('低'))).toBe(true);
+      expect(labels.some((label) => label.includes('极高'))).toBe(true);
+      // codex 的 `minimal` 不在 claude-code 的档位集合里。
+      expect(labels.some((label) => label.includes('极简'))).toBe(false);
+
+      // 「默认（不指定）」不能只写「用渠道默认」：要么给出实际默认档，
+      // 要么把「谁决定」写明白，用户不用猜。
+      const defaultLabel = labels.find((label) => label.includes('默认（不指定）'));
+      expect(defaultLabel).toBeTruthy();
+      expect(defaultLabel).toMatch(/实际默认|由 CLI 自身默认档决定|不传档位参数/);
+
+      const maxOption = Array.from(
+        view.container.querySelectorAll<HTMLButtonElement>(
+          '[role="listbox"] button[role="option"]',
+        ),
+      ).find((option) => option.textContent?.includes('最高'));
+      await act(async () => {
+        maxOption?.click();
+      });
+      expect(
+        useStore.getState().workflow.meta.gateway?.defaults?.thinkingLevel,
+      ).toBe('max');
+    } finally {
+      await view.cleanup();
+    }
+  });
+
   it('opens the organization chart from the $组织架构 popup trigger', async () => {
     resetChatSession('s_org_tabs', chatMessages('org'));
     const view = await renderChatDock();

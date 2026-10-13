@@ -495,7 +495,7 @@ export default function RemoteWorkspaceDialog({
 
               <div className="space-y-2 rounded-md border border-border-soft bg-bg/70 p-2.5">
                 {authUserName && token ? (
-                  <div className="rounded border border-emerald-500/30 bg-emerald-500/10 px-2 py-1.5 text-[11px] text-emerald-300">
+                  <div className="rounded border border-status-success/30 bg-status-success/10 px-2 py-1.5 text-[11px] text-status-success">
                     {t(locale, 'remoteWorkspace.gateAssignedUser')}: {authUserName}
                   </div>
                 ) : null}
@@ -596,7 +596,7 @@ export default function RemoteWorkspaceDialog({
                 </div>
               </div>
 
-              {error && <p className="text-[11px] text-rose-400">{error}</p>}
+              {error && <p className="text-[11px] text-status-error">{error}</p>}
             </div>
 
             <div className="flex items-center gap-2 border-t border-border-soft px-4 py-3">
@@ -614,7 +614,7 @@ export default function RemoteWorkspaceDialog({
         <>
         <div className="flex-1 space-y-3 overflow-y-auto px-4 py-3">
           {authUserName ? (
-            <div className="flex items-center justify-between gap-2 rounded-md border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1.5 text-[11px] text-emerald-300">
+            <div className="flex items-center justify-between gap-2 rounded-md border border-status-success/30 bg-status-success/10 px-2.5 py-1.5 text-[11px] text-status-success">
               <span className="truncate">
                 {t(locale, 'remoteWorkspace.signedInAs')}: {authUserName}
               </span>
@@ -626,7 +626,7 @@ export default function RemoteWorkspaceDialog({
                   setAuthPassword('');
                   setAuthCode('');
                 }}
-                className="shrink-0 rounded px-2 py-0.5 text-emerald-200/80 hover:text-emerald-100"
+                className="shrink-0 rounded px-2 py-0.5 text-status-success/80 hover:text-status-success"
               >
                 {t(locale, 'remoteWorkspace.switchAccount')}
               </button>
@@ -738,7 +738,7 @@ export default function RemoteWorkspaceDialog({
                 ) : (
                   <div className="space-y-2 rounded-md border border-border-soft bg-bg/70 p-2.5">
                     {authUserLabel && token ? (
-                      <div className="rounded border border-emerald-500/30 bg-emerald-500/10 px-2 py-1.5 text-[11px] text-emerald-300">
+                      <div className="rounded border border-status-success/30 bg-status-success/10 px-2 py-1.5 text-[11px] text-status-success">
                         {t(locale, 'remoteWorkspace.emailLoggedIn')}: {authUserLabel}
                       </div>
                     ) : null}
@@ -1070,7 +1070,7 @@ export default function RemoteWorkspaceDialog({
             </div>
           )}
 
-          {error && <p className="text-[11px] text-rose-400">{error}</p>}
+          {error && <p className="text-[11px] text-status-error">{error}</p>}
         </div>
 
         <div className="flex items-center gap-2 border-t border-border-soft px-4 py-3">
@@ -1082,9 +1082,9 @@ export default function RemoteWorkspaceDialog({
               className={cn(
                 'flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs transition-colors disabled:opacity-40',
                 testState === 'ok'
-                  ? 'border-emerald-500/50 text-emerald-400'
+                  ? 'border-status-success/50 text-status-success'
                   : testState === 'fail'
-                    ? 'border-rose-500/50 text-rose-400'
+                    ? 'border-status-error/50 text-status-error'
                     : 'border-border text-fg-dim hover:border-accent hover:text-fg',
               )}
             >
@@ -1108,7 +1108,7 @@ export default function RemoteWorkspaceDialog({
               type="button"
               onClick={handleDelete}
               title={t(locale, 'remoteWorkspace.delete')}
-              className="flex items-center gap-1 rounded-md border border-border px-2 py-1.5 text-xs text-rose-400 transition-colors hover:border-rose-500/50"
+              className="flex items-center gap-1 rounded-md border border-border px-2 py-1.5 text-xs text-status-error transition-colors hover:border-status-error/50"
             >
               <Trash2 size={12} />
             </button>

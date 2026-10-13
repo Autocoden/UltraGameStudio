@@ -109,6 +109,12 @@ export interface GatewaySelection {
   modelClass: ModelClass;
   /** Exact provider/free-channel model for a session, without changing global defaults. */
   modelOverride?: string;
+  /**
+   * 思考深度：渠道原生的等级拼写（如 `low`/`high`/`max`/`off`）。
+   * 未设置 = 不干预，运行时用自己的默认档。可用档位由
+   * `@/lib/thinkingLevels` 依据渠道 + 模型给出。
+   */
+  thinkingLevel?: string;
   /** Use the selected runtime CLI exactly as configured on the machine. */
   systemDefault?: boolean;
   providerId?: string;

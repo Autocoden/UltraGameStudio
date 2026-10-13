@@ -4,9 +4,11 @@ import "./lib/legacyStorageMigration";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import "@xyflow/react/dist/style.css";
+import "./styles/fonts.css";
 import "./styles/global.css";
 import { initializeSecureStorage } from "@/lib/secureStorage";
-import { installQuitFlushHandler } from "@/lib/quitFlush";
+import { installQuitFlushHandler, registerQuitFlushTask } from "@/lib/quitFlush";
+import { flushComposerDraftsOnQuit } from "@/store/composerDraftPersistence";
 import { initializeGenerationSettingsStore } from "@/lib/generationSettingsStore";
 import { initializeGatewayConfigStore } from "@/lib/gatewayConfig";
 import { initializeApiConfigStore, syncGatewayFromProviders } from "@/lib/apiConfig";
@@ -40,6 +42,10 @@ async function bootstrap(): Promise<void> {
   // 退出兜底（托盘右键菜单「退出」/ 浏览器关闭）：把内存密钥同步落盘
   // localStorage，避免 keychain 异步写未完成时丢失就地编辑的 API Key。
   void installQuitFlushHandler();
+  // 输入框草稿兜底：托盘「退出」路径由 quitFlush 直接 flush；这里补上
+  // beforeunload（关窗 / 刷新 / 崩溃）分支。否则删除草稿后若在 30s 去抖窗口内
+  // 重启，磁盘仍是旧文本、重启后「已删除的内容复活」。
+  registerQuitFlushTask(flushComposerDraftsOnQuit);
   const [{ default: App }, { applyAppearance }, { useStore }] =
     await Promise.all([
       import("./App"),

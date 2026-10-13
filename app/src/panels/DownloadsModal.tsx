@@ -248,14 +248,14 @@ function StatusBadge({
   }
   if (entry.status === 'success') {
     return (
-      <span className="inline-flex items-center gap-1 text-[11px] text-emerald-400">
+      <span className="inline-flex items-center gap-1 text-[11px] text-status-success">
         <CheckCircle2 size={12} aria-hidden="true" />
         {t(locale, 'downloads.statusSuccess')}
       </span>
     );
   }
   return (
-    <span className="inline-flex items-center gap-1 text-[11px] text-rose-400">
+    <span className="inline-flex items-center gap-1 text-[11px] text-status-error">
       <XCircle size={12} aria-hidden="true" />
       {t(locale, 'downloads.statusError')}
     </span>
@@ -439,7 +439,7 @@ function DownloadRow({
         )}
         {entry.status === 'success' && <AssetPreview entry={entry} />}
         {entry.status === 'error' && entry.error && (
-          <div className="mt-1 break-words text-[11px] leading-snug text-rose-300">
+          <div className="mt-1 break-words text-[11px] leading-snug text-status-error">
             {entry.error}
           </div>
         )}
@@ -487,7 +487,7 @@ function DownloadRow({
             title={t(locale, 'downloads.remove')}
             aria-label={t(locale, 'downloads.remove')}
             onClick={() => removeAsset(entry.id)}
-            className="flex h-7 w-7 items-center justify-center rounded border border-border-soft bg-panel-2 text-fg-faint transition-colors hover:border-rose-400 hover:text-rose-300"
+            className="flex h-7 w-7 items-center justify-center rounded border border-border-soft bg-panel-2 text-fg-faint transition-colors hover:border-status-error hover:text-status-error"
           >
             <Trash2 size={13} aria-hidden="true" />
           </button>
@@ -795,7 +795,7 @@ export function AssetCenterContent({
                   assetMatchesWorkspace(entry, activeWorkspaceId),
                 )
               }
-              className="shrink-0 rounded-md border border-border bg-panel-2 px-2.5 py-1.5 text-xs text-fg-dim transition-colors hover:border-rose-400 hover:text-rose-300"
+              className="shrink-0 rounded-md border border-border bg-panel-2 px-2.5 py-1.5 text-xs text-fg-dim transition-colors hover:border-status-error hover:text-status-error"
             >
               {t(locale, 'downloads.clearFinished')}
             </button>

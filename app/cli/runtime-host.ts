@@ -20,6 +20,9 @@
  * zustand / tauri / `@/store/useStore` / `@tauri-apps/*`.
  */
 import type { GatewaySelection, IRGraph, IRNode, IRRunStatus } from '../src/core/ir';
+import { randomUUID } from 'node:crypto';
+import type { SkillNativeToolEvent } from '../src/runtime/skills/types';
+import type { NodeSkillToolOptions } from './io/skill-tools';
 import type {
   InteractionAnswer,
   InteractionRequest,
@@ -94,6 +97,13 @@ export interface RunOptions {
   promptInteraction?: (req: InteractionRequest) => Promise<InteractionAnswer | null>;
   /** Cancellation signal: aborting kills in-flight CLI processes. */
   signal?: AbortSignal;
+  /** Node-owned identity and shared context ports; no UI/credential discovery. */
+  skillOrigin?: RunContext['skillOrigin'];
+  skills?: RunContext['skills'];
+  /** Optional foreground tools; pure runtime never sees service/token authority. */
+  skillTools?: NodeSkillToolOptions;
+  onSkillToolsUnavailable?: (reason: string) => void;
+  onToolEvent?: RunContext['onToolEvent'];
 }
 
 /** A structured run event (the CLI's machine-readable equivalent of GUI side effects). */
@@ -206,8 +216,19 @@ function nodeTimeoutPolicy(): RunTimeoutPolicy {
  * env key resolve; otherwise the CLI subprocess. Selection / override / model-
  * class resolution reuse the pure helpers in config/providers.ts.
  */
-export function buildNodeGateway(opts: { cwd?: string; signal?: AbortSignal } = {}): RunGateway {
+export interface NodeGatewayOptions {
+  cwd?: string;
+  signal?: AbortSignal;
+  runId?: string;
+  skillTools?: NodeSkillToolOptions;
+  onSkillToolsUnavailable?: (reason: string) => void;
+  onNativeToolEvent?: (event: SkillNativeToolEvent) => void;
+}
+
+export function buildNodeGateway(opts: NodeGatewayOptions = {}): RunGateway {
   const cwd = opts.cwd;
+  const skillTools = opts.skillTools ? { ...opts.skillTools, origin: Object.freeze({ ...opts.skillTools.origin }) } : undefined;
+  const runId = opts.runId ?? skillTools?.origin.runId ?? randomUUID();
   return {
     resolveDirectRoute: (selection) => {
       const direct = resolveDirectRoute(selection, cwd);
@@ -241,6 +262,16 @@ export function buildNodeGateway(opts: { cwd?: string; signal?: AbortSignal } = 
         timeoutSeconds: spawnOpts.timeoutSeconds,
         idleTimeoutSeconds: spawnOpts.idleTimeoutSeconds,
         onProgress: spawnOpts.onProgress,
+        onUsage: spawnOpts.onUsage,
+        runId: `${runId}/cli/${randomUUID()}`,
+        skillTools,
+        onSkillToolsUnavailable: opts.onSkillToolsUnavailable,
+        onNativeToolEvent: (event) => {
+          try { spawnOpts.onToolEvent?.(event); } catch { /* Observers cannot break coding. */ }
+          if (opts.onNativeToolEvent !== spawnOpts.onToolEvent) {
+            try { opts.onNativeToolEvent?.(event); } catch { /* Auxiliary observer only. */ }
+          }
+        },
         sessionId: spawnOpts.sessionId,
         resume: spawnOpts.resume,
         signal: opts.signal,
@@ -365,7 +396,8 @@ export async function runBlueprint(ir: IRGraph, opts: RunOptions = {}): Promise<
       cwd,
     });
 
-  const gateway = opts.gateway ?? buildNodeGateway({ cwd, signal: opts.signal });
+  const gateway = opts.gateway ?? buildNodeGateway({ cwd, signal: opts.signal, runId: opts.skillOrigin?.runId ?? opts.skillTools?.origin.runId,
+    skillTools: opts.skillTools, onSkillToolsUnavailable: opts.onSkillToolsUnavailable });
   const promptInteraction =
     opts.promptInteraction ??
     createTerminalInteraction({ nonInteractive: opts.nonInteractive });
@@ -386,6 +418,9 @@ export async function runBlueprint(ir: IRGraph, opts: RunOptions = {}): Promise<
     escalationBudget: opts.escalationBudget,
     adaptiveEscalation: opts.adaptiveEscalation,
     gateway,
+    skillOrigin: opts.skillOrigin,
+    skills: opts.skills,
+    onToolEvent: opts.onToolEvent,
   };
 
   const execOptions: ExecuteWorkflowOptions = {

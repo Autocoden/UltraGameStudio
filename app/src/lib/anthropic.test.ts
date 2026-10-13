@@ -113,6 +113,59 @@ describe('streamAnthropic multimodal content', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it('passes the selected thinking budget through', async () => {
+    const fetchMock = vi.fn(async () => mockAnthropicStream('ok'));
+    vi.stubGlobal('fetch', fetchMock);
+    await streamAnthropic({
+      apiKey: 'k',
+      system: 's',
+      userContent: 'hello',
+      maxTokens: 32768,
+      thinking: { type: 'enabled', budget_tokens: 16384 },
+    });
+    const body = bodyOf(fetchMock);
+    expect(body.thinking).toEqual({ type: 'enabled', budget_tokens: 16384 });
+    // Anthropic 要求 max_tokens > budget_tokens。
+    expect(body.max_tokens).toBeGreaterThan(16384);
+  });
+
+  it('clamps a budget that would exceed max_tokens instead of 400-ing', async () => {
+    const fetchMock = vi.fn(async () => mockAnthropicStream('ok'));
+    vi.stubGlobal('fetch', fetchMock);
+    await streamAnthropic({
+      apiKey: 'k',
+      system: 's',
+      userContent: 'hello',
+      maxTokens: 4096,
+      thinking: { type: 'enabled', budget_tokens: 16384 },
+    });
+    const body = bodyOf(fetchMock);
+    expect(body.thinking.type).toBe('enabled');
+    expect(body.thinking.budget_tokens).toBeLessThan(4096);
+    expect(body.max_tokens).toBeGreaterThan(body.thinking.budget_tokens);
+  });
+
+  it('sends a disabled thinking field when thinking is off', async () => {
+    const fetchMock = vi.fn(async () => mockAnthropicStream('ok'));
+    vi.stubGlobal('fetch', fetchMock);
+    await streamAnthropic({
+      apiKey: 'k',
+      system: 's',
+      userContent: 'hello',
+      thinking: { type: 'disabled' },
+    });
+    const body = bodyOf(fetchMock);
+    expect(body.thinking).toEqual({ type: 'disabled' });
+    expect(body.max_tokens).toBe(4096);
+  });
+
+  it('adds no thinking field when none is selected', async () => {
+    const fetchMock = vi.fn(async () => mockAnthropicStream('ok'));
+    vi.stubGlobal('fetch', fetchMock);
+    await streamAnthropic({ apiKey: 'k', system: 's', userContent: 'hello' });
+    expect(bodyOf(fetchMock).thinking).toBeUndefined();
+  });
+
   it('emits an image block for data URLs and keeps the text block', async () => {
     const fetchMock = vi.fn(async () => mockAnthropicStream('ok'));
     vi.stubGlobal('fetch', fetchMock);

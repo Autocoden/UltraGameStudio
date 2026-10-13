@@ -23,6 +23,7 @@ export const REMOTE_JOB_CANCELABLE_STATUSES = Object.freeze([
   'pushing',
 ]);
 
+export const REMOTE_SKILL_HOST_ID = 'ugs-remote-runner';
 export const REMOTE_RUNNER_SERVICE = 'ugs-remote-runner';
 
 export const REMOTE_RUNNER_API_PATHS = Object.freeze({
@@ -49,6 +50,8 @@ export const REMOTE_RUNNER_API_PATHS = Object.freeze({
   project: (id) => `/projects/${encodeURIComponent(id)}`,
   projectFiles: (id) => `/projects/${encodeURIComponent(id)}/files`,
   projectSkills: (id) => `/projects/${encodeURIComponent(id)}/skills`,
+  projectSkillService: (id) => `/projects/${encodeURIComponent(id)}/skill-service`,
+  projectSkillConfig: (id) => `/projects/${encodeURIComponent(id)}/skill-service/config`,
   projectEnvironment: (id) => `/projects/${encodeURIComponent(id)}/environment`,
   projectEnvironmentInstall: (id) =>
     `/projects/${encodeURIComponent(id)}/environment/install`,
@@ -99,6 +102,14 @@ export function matchRemoteRunnerProjectFilesPath(path) {
 
 export function matchRemoteRunnerProjectSkillsPath(path) {
   return matchRemoteRunnerNestedIdPath(path, REMOTE_RUNNER_API_PATHS.projects, 'skills');
+}
+
+export function matchRemoteRunnerProjectSkillConfigPath(path) {
+  return matchRemoteRunnerNestedIdPath(path, REMOTE_RUNNER_API_PATHS.projects, 'skill-service/config');
+}
+
+export function matchRemoteRunnerProjectSkillServicePath(path) {
+  return matchRemoteRunnerNestedIdPath(path, REMOTE_RUNNER_API_PATHS.projects, 'skill-service');
 }
 
 export function matchRemoteRunnerProjectEnvironmentPath(path) {
@@ -552,6 +563,35 @@ export class RunnerClient {
       throw new Error(data.error ?? `runner returned ${res.status}`);
     }
     return data.listing;
+  }
+
+  /** POST bound project skills_request. Owner/UI authority is out-of-band, never model payload. */
+  async skillRequest(projectId, request, opts = {}) {
+    const headers = this.headers(true);
+    if (opts.ownerControl === true) headers['x-ugs-skill-control'] = 'owner';
+    if (opts.userInputEvidence === true) headers['x-ugs-skill-user-input'] = 'correction';
+    const res = await fetch(this.url(REMOTE_RUNNER_API_PATHS.projectSkillService(projectId)), {
+      method: 'POST', headers, body: JSON.stringify(request), signal: opts.signal,
+    });
+    const data = await res.json();
+    if (!res.ok || !data?.ok || !Object.prototype.hasOwnProperty.call(data, 'result')) throw new Error(data?.error ?? `runner returned ${res.status}`);
+    return data.result;
+  }
+
+  async getProjectSkillConfig(projectId) {
+    const res = await fetch(this.url(REMOTE_RUNNER_API_PATHS.projectSkillConfig(projectId)), { headers: this.headers() });
+    const data = await res.json();
+    if (!res.ok || !data?.ok || !data.config) throw new Error(data?.error ?? `runner returned ${res.status}`);
+    return data.config;
+  }
+
+  /** Remote owner settings are independent of local frontend storage. */
+  async saveProjectSkillConfig(projectId, config) {
+    const headers = { ...this.headers(true), 'x-ugs-skill-control': 'owner' };
+    const res = await fetch(this.url(REMOTE_RUNNER_API_PATHS.projectSkillConfig(projectId)), { method: 'PUT', headers, body: JSON.stringify(config) });
+    const data = await res.json();
+    if (!res.ok || !data?.ok || !data.config) throw new Error(data?.error ?? `runner returned ${res.status}`);
+    return data.config;
   }
 
   async listProjectSkills(projectId, opts = {}) {

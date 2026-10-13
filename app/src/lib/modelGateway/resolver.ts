@@ -29,6 +29,13 @@ import {
   setActiveGatewaySelection,
 } from '@/lib/gatewayConfig';
 import {
+  declaredLevelsFor,
+  parseThinkingLevelOverrides,
+  resolveThinkingPlan,
+  thinkingPlanEnv,
+} from '@/lib/thinkingLevels';
+import { loadThinkingLevelOverrides } from '@/lib/composerStorage';
+import {
   DEFAULT_GATEWAY_SELECTION,
   MODEL_CLASSES,
   type GatewayProvider,
@@ -83,6 +90,12 @@ export function normalizeGatewaySelection(
     typeof value?.modelOverride === 'string' && value.modelOverride.trim()
       ? value.modelOverride.trim()
       : undefined;
+  // 思考深度不进 selectionKey：它是同一次会话内的模型参数，不属于「选哪个渠道/模型」
+  // 的身份。写进 key 会让 listGatewayRunOptions 的选项 id 与历史保存值错配。
+  const thinkingLevel =
+    typeof value?.thinkingLevel === 'string' && value.thinkingLevel.trim()
+      ? value.thinkingLevel.trim()
+      : undefined;
   return {
     adapter,
     modelClass:
@@ -90,6 +103,7 @@ export function normalizeGatewaySelection(
         ? value.modelClass
         : DEFAULT_GATEWAY_SELECTION.modelClass,
     ...(modelOverride ? { modelOverride } : {}),
+    ...(thinkingLevel ? { thinkingLevel } : {}),
     ...(systemDefault ? { systemDefault: true } : {}),
     ...(systemDefault
       ? {}
@@ -390,8 +404,23 @@ export function resolveGatewayRoute(
     label: `${runtimeAdapterLabel(provider.adapter)} · ${provider.name} · ${channel.name} · ${selection.modelClass}`,
     source,
   };
-  const env = gatewayRouteEnv(route);
+  const env = gatewayRouteEnv({
+    ...route,
+    thinkingLevel: selection.thinkingLevel,
+    declaredLevels: declaredThinkingLevelsFor(model),
+  });
   return env ? { ...route, env } : route;
+}
+
+/**
+ * 用户在设置里手写的档位覆盖规则（`模型匹配=档位列表`）命中的档位集合。
+ * 私有网关的档位词汇千差万别，这里给一条不改代码就能纠正的逃生门。
+ */
+function declaredThinkingLevelsFor(model?: string): string[] | undefined {
+  return declaredLevelsFor(
+    model,
+    parseThinkingLevelOverrides(loadThinkingLevelOverrides()),
+  );
 }
 
 export function listGatewayRunOptions(): GatewayRunOption[] {
@@ -575,9 +604,29 @@ export function gatewayRouteEnv(
   route: Pick<
     ResolvedGatewayRoute,
     'transport' | 'adapter' | 'providerId' | 'apiKey' | 'baseUrl' | 'model'
-  >,
+  > & { thinkingLevel?: string; declaredLevels?: string[] },
 ): Record<string, string> | undefined {
   const env: Record<string, string> = {};
+  // 思考深度是一个渠道无关的会话参数：具体映射成哪个 flag / 配置项由下游
+  // 按**协议通道**决定（claude-code → `--effort`、codex →
+  // `-c model_reasoning_effort`、dsh → native/pi-ai 覆盖层字段）。这里只把
+  // 「用户选中的档位」解析成一份完整计划（`thinkingLevels.resolveThinkingPlan`），
+  // 再序列化成 `UGS_THINKING_PLAN` 交给 Rust 侧机械落地 —— 族判定（哪个模型
+  // 支持哪几档、每档过线怎么拼写）只在前端这一处发生，Rust 不做第二套判断。
+  //
+  // 解析器还会再校验一次：会话中途换渠道/换模型后，上一个渠道的档位（例如
+  // claude-code 的 `xhigh`）对新渠道可能非法，绝对不能原样下发。
+  const thinkingPlan = resolveThinkingPlan(
+    {
+      adapter: route.adapter,
+      baseUrl: route.baseUrl,
+      model: route.model,
+      transport: route.transport,
+      declaredLevels: route.declaredLevels,
+    },
+    route.thinkingLevel,
+  );
+  if (thinkingPlan) Object.assign(env, thinkingPlanEnv(thinkingPlan));
   if (route.adapter === 'gemini') {
     // route.env is consumed ONLY by the CLI subprocess path (aiEditViaCli) —
     // including the direct→cli network-failure fallback in modelGateway.ts.
@@ -863,6 +912,21 @@ function cliFallbackRoute(
         ? modelLabel
         : undefined
       : modelLabel;
+  // 思考深度也要覆盖「系统默认 CLI」这条无渠道路径，否则用户在 systemDefault
+  // 下选的档位会静默丢失。这里只补思考深度这一个变量：该分支历史上不导出任何
+  // env（tier 别名之外不注入模型），整条走 gatewayRouteEnv 会顺带带出
+  // ANTHROPIC_MODEL 等，改变既有语义。
+  const thinkingPlan = resolveThinkingPlan(
+    {
+      adapter,
+      baseUrl: '',
+      model,
+      transport: 'cli',
+      declaredLevels: declaredThinkingLevelsFor(model),
+    },
+    selection.thinkingLevel,
+  );
+  const env = thinkingPlan ? thinkingPlanEnv(thinkingPlan) : undefined;
   return {
     selection: { ...selection, adapter },
     adapter,
@@ -876,6 +940,7 @@ function cliFallbackRoute(
       selection.systemDefault ? 'system default' : modelLabel
     }`,
     source,
+    ...(env ? { env } : {}),
   };
 }
 

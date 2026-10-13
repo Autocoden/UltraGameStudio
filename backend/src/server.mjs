@@ -43,6 +43,7 @@ import {
   previewWorkspaceFile,
   saveWorkspaceUpload,
 } from './workspace-files.mjs';
+import { createWorkspaceSkillService, assertSafeSkillPath } from './workspace-skill-service.mjs';
 import { listWorkspaceSkills } from './workspace-skills.mjs';
 import {
   readUserSettingJson,
@@ -57,6 +58,7 @@ import {
 import {
   REMOTE_RUNNER_API_PATHS,
   REMOTE_RUNNER_SERVICE,
+  REMOTE_SKILL_HOST_ID,
   REMOTE_RUNNER_SSE_EVENTS,
   isRemoteJobTerminalStatus,
   matchRemoteRunnerAccountPath,
@@ -66,6 +68,8 @@ import {
   matchRemoteRunnerJobStreamPath,
   matchRemoteRunnerProjectFilesPath,
   matchRemoteRunnerProjectSkillsPath,
+  matchRemoteRunnerProjectSkillServicePath,
+  matchRemoteRunnerProjectSkillConfigPath,
   matchRemoteRunnerProjectEnvironmentPath,
   matchRemoteRunnerProjectEnvironmentInstallPath,
   matchRemoteRunnerProjectPath,
@@ -139,7 +143,7 @@ function send(res, status, body, headers = {}) {
   res.writeHead(status, {
     'content-type': typeof body === 'string' ? 'text/plain' : 'application/json',
     'access-control-allow-origin': '*',
-    'access-control-allow-headers': 'authorization, content-type',
+    'access-control-allow-headers': 'authorization, content-type, x-ugs-skill-control, x-ugs-skill-user-input',
     'access-control-allow-methods': 'GET, POST, PUT, DELETE, OPTIONS',
     ...headers,
   });
@@ -401,6 +405,59 @@ function queryParam(req, name) {
 
 function projectWorkspaceDir(project) {
   return managedProjectWorkspaceDir(cfg.workdir, project);
+}
+
+const projectSkillServices = new Map();
+async function projectSkillService(project) {
+  const dir = projectWorkspaceDir(project);
+  // Do not clone/pull for a skill mutation: the authenticated checkout must
+  // already exist, and no request can select an alternate root or host global.
+  await assertSafeSkillPath(cfg.workdir, { allowMissing: true });
+  await assertSafeSkillPath(dir, { allowMissing: true });
+  const bound = await assertWorkspaceBoundary(cfg.workdir, dir, { create: true });
+  const key = `${project.userId ?? 'default'}:${project.id}`;
+  if (!projectSkillServices.has(key)) projectSkillServices.set(key, createWorkspaceSkillService({ dir: bound.target, hostId: REMOTE_SKILL_HOST_ID, workspaceId: project.id }));
+  return projectSkillServices.get(key);
+}
+
+function nativeSkillEvidenceKind(message, exitCode) {
+  // Classify only a server-retained native check, never client kind/summary or
+  // a job's process exit. Unrecognised successful activity remains ordinary tool evidence.
+  const command = message.args?.command;
+  const output = message.result;
+  if (exitCode !== 0 || typeof command !== 'string' || typeof output !== 'string') return 'tool';
+  const nodeTest = /^node(?:\.exe)?\s+--test(?:\s+(?:--[a-z0-9-]+(?:=[A-Za-z0-9,._-]+)?|[A-Za-z0-9_./\\-]+))*\s*$/i.test(command.trim());
+  const tests = /^# tests ([1-9][0-9]*)\s*$/m.exec(output);
+  const passed = /^# pass ([1-9][0-9]*)\s*$/m.exec(output);
+  const zeroFailures = /^# fail 0\s*$/m.test(output);
+  return nodeTest && tests && passed && tests[1] === passed[1] && zeroFailures ? 'verification' : 'tool';
+}
+
+function serverSkillEvidence(req, project, origin, evidence = []) {
+  if (!Array.isArray(evidence) || evidence.length > 256) throw new Error('skill evidence must be a bounded array');
+  const jobs = store.listJobs().filter((job) => job.projectId === project.id && (job.userId ?? 'default') === currentUserId(req));
+  const originFields = ['hostId', 'workspaceId', 'sessionId', 'turnId', 'runId'];
+  const boundJob = (job, source) => job.status === 'done' && job.skillOrigin &&
+    Object.keys(job.skillOrigin).length === originFields.length &&
+    originFields.every((key) => job.skillOrigin[key] === source[key]) &&
+    job.skillOrigin.runId === job.id && job.skillOrigin.hostId === REMOTE_SKILL_HOST_ID &&
+    job.skillOrigin.workspaceId === project.id;
+  const reviewJob = jobs.find((job) => job.id === origin.runId && boundJob(job, origin));
+  return evidence.map((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item) || typeof item.evidenceId !== 'string' || !item.evidenceId || !item.origin || Object.keys(item.origin).some((key) => !originFields.includes(key)) || ['hostId', 'workspaceId', 'sessionId'].some((key) => item.origin[key] !== origin[key]) || ['turnId', 'runId'].some((key) => typeof item.origin[key] !== 'string' || !item.origin[key] || item.origin[key].length > 200)) throw new Error('skill evidence origin does not match this session');
+    if (item.provenance === 'native-tool' || item.provenance === 'host-check') {
+      const native = reviewJob ? jobs.filter((job) => job.id === item.origin.runId && boundJob(job, item.origin)).flatMap((job) => (job.messages ?? []).filter((message) => message.provenance === 'native-tool' && message.phase === 'end' && message.runId === job.id && typeof message.toolName === 'string' && message.toolName && Number.isFinite(message.at) && (message.toolCallId ?? message.toolId) === item.toolCallId)) : [];
+      const message = native.find((entry) => JSON.stringify([item.origin.runId, entry.toolCallId ?? entry.toolId]) === item.evidenceId);
+      if (message) {
+        const exitCode = Object.prototype.hasOwnProperty.call(message, 'toolExitCode') ? message.toolExitCode : message.exitCode;
+        return { evidenceId: item.evidenceId, origin: { ...item.origin }, kind: nativeSkillEvidenceKind(message, exitCode), provenance: 'native-tool', toolCallId: message.toolCallId ?? message.toolId, toolName: message.toolName, parentId: message.parentId, occurredAt: message.at, status: typeof exitCode === 'number' ? (exitCode === 0 ? 'success' : 'error') : ['success', 'error'].includes(message.status) ? message.status : 'unknown', exitCode, result: message.result, summary: message.text ?? '' };
+      }
+      return { ...item, provenance: 'model-output', status: 'unknown' };
+    }
+    // This separate authenticated UI assertion is not a field a review model can mint.
+    if (req.headers['x-ugs-skill-user-input'] === 'correction' && item.provenance === 'user-input' && item.kind === 'correction' && originFields.every((key) => item.origin[key] === origin[key])) return { ...item, status: 'success' };
+    return { ...item, provenance: 'model-output', status: 'unknown' };
+  });
 }
 
 function currentUserSettingsRoot(req) {
@@ -731,6 +788,7 @@ const server = http.createServer(async (req, res) => {
         accountId: body.accountId,
         prompt: body.prompt,
         pushBranch: body.pushBranch,
+        skillSource: body.skillSource,
       });
     } catch (err) {
       return send(res, 404, { ok: false, error: String(err?.message ?? err) });
@@ -741,6 +799,10 @@ const server = http.createServer(async (req, res) => {
     if (body.apiKey) stored._apiKey = String(body.apiKey);
     if (body.baseUrl) stored._baseUrl = String(body.baseUrl);
     if (!body.projectId && body.gitToken) stored._gitToken = String(body.gitToken);
+    if (job.skillOrigin) {
+      try { await (runner.skillSourceWrites.get(job.id) ?? store._writeChain); }
+      catch { return send(res, 500, { ok: false, error: 'skill source persistence failed' }); }
+    }
     return send(res, 201, { ok: true, job: publicJob(job) });
   }
 
@@ -858,7 +920,7 @@ const server = http.createServer(async (req, res) => {
     try {
       const wantSync = url.searchParams.get('sync') === '1';
       const dir = await ensureProjectWorkspaceReady(project, { sync: wantSync });
-      const skills = await listWorkspaceSkills({ dir });
+      const skills = await listWorkspaceSkills({ dir, hostId: REMOTE_SKILL_HOST_ID, workspaceId: project.id });
       return send(res, 200, { ok: true, skills });
     } catch (err) {
       return send(res, 400, {
@@ -866,6 +928,47 @@ const server = http.createServer(async (req, res) => {
         error: String(err?.message ?? err),
       });
     }
+  }
+
+  const skillConfigProjectId = matchRemoteRunnerProjectSkillConfigPath(path);
+  if (skillConfigProjectId && ['GET', 'PUT'].includes(req.method)) {
+    const project = store.getProject(skillConfigProjectId, currentUserId(req));
+    if (!project) return send(res, 404, { ok: false, error: 'not found' });
+    if (req.method === 'PUT' && req.headers['x-ugs-skill-control'] !== 'owner') return send(res, 403, { ok: false, error: 'explicit owner control authority is required' });
+    const body = req.method === 'PUT' ? await readJson(req) : null;
+    if (body === BODY_TOO_LARGE) return send(res, 413, { ok: false, error: 'skill config is too large' });
+    try {
+      const service = await projectSkillService(project);
+      const config = req.method === 'PUT' ? await service.setConfig(body) : await service.getConfig();
+      return send(res, 200, { ok: true, config });
+    } catch (error) { return send(res, error.code === 'SKILL_BUSY' ? 409 : 400, { ok: false, error: String(error?.message ?? error) }); }
+  }
+
+  // Unified camelCase wire contract shared with Rust skills_request. The route
+  // and authenticated store lookup, never request fields, choose the workspace.
+  const skillServiceProjectId = matchRemoteRunnerProjectSkillServicePath(path);
+  if (skillServiceProjectId && req.method === 'POST') {
+    const project = store.getProject(skillServiceProjectId, currentUserId(req));
+    if (!project) return send(res, 404, { ok: false, error: 'not found' });
+    const body = await readJson(req);
+    if (body === BODY_TOO_LARGE) return send(res, 413, { ok: false, error: 'skill request is too large' });
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return send(res, 400, { ok: false, error: 'invalid skill request' });
+    const fields = ['action', 'origin', 'mode', 'evidence', 'proposal', 'skillId', 'filePath', 'batchId', 'rollbackId', 'kind', 'evidenceIds', 'policy', 'sourceSkillId'];
+    if (Object.keys(body).some((key) => !fields.includes(key)) || !body.origin || typeof body.origin !== 'object' || Array.isArray(body.origin) || Object.keys(body.origin).some((key) => !['hostId', 'workspaceId', 'sessionId', 'turnId', 'runId'].includes(key))) return send(res, 400, { ok: false, error: 'client root/cwd/authority overrides or unknown origin fields are forbidden' });
+    if (body.mode !== undefined && !['auto-safe', 'approve-all', 'off'].includes(body.mode)) return send(res, 400, { ok: false, error: 'invalid skill learning mode' });
+    if (body.origin?.hostId !== REMOTE_SKILL_HOST_ID || body.origin?.workspaceId !== project.id) return send(res, 400, { ok: false, error: 'skill origin does not match authenticated workspace' });
+    const ownerActions = new Set(['approve', 'reject', 'rollback', 'set_policy', 'archive', 'restore', 'import']);
+    if (ownerActions.has(body.action) && req.headers['x-ugs-skill-control'] !== 'owner') return send(res, 403, { ok: false, error: 'explicit owner control authority is required' });
+    try {
+      const service = await projectSkillService(project);
+      // The model references identities only; authorize against a written host snapshot.
+      if (Array.isArray(body.evidence) && body.evidence.some((item) => item?.provenance === 'native-tool' || item?.provenance === 'host-check')) {
+        let written;
+        do { written = store._writeChain; await written; } while (store._writeChain !== written);
+      }
+      const result = await service.request({ ...body, evidence: serverSkillEvidence(req, project, body.origin, body.evidence) });
+      return send(res, 200, { ok: true, result });
+    } catch (error) { return send(res, error.code === 'SKILL_BUSY' ? 409 : 400, { ok: false, error: String(error?.message ?? error) }); }
   }
 
   // GET /projects/:id/environment — probe the remote host for required runtime

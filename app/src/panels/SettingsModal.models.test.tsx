@@ -7,7 +7,11 @@ import {
   PROVIDERS_STORAGE,
   type Provider,
 } from '@/lib/apiConfig';
-import { ACTIVE_GATEWAY_SELECTION_STORAGE } from '@/lib/gatewayConfig';
+import {
+  ACTIVE_GATEWAY_SELECTION_STORAGE,
+  getActiveGatewaySelection,
+  setActiveGatewaySelection,
+} from '@/lib/gatewayConfig';
 import { workflowDefaultGatewaySelection } from '@/lib/modelGateway/resolver';
 import { installQuitFlushHandler } from '@/lib/quitFlush';
 import { remoteProviderId } from '@/lib/remoteWorkspace';
@@ -206,6 +210,74 @@ afterEach(() => {
 });
 
 describe('SettingsModal programming model selection', () => {
+  it.each([false, true])(
+    'autosaves default thinking depth across reopening settings (provider: %s)',
+    async (withProvider) => {
+      const provider: Provider = {
+        id: 'provider-thinking',
+        kind: 'codex',
+        name: 'Codex 测试渠道',
+        apiKey: '',
+        baseUrl: '',
+        transport: 'cli',
+        model: 'gpt-6',
+      };
+      if (withProvider) {
+        window.localStorage.setItem(PROVIDERS_STORAGE, JSON.stringify([provider]));
+      }
+      setActiveGatewaySelection({
+        adapter: 'codex',
+        modelClass: 'gpt-6',
+        ...(withProvider
+          ? { providerId: provider.id, channelId: 'default' }
+          : { systemDefault: true }),
+      });
+
+      const thinkingTrigger = (container: HTMLElement) => {
+        const label = Array.from(container.querySelectorAll('label')).find(
+          (item) => Array.from(item.querySelectorAll('span')).some(
+            (span) => span.textContent?.trim() === '思考深度',
+          ),
+        );
+        const button = label?.querySelector<HTMLButtonElement>('button');
+        expect(button).toBeInstanceOf(HTMLButtonElement);
+        return button!;
+      };
+
+      for (const level of [
+        { label: '极高', id: 'xhigh' },
+        { label: '高', id: 'high' },
+        { label: '默认', id: undefined },
+      ]) {
+        const view = await renderSettingsModal();
+        try {
+          await clickButtonByText(view.container, '编程渠道');
+          await act(async () => thinkingTrigger(view.container).click());
+          const option = Array.from(
+            document.querySelectorAll<HTMLButtonElement>('button[role="option"]'),
+          ).find((button) => {
+            const label = button.querySelectorAll('span')[1]?.textContent ?? '';
+            return level.id ? label === level.label : label.startsWith('默认');
+          });
+          expect(option).toBeInstanceOf(HTMLButtonElement);
+          await act(async () => option!.click());
+          expect(getActiveGatewaySelection().thinkingLevel).toBe(level.id);
+        } finally {
+          await view.cleanup();
+        }
+
+        const reopened = await renderSettingsModal();
+        try {
+          await clickButtonByText(reopened.container, '编程渠道');
+          expect(thinkingTrigger(reopened.container).textContent).toContain(level.label);
+          expect(getActiveGatewaySelection().thinkingLevel).toBe(level.id);
+        } finally {
+          await reopened.cleanup();
+        }
+      }
+    },
+  );
+
   it('keeps the modal open when the backdrop is clicked', async () => {
     const view = await renderSettingsModal();
 

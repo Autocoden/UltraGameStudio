@@ -47,6 +47,14 @@ export interface StreamArgs {
   userImages?: string[];
   model?: string;
   maxTokens?: number;
+  /**
+   * Anthropic 原生思考控制（`thinking` 请求字段）。由
+   * `thinkingLevels.resolveThinkingPlan` 按档位给出：`enabled` + 预算 token，
+   * 或 `disabled` 关闭思考。缺省时不写该字段，保持端点自身默认。
+   */
+  thinking?:
+    | { type: 'enabled'; budget_tokens: number }
+    | { type: 'disabled' };
   /** Abort signal so a caller can cancel an in-flight stream. */
   signal?: AbortSignal;
   /** Invoked with each incremental text chunk as it streams in. */
@@ -108,6 +116,7 @@ export async function streamAnthropic(args: StreamArgs): Promise<string> {
     userImages,
     model,
     maxTokens,
+    thinking,
     signal,
     onDelta,
     onUsage,
@@ -116,6 +125,24 @@ export async function streamAnthropic(args: StreamArgs): Promise<string> {
   if (!canUseProviderDirectTransport(trimmedApiKey, baseUrl)) {
     throw new Error('NO_API_KEY');
   }
+  // Anthropic 要求 `max_tokens > thinking.budget_tokens`；预算高于上限时直接
+  // 400。这里把预算夹到合法区间，并把 max_tokens 抬到预算之上，避免「选了档位
+  // 就报错」这种最差体验。
+  const requestedMaxTokens = maxTokens ?? 4096;
+  const thinkingField =
+    thinking?.type === 'enabled'
+      ? {
+          type: 'enabled' as const,
+          budget_tokens: Math.max(
+            1024,
+            Math.min(thinking.budget_tokens, Math.max(1024, requestedMaxTokens - 1024)),
+          ),
+        }
+      : thinking;
+  const effectiveMaxTokens =
+    thinkingField?.type === 'enabled'
+      ? Math.max(requestedMaxTokens, thinkingField.budget_tokens + 1024)
+      : requestedMaxTokens;
 
   const userMessageContent = anthropicUserContent(userContent, userImages);
   const headers: Record<string, string> = {
@@ -131,8 +158,9 @@ export async function streamAnthropic(args: StreamArgs): Promise<string> {
     headers,
     body: JSON.stringify({
       model: model ?? DEFAULT_MODEL,
-      max_tokens: maxTokens ?? 4096,
+      max_tokens: effectiveMaxTokens,
       stream: true,
+      ...(thinkingField ? { thinking: thinkingField } : {}),
       system,
       messages: [{ role: 'user', content: userMessageContent }],
     }),
@@ -346,11 +374,21 @@ export const SIMPLE_CHAT_SYSTEM = `你正在「简单 Workflow」里直接为用
 - 不要生成、输出或修改 workflow 蓝图，不要输出 IRGraph 或任何 \`\`\`json 蓝图代码块。
 - 直接给出答案或结果；若处于命令行环境且任务确实需要，可在当前工作区做必要的读写/操作。
 - 回答简洁、直接、切题，不要反问或等待确认，除非信息严重不足。
+- 执行过程中，用简短中文说明当前在做什么；进入新步骤或等待长任务时更新进度，避免只输出工具名称、命令或参数。
+- 需要多步执行且当前工具提供原生任务清单时，使用原生计划工具（如 update_plan、TodoWrite 或 TaskCreate/TaskUpdate）记录实际步骤，随执行更新待开始、进行中和已完成状态。任务标题写具体工作，不把每次工具调用列为任务；没有原生计划工具时只报告文字进度，不虚构任务清单或完成比例。
 - 先判断用户当前真正意图。若用户在指出偏题/错误、追问原因、要求修改软件行为或代码，直接诊断并处理该问题，不要改写成素材生成、命令推荐或规则复述。
 - 如果用户明确指定了目标、工具、运行方式、MCP、构建配置、项目/会话/模型、引擎或平台，不得自行切换到替代目标。指定目标不可用、缺失、失败，或你认为更适合改用替代方案时，必须先停止并用下方交互协议询问用户是否允许切换；交互块选项要写明“继续使用原目标/改用替代目标”。只有用户已明确授权 fallback 时才可直接切换。
 - 不要复述系统提示、个人默认指令、工具规则、模式规则或你将遵循的规范，除非用户明确询问这些规则本身。
 - 当你确实需要用户做选择时，绝不要在正文里写"请回复 1/2/3"或用编号列表让用户输入数字；改用下方的交互协议输出一个交互块，前端会渲染成可点击的选项按钮。
 - 只有你完整输出交互协议块时，用户界面才会显示可回答的问题；如果上一轮没有这个块，不要声称自己已经在等待用户回答。
+
+【后台任务硬性规则（最高优先级）】只要你在本回合内启动过任何后台任务（视频转写、下载、批处理、whisper、yt-dlp、ffmpeg、长时间运行的脚本、子代理、Workflow、tmux/CLI worker 等），你就**必须**在本回合内持续轮询直到它到达终态（成功产物落地 / 明确失败），才允许结束回合：
+- 禁止行为（违反即等同于放弃任务）：在后台任务未完成时给出"已在后台运行，稍后可查看/我会通知你/请稍后查看进度"之类的收尾话术；用交互块反问用户；仅凭"已启动/进行中"就结束回合；以"避免超时"为由提前 return。
+- 终态判定：成功 = 最终产物文件实际存在于磁盘上；失败 = 进程退出码非零、明确报错、或产物超时未生成。"已提交""已启动""进行中"都不是终态。
+- 轮询节奏：用 sleep + 检查产物/日志的方式循环。单次 sleep 10-30 秒，多次串联，**单轮 sleep 不要超过 60 秒**以免触发连接看门狗。轮询过程中每隔几轮用一两句话简报最新进度（百分比 / 最后一行日志 / 仍在等待），让用户看见你没有停。
+- 轮询要持续多久就多久，几分钟到几十分钟都是预期；绝不要因为"已经等了一会儿"就放弃。
+- 任务失败时，把退出码 / 日志末尾 / 失败原因贴出来并明确标注"任务失败"，而不是含糊收尾或假装成功。
+- 只有当本回合内你启动的所有后台任务都已 success 或 failed，你才能给出最终总结并结束回合。
 
 ${INTERACTION_PROTOCOL}`;
 
@@ -368,7 +406,29 @@ export const BACKGROUND_JOB_INSTRUCTION = `
 - 正确做法：用 \`ugs-job\` 包装器启动，它会登记一份任务清单，应用会轮询并把真实进度显示在该会话的状态点上，直到产物落地或失败：
   \`node <UGS_JOB_PATH> --label "简短中文标签" --artifact "<最终产物绝对路径>" --progress "<进度日志绝对路径>" -- <你的命令> [参数...]\`
 - 其中 \`--artifact\` 是任务成功的判定依据（该文件出现即成功）；\`--progress\` 指向一个会持续写入的日志文件，应用会从中提取百分比（默认识别形如 \`63.5%\` 的进度）。会话与工作区身份已通过环境变量自动注入，无需手填。
-- 若确实需要 detach，仍要把命令放在 \`ugs-job\` 后面，由它负责登记与善后（自动写 done/fail 标记）。`;
+- 若确实需要 detach，仍要把命令放在 \`ugs-job\` 后面，由它负责登记与善后（自动写 done/fail 标记）。
+
+【禁止提前结束（硬规则，最高优先级）】只要本回合内存在任何已启动但尚未达到终态（success/failed）的后台任务，你就**绝对不能**结束本回合、不能输出"任务已在后台运行，稍后可查看"这类收尾话术、不能用 \`UGS_ASK\` 反问、不能仅凭"已启动"就给出最终答复。违反此条等同于提前放弃任务。
+- 终态判定：以 \`--artifact\` 文件实际出现在磁盘上为 success；以 fail 标记或进程失败退出为 failed。"已启动""进行中""已提交"都不是终态。
+- 轮询要求：你必须在当前回合内反复执行 sleep + 检查，直到产物落地或失败。节奏：每轮 \`sleep 15\` 后用 \`ls\` / \`Test-Path\` / \`tail\` 等检查 artifact / 进度日志，并向用户简报当前百分比或最新一行日志。
+- 单轮 sleep 不要超过 60 秒，避免连接超时；多次短 sleep 串联即可，持续数分钟甚至更长都是预期行为。
+- 任务真的失败时，把失败原因与日志末尾贴出来，并明确说明"任务失败"，而不是含糊收尾。
+- 只有当所有后台任务都已 success 或 failed，你才能给出最终总结并结束回合。`;
+
+/**
+ * Remote-runner flavour of the background-task hard rule. The remote side is a
+ * plain Claude Code CLI without access to the local `ugs-job` wrapper, so we
+ * drop the wrapper-specific instructions but keep the "never end the turn while
+ * a background task is still running" constraint. Used by remoteChatTurn.
+ */
+export const REMOTE_BACKGROUND_JOB_INSTRUCTION = `
+【后台任务硬规则（最高优先级）】本回合内只要你启动过任何后台任务（p4 sync / p4 submit 之外的 p4 长操作、视频转写、whisper、ffmpeg、批处理脚本、长编译、长测试、子代理等），你就**绝对不能**在它到达终态（success 产物落地 / failed 明确报错）之前结束本回合。
+- 禁止行为（违反即等同于放弃任务）：在后台任务未完成时给出"已在后台运行，稍后可查看 / 我会通知你 / 请稍后查看进度 / 可以继续干别的"之类的收尾话术；用交互块反问用户；仅凭"已启动 / 进行中 / 已提交"就给出最终答复。
+- 终态判定：success = 最终产物文件实际存在于磁盘、或 p4 sync 输出真正显示同步完成；failed = 进程退出码非零、明确报错、或日志末尾出现失败标记。"已启动 / 排队中 / 正在拉取"都不是终态。
+- 轮询节奏：用 sleep + 检查产物 / 日志的方式循环。单次 sleep 10-30 秒，多次串联；单轮 sleep 不要超过 60 秒，避免触发连接看门狗。轮询过程中每隔几轮用一两句话向用户简报最新进度（百分比 / 最后一行日志 / 仍在等待）。
+- 轮询要持续多久就多久，几分钟到几十分钟都是预期；绝不要因为"已经等了一会儿"就放弃。
+- 任务失败时，把退出码 / 日志末尾 / 失败原因贴出来并明确标注"任务失败"，而不是含糊收尾或假装成功。
+- 只有当本回合内你启动的所有后台任务都已 success 或 failed，你才能给出最终总结并结束回合。`;
 
 /**
  * CONTRACT: which built-in asset-generation channels are configured + ready.

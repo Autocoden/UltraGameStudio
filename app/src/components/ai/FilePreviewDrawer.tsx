@@ -12,6 +12,7 @@ import {
   ExternalLink,
   FileText,
   FileWarning,
+  FolderOpen,
   Globe2,
   Image as ImageIcon,
   Loader2,
@@ -39,7 +40,8 @@ import {
 } from './lib/filePath';
 import { highlightCode } from './lib/highlight';
 import Markdown from './Markdown';
-import DocumentPreview from './DocumentPreview';
+import OfficePreviewPane from './OfficePreviewPane';
+import PdfPreview from './PdfPreview';
 import CopyButton from './CopyButton';
 import { directImagePreviewSource } from './lib/imagePreview';
 
@@ -93,8 +95,11 @@ export interface FilePreviewDrawerLayoutDetail {
 const FILE_PREVIEW_DEFAULT_WIDTH = 760;
 const FILE_PREVIEW_MIN_WIDTH = 360;
 const FILE_PREVIEW_MAX_WIDTH = 1280;
+// Keep preview entries in place until their click switches the file; closing
+// on pointerdown would reflow the chat before pointerup reaches the entry.
 const FILE_PREVIEW_OUTSIDE_POINTER_IGNORE_SELECTOR =
-  '[data-file-preview-ignore-outside-pointer="true"]';
+  '[data-file-preview-ignore-outside-pointer="true"], ' +
+  '[data-file-preview-trigger="true"]:not(:disabled)';
 
 function publishFilePreviewDrawerLayout(
   detail: FilePreviewDrawerLayoutDetail,
@@ -172,6 +177,87 @@ function textPreviewModeFromPath(path: string, mime?: string | null): TextPrevie
     return 'markdown';
   }
   return 'code';
+}
+
+/**
+ * Rewrites local file references inside an HTML document so they resolve inside
+ * the sandboxed preview iframe. A sandbox iframe is an opaque origin and cannot
+ * read the local filesystem, so Windows/UNC absolute paths and `file://` URLs
+ * must be converted to the Tauri asset URL (`convertFileSrc`); relative paths
+ * are resolved against `baseDir` first. Scheme URLs (http/https/data/blob) and
+ * fragments are left untouched. Covers `src`, `srcset` and `href` attributes
+ * plus CSS `url(...)`.
+ */
+export function rewriteLocalAssetsInHtml(html: string, baseDir: string): string {
+  if (!html) return html;
+
+  const rewriteUrl = (raw: string): string => {
+    const value = raw.trim();
+    if (!value) return raw;
+
+    let path: string;
+    if (/^file:\/\//i.test(value)) {
+      try {
+        const url = new URL(value);
+        let p = decodeURIComponent(url.pathname);
+        if (/^\/[A-Za-z]:\//.test(p)) p = p.slice(1); // /E:/a/b.png -> E:/a/b.png
+        if (url.hostname) p = `//${url.hostname}${p}`; // UNC host
+        path = p;
+      } catch {
+        return raw;
+      }
+    } else if (/^[A-Za-z]:[\\/]/.test(value)) {
+      path = value; // Windows absolute path (drive letter).
+    } else if (/^(?:[a-z][a-z0-9+.-]*:|#|\/\/)/i.test(value)) {
+      return raw; // scheme URL, fragment, or protocol-relative URL.
+    } else {
+      path = value; // relative path, or POSIX absolute starting with '/'.
+    }
+
+    const isAbsolute =
+      /^[A-Za-z]:[\\/]/.test(path) ||
+      /^\\\\/.test(path) ||
+      (/^\//.test(path) && !/^\/\//.test(path));
+    if (!isAbsolute) {
+      if (!baseDir) return raw;
+      const sep = baseDir.includes('\\') ? '\\' : '/';
+      const cleaned = path.replace(/^\.?[\\/]/, '').replace(/[\\/]/g, sep);
+      path = `${baseDir}${sep}${cleaned}`;
+    }
+
+    return convertFileSrc(path);
+  };
+
+  const rewriteAttr = (value: string): string => {
+    if (!/,/.test(value)) return rewriteUrl(value);
+    // srcset: comma-separated "url descriptor" entries.
+    return value
+      .split(',')
+      .map((part) => {
+        const m = /^(\s*\S+)(.*)$/.exec(part);
+        if (!m) return part;
+        return `${rewriteUrl(m[1])}${m[2]}`;
+      })
+      .join(',');
+  };
+
+  const attrRe =
+    /\b(src|srcset|href)\s*=\s*("([^"]*)"|'([^']*)'|([^\s>]+))/gi;
+  const cssUrlRe = /url\(\s*(?:"([^"]*)"|'([^']*)'|([^"')]+))\s*\)/gi;
+
+  const rewritten = html.replace(attrRe, (match, _attr, _quoted, dq, sq, bare) => {
+    const raw = dq ?? sq ?? bare ?? '';
+    if (!raw) return match;
+    const next = rewriteAttr(raw);
+    return next === raw ? match : match.replace(raw, () => next);
+  });
+
+  return rewritten.replace(cssUrlRe, (match, dq, sq, bare) => {
+    const raw = (dq ?? sq ?? bare ?? '').trim();
+    if (!raw) return match;
+    const next = rewriteUrl(raw);
+    return next === raw ? match : `url("${next}")`;
+  });
 }
 
 function formatBytes(bytes: number): string {
@@ -590,6 +676,12 @@ export default function FilePreviewDrawer({
     if (textPreviewMode === 'markdown') return file.text;
     return '';
   }, [file, textPreviewMode]);
+  const htmlSrcDoc = useMemo(() => {
+    if (!file || file.kind !== 'text' || file.text == null) return '';
+    if (textPreviewMode !== 'html') return '';
+    const baseDir = file.path.replace(/[\\/][^\\/]*$/, '');
+    return rewriteLocalAssetsInHtml(file.text, baseDir);
+  }, [file, textPreviewMode]);
   const vcsDiff = diffState.status === 'ready' ? diffState.diff : null;
 
   if (!open) return null;
@@ -630,6 +722,27 @@ export default function FilePreviewDrawer({
               className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-border bg-panel-2 text-fg-dim transition-colors hover:border-accent hover:text-fg"
             >
               {isExpanded ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+            </button>
+          )}
+          {file && canOpenExternally && (
+            <button
+              type="button"
+              onClick={() => {
+                // Jump straight to the folder that holds this file. The header
+                // path is otherwise only copyable text, so a deep asset or a
+                // generated artifact buried under .ultragamestudio/ could not be
+                // located on disk from inside the preview.
+                void openLocalPath(file.path, { reveal: true }).then((opened) => {
+                  if (!opened && typeof window !== 'undefined') {
+                    window.alert(`无法在文件管理器中定位该文件：\n${file.path}`);
+                  }
+                });
+              }}
+              title="在文件夹中显示"
+              aria-label="在文件夹中显示"
+              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-border bg-panel-2 text-fg-dim transition-colors hover:border-accent hover:text-fg"
+            >
+              <FolderOpen size={14} />
             </button>
           )}
           {file && canOpenExternally && (
@@ -721,25 +834,18 @@ export default function FilePreviewDrawer({
           </div>
         )}
 
-        {file?.kind === 'image' && file.base64 && file.mime && (
+        {file?.kind === 'image' && file.mime && (file.streamPath || imageUrl) && (
           <div className="flex min-h-0 flex-1 flex-col">
             <div className="flex shrink-0 items-center gap-2 border-b border-border-soft px-3 py-1.5 font-mono text-[10px] text-fg-faint">
               <ImageIcon size={12} />
               {file.mime} · {formatBytes(file.sizeBytes)}
             </div>
             <div className="min-h-0 flex-1 overflow-auto bg-bg p-4">
-              {imageUrl ? (
-                <img
-                  src={imageUrl}
-                  alt={file.fileName}
-                  className="ai-file-preview-image mx-auto max-h-full max-w-full object-contain"
-                />
-              ) : (
-                <div className="flex h-full items-center justify-center gap-2 text-sm text-fg-dim">
-                  <Loader2 size={16} className="animate-spin text-accent" />
-                  解码中
-                </div>
-              )}
+              <img
+                src={file.streamPath ? convertFileSrc(file.streamPath) : (imageUrl ?? '')}
+                alt={file.fileName}
+                className="ai-file-preview-image mx-auto max-h-full max-w-full object-contain"
+              />
             </div>
           </div>
         )}
@@ -752,7 +858,7 @@ export default function FilePreviewDrawer({
             </div>
             <div className="flex min-h-0 flex-1 items-center justify-center bg-black p-4">
               <video
-                src={convertFileSrc(file.path)}
+                src={convertFileSrc(file.streamPath ?? file.path)}
                 controls
                 preload="metadata"
                 className="max-h-full max-w-full rounded border border-border bg-black"
@@ -770,7 +876,8 @@ export default function FilePreviewDrawer({
             <iframe
               title={file.fileName}
               sandbox=""
-              srcDoc={file.text ?? ''}
+              src={file.streamPath ? convertFileSrc(file.streamPath) : undefined}
+              srcDoc={file.streamPath ? undefined : htmlSrcDoc}
               className="min-h-0 flex-1 border-0 bg-white"
             />
           </div>
@@ -800,14 +907,33 @@ export default function FilePreviewDrawer({
           </div>
         )}
 
-        {file?.kind === 'document' && file.base64 && file.mime && (
+        {file?.kind === 'document' && file.mime && (
           <div className="flex min-h-0 flex-1 flex-col">
             <div className="flex shrink-0 items-center gap-2 border-b border-border-soft px-3 py-1.5 font-mono text-[10px] text-fg-faint">
               <FileText size={12} />
               {file.mime} · {formatBytes(file.sizeBytes)}
+              {file.pageCount ? ` · ${file.pageCount} 页` : ''}
             </div>
-            <DocumentPreview
-              base64={file.base64}
+            {file.streamPath ? (
+              <PdfPreview url={convertFileSrc(file.streamPath)} />
+            ) : (
+              <div className="flex min-h-0 flex-1 items-center justify-center p-6 text-sm text-fg-dim">
+                无法获取 PDF 的流式路径。
+              </div>
+            )}
+          </div>
+        )}
+
+        {file?.kind === 'office' && file.mime && (
+          <div className="flex min-h-0 flex-1 flex-col">
+            <div className="flex shrink-0 items-center gap-2 border-b border-border-soft px-3 py-1.5 font-mono text-[10px] text-fg-faint">
+              <FileText size={12} />
+              {file.mime} · {formatBytes(file.sizeBytes)}
+              {file.pageCount ? ` · ${file.pageCount} 页` : ''}
+            </div>
+            <OfficePreviewPane
+              path={file.path}
+              streamPath={file.streamPath}
               mime={file.mime}
               fileName={file.fileName}
             />

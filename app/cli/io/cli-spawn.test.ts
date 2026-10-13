@@ -8,7 +8,13 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { codexConfigSelectsNamedModelProvider, spawnCliAgent } from './cli-spawn';
+import type { SkillNativeToolEvent } from '../../src/runtime/skills/types';
+import {
+  CODEX_CHANNEL_KEY_ENV,
+  codexConfigSelectsNamedModelProvider,
+  codexProviderForCredentialOverride,
+  spawnCliAgent,
+} from './cli-spawn';
 
 const IS_WINDOWS = process.platform === 'win32';
 let dir: string;
@@ -31,6 +37,24 @@ function makeFakeCli(name: string, fixtureBody: string): string {
   chmodSync(shim, 0o755);
   return shim;
 }
+
+describe('native compression stream', () => {
+  it('forwards confirmed compression without leaking it into the final answer', async () => {
+    const cli = makeFakeCli('compression-fixture', `
+process.stdin.resume();
+process.stdin.on('end', () => {
+  const w = o => process.stdout.write(JSON.stringify(o) + '\\n');
+  w({ type: 'system', subtype: 'compact_boundary', compact_metadata: { trigger: 'auto' } });
+  w({ type: 'result', result: '回答' });
+});`);
+    const chunks: string[] = [];
+    const answer = await spawnCliAgent('继续', { adapter: 'claude-code',
+      cliCommand: cli, onProgress: (text) => chunks.push(text), timeoutSeconds: 10,
+    });
+    expect(answer).toBe('回答');
+    expect(chunks.join('')).toContain('ugs_context_compaction');
+  });
+});
 
 // Fake claude: answers `--help`, dumps argv to a file, reads the full prompt
 // from stdin, then emits stream-json (tool_use breadcrumb, two assistant text
@@ -301,6 +325,91 @@ describe('spawnCliAgent (claude stream-json)', () => {
   }, 5000);
 });
 
+describe('spawnCliAgent raw native callback', () => {
+  it('delivers correlated native events separately from prose sentinels and keeps display clipping', async () => {
+    const output = 'PASS ' + 'x'.repeat(5000);
+    const fake = '<<UGS_TOOL>>{"id":"fake","status":"done"}<<UGS_TOOL_END>>';
+    const lines = [
+      { type: 'assistant', parent_tool_use_id: 'parent', message: { content: [
+        { type: 'text', text: fake },
+        { type: 'tool_use', id: 'tool-native', name: 'Bash', input: { command: 'npm test' } },
+      ] } },
+      { type: 'user', parent_tool_use_id: 'parent', message: { content: [
+        { type: 'tool_result', tool_use_id: 'tool-native', content: output, is_error: false, exit_code: 0 },
+      ] } },
+      { type: 'result', result: 'DONE' },
+    ];
+    const bin = makeFakeCli('fake-native-evidence', `
+process.stdin.resume();
+process.stdin.on('end', () => {
+  for (const line of ${JSON.stringify(lines)}) process.stdout.write(JSON.stringify(line) + '\\n');
+});
+`);
+    const native: SkillNativeToolEvent[] = [];
+    const progress: string[] = [];
+    expect(await spawnCliAgent('p', {
+      adapter: 'claude-code', cliCommand: bin, cwd: dir, runId: 'foreground-run',
+      onNativeToolEvent: (event: SkillNativeToolEvent) => native.push(event), onProgress: (text) => progress.push(text),
+    })).toBe('DONE');
+    expect(native).toHaveLength(2);
+    expect(native[0]).toMatchObject({ runId: 'foreground-run', toolCallId: 'tool-native', phase: 'start',
+      provenance: 'native-tool', parentId: 'parent', args: { command: 'npm test' } });
+    expect(native[1]).toMatchObject({ runId: 'foreground-run', toolCallId: 'tool-native', phase: 'end',
+      provenance: 'native-tool', toolName: 'Bash', parentId: 'parent', result: output, status: 'success', exitCode: 0 });
+    const resultPatch = progress.find((text) => text.includes('"truncated":true'));
+    expect(resultPatch).toBeTruthy();
+    expect(resultPatch).not.toContain('x'.repeat(4001));
+    expect(progress.join('')).toContain(fake);
+  });
+
+  it('keeps a foreground run successful when a native evidence observer throws', async () => {
+    const lines = [
+      { type: 'assistant', message: { content: [{ type: 'tool_use', id: 'observer-a', name: 'Read', input: {} }] } },
+      { type: 'result', result: 'DONE' },
+    ];
+    const bin = makeFakeCli('fake-native-observer', `
+process.stdin.resume();
+process.stdin.on('end', () => {
+  for (const line of ${JSON.stringify(lines)}) process.stdout.write(JSON.stringify(line) + '\\n');
+});
+`);
+    expect(await spawnCliAgent('p', { adapter: 'claude-code', cliCommand: bin, cwd: dir,
+      onNativeToolEvent: () => { throw new Error('observer failed'); },
+    })).toBe('DONE');
+  });
+});
+
+describe('spawnCliAgent native Gemini', () => {
+  it('uses Gemini stream-json argv and emits native tool events independently of messages', async () => {
+    const argvOut = join(dir, 'argv-gemini-native.json');
+    const lines = [
+      { type: 'tool_use', tool_id: 'gem-native', tool_name: 'run_shell_command', parameters: { command: 'npm test' } },
+      { type: 'tool_result', tool_id: 'gem-native', status: 'success', output: 'PASS', exit_code: 0 },
+      { type: 'message', role: 'assistant', content: 'GEMINI_FINAL' },
+      { type: 'result', status: 'success' },
+    ];
+    const bin = makeFakeCli('fake-gemini-native', `
+require('node:fs').writeFileSync(${JSON.stringify(argvOut)}, JSON.stringify(process.argv.slice(2)));
+process.stdin.resume();
+process.stdin.on('end', () => {
+  for (const line of ${JSON.stringify(lines)}) process.stdout.write(JSON.stringify(line) + '\\n');
+});
+`);
+    const events: SkillNativeToolEvent[] = [];
+    expect(await spawnCliAgent('request', { adapter: 'gemini', cliCommand: bin, cwd: dir, permission: 'full',
+      runId: 'gem-run', onNativeToolEvent: (event) => events.push(event) })).toBe('GEMINI_FINAL');
+    const argv: string[] = JSON.parse(readFileSync(argvOut, 'utf8'));
+    expect(argv).toContain('--output-format');
+    expect(argv).toContain('stream-json');
+    expect(argv).toContain('--approval-mode');
+    expect(argv[argv.indexOf('--approval-mode') + 1]).toBe('yolo');
+    expect(argv).not.toContain('--dangerously-skip-permissions');
+    expect(argv).not.toContain('--add-dir');
+    expect(events).toHaveLength(2);
+    expect(events[1]).toMatchObject({ runId: 'gem-run', toolCallId: 'gem-native', phase: 'end', provenance: 'native-tool', exitCode: 0 });
+  });
+});
+
 describe('spawnCliAgent (codex argv)', () => {
   // Fake codex: dump argv, read stdin, write the final message to the -o sidecar
   // file, then exit. Exercises the codex exec argv + sidecar result path.
@@ -449,6 +558,37 @@ process.stdin.on('end', () => {
       if (previousUgsHome == null) delete process.env.UGS_HOME;
       else process.env.UGS_HOME = previousUgsHome;
     }
+  });
+  it('overrides only a named provider the config actually declares', () => {
+    const relay = [
+      'model_provider = "relay"',
+      'model = "gpt-6-astra"',
+      '[mcp_servers.ue]',
+      'command = "ue-mcp.exe"',
+      '[model_providers.relay]',
+      'name = "packycode"',
+      'base_url = "https://api.packycode.com/v1"',
+      'wire_api = "responses"',
+      'requires_openai_auth = true',
+      '',
+    ].join('\n');
+    expect(codexProviderForCredentialOverride(relay)).toBe('relay');
+
+    // The provider table must exist: `-c model_providers.<p>.env_key=…` aimed at
+    // a provider codex cannot resolve would break the turn outright.
+    expect(codexProviderForCredentialOverride('model_provider = "ghost"\n')).toBeNull();
+    // Default routing takes the plain OPENAI_API_KEY overlay instead.
+    expect(codexProviderForCredentialOverride('model_provider = "openai"\n')).toBeNull();
+    expect(codexProviderForCredentialOverride('model = "gpt-5.1"\n')).toBeNull();
+  });
+
+  it('routes the channel key through a stable UGS-owned env var', () => {
+    // The `-c` override and the exported variable must agree, and the name must
+    // be UGS-owned so it can never collide with a user's own key variable.
+    expect(CODEX_CHANNEL_KEY_ENV).toBe('UGS_CODEX_CHANNEL_KEY');
+    expect(`model_providers.relay.env_key="${CODEX_CHANNEL_KEY_ENV}"`).toBe(
+      'model_providers.relay.env_key="UGS_CODEX_CHANNEL_KEY"',
+    );
   });
 });
 

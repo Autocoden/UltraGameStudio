@@ -18,6 +18,12 @@
 
 export type ToolStatus = 'running' | 'done' | 'error';
 
+/** Native task bookkeeping has its own composer disclosure. */
+export function isChatTaskTool(name: string): boolean {
+  const normalized = name.split(/[:./]/).at(-1)!.replace(/[_-]/g, '').toLowerCase();
+  return ['updateplan', 'todowrite', 'todolist', 'todo', 'plan', 'taskcreate', 'taskupdate', 'tasklist'].includes(normalized);
+}
+
 export interface ToolEvent {
   /** Stable id correlating the start patch with its completion patch. */
   id: string;
@@ -27,6 +33,8 @@ export interface ToolEvent {
   subject?: string;
   /** Raw arguments object (pretty-printed in the expanded card). */
   args?: unknown;
+  /** Compact native file changes, captured before large arguments are clipped. */
+  fileChanges?: import('@/lib/turnFileChanges').TurnFileChange[];
   status: ToolStatus;
   /** Result/output body once the call finishes. */
   result?: string;
@@ -36,6 +44,10 @@ export interface ToolEvent {
   truncated?: boolean;
   /** Parent tool id for nested sub-agent (task) calls. */
   parentId?: string;
+  /** Origin of this patch; UI finalization is never native evidence. */
+  provenance?: import('@/runtime/skills/types').SkillEvidenceProvenance;
+  /** Native exit status only when explicitly present in the source event. */
+  exitCode?: number | null;
   /** Transient runtime status; render live but do not persist into final answers. */
   ephemeral?: boolean;
 }
@@ -327,6 +339,7 @@ export function closeDanglingToolPatches(text: string): string {
     encodeToolPatch({
       id: event.id,
       status: 'error',
+      provenance: 'ui-synthetic',
       result: '本轮已结束，未收到该工具调用的完成事件（可能被中断或超时）。',
     }),
   );

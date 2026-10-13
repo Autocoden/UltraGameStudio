@@ -193,4 +193,94 @@ describe('completeOpenAICompatible', () => {
       }),
     ).resolves.toBe('JSON标题');
   });
+
+  it('sends reasoning_effort for the selected thinking level', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => mockOpenAIStream('ok'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await completeOpenAICompatible({
+      route: {
+        selection: {
+          adapter: 'deepseek-harness',
+          modelClass: 'deepseek-v4-pro',
+          thinkingLevel: 'max',
+        },
+        adapter: 'deepseek-harness',
+        modelClass: 'deepseek-v4-pro',
+        model: 'deepseek-v4-pro',
+        transport: 'openai-compatible',
+        mode: 'direct',
+        apiKey: 'test-key',
+        baseUrl: 'https://gateway.example.com/v1',
+        label: 'Gateway',
+        source: 'global',
+      },
+      system: 's',
+      userContent: 'hello',
+    });
+
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+    expect(body.reasoning_effort).toBe('max');
+    expect(body.thinking).toBeUndefined();
+  });
+
+  it('maps "thinking off" to the family-specific disabled field', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => mockOpenAIStream('ok'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await completeOpenAICompatible({
+      route: {
+        selection: {
+          adapter: 'deepseek-harness',
+          modelClass: 'deepseek-v4-pro',
+          thinkingLevel: 'off',
+        },
+        adapter: 'deepseek-harness',
+        modelClass: 'deepseek-v4-pro',
+        model: 'deepseek-v4-pro',
+        transport: 'openai-compatible',
+        mode: 'direct',
+        apiKey: 'test-key',
+        baseUrl: 'https://gateway.example.com/v1',
+        label: 'Gateway',
+        source: 'global',
+      },
+      system: 's',
+      userContent: 'hello',
+    });
+
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+    // DeepSeek 系端点关闭思考是 thinking.type=disabled，而不是 reasoning_effort。
+    expect(body.thinking).toEqual({ type: 'disabled' });
+    expect(body.reasoning_effort).toBeUndefined();
+  });
+
+  it('adds no thinking field when no level is selected', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => mockOpenAIStream('ok'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await completeOpenAICompatible({
+      route: {
+        selection: { adapter: 'deepseek-harness', modelClass: 'deepseek-v4-pro' },
+        adapter: 'deepseek-harness',
+        modelClass: 'deepseek-v4-pro',
+        model: 'deepseek-v4-pro',
+        transport: 'openai-compatible',
+        mode: 'direct',
+        apiKey: 'test-key',
+        baseUrl: 'https://gateway.example.com/v1',
+        label: 'Gateway',
+        source: 'global',
+      },
+      system: 's',
+      userContent: 'hello',
+    });
+
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+    expect(body.reasoning_effort).toBeUndefined();
+    expect(body.thinking).toBeUndefined();
+  });
 });

@@ -203,7 +203,7 @@ export function EditableModelSelect({
                   onClick={() => remove(model)}
                   title={t(locale, 'settings.models.delete')}
                   aria-label={t(locale, 'settings.models.delete')}
-                  className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-fg-faint transition-colors hover:bg-rose-500/15 hover:text-rose-300"
+                  className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-fg-faint transition-colors hover:bg-status-error/15 hover:text-status-error"
                 >
                   <X size={12} strokeWidth={2.4} />
                 </button>
@@ -226,7 +226,7 @@ export function EditableModelSelect({
       )}
 
       {error && (
-        <p className="text-[11px] leading-relaxed text-amber-300">{error}</p>
+        <p className="text-[11px] leading-relaxed text-status-warning">{error}</p>
       )}
     </label>
   );

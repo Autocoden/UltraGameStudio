@@ -1,7 +1,10 @@
-import type { IRGraph } from "@/core/ir";
-import type { WorkspaceDirectoryListing } from "@ugs/protocol";
-import type { TaskIDEId, TaskTerminalId } from "@/lib/taskDeveloperTools";
-import { runShellPayload } from "@/lib/shellConfig";
+import type { IRGraph } from '@/core/ir';
+import type { TaskIDEId, TaskTerminalId } from '@/lib/taskDeveloperTools';
+import type { SkillLearningConfig, SkillNativeToolEvent, SkillOrigin } from '@/runtime/skills/types';
+import type {
+  WorkspaceDirectoryListing,
+} from '@ugs/protocol';
+import { runShellPayload } from '@/lib/shellConfig';
 import {
   markAssetDone,
   markDownloadDone,
@@ -202,12 +205,37 @@ export interface LocalModelHardware {
 export interface LocalFilePreview {
   path: string;
   fileName: string;
-  kind: "text" | "image" | "video" | "binary" | "document";
+  kind: 'text' | 'image' | 'video' | 'binary' | 'document' | 'office';
   mime?: string | null;
   sizeBytes: number;
   truncated: boolean;
   text?: string | null;
   base64?: string | null;
+  /** Absolute path to hand to `convertFileSrc` when the preview streams the
+   *  file itself instead of inlining bytes (image / video / PDF / Office / HTML).
+   *  Absent only for small inline payloads such as SVG. */
+  streamPath?: string | null;
+  /** Slide (PPTX) or sheet (XLSX) count for paged formats. */
+  pageCount?: number | null;
+}
+
+export interface OfficePreviewPage {
+  index: number;
+  html: string;
+}
+
+export interface OfficePreview {
+  kind: string;
+  pageCount: number;
+  pages: OfficePreviewPage[];
+  truncated: boolean;
+}
+
+export interface ImageThumbnail {
+  base64: string;
+  mime: string;
+  width: number;
+  height: number;
 }
 
 export interface KnowledgeBaseScanSource {
@@ -834,6 +862,14 @@ export async function aiEditGraph(
  * stdout (the assistant reply). Throws Error('NO_BACKEND') outside the desktop
  * shell (the browser cannot spawn processes).
  */
+export interface NativeCliSkillToolsOptions {
+  /** Frozen persisted source message, distinct from this CLI child run. */
+  source: SkillOrigin;
+  config: Pick<SkillLearningConfig, 'enabled' | 'mode'>;
+  /** Failed persistence never grants native filesystem authority. */
+  ready?: Promise<void>;
+}
+
 export interface CliOpts {
   /** Model tier for the CLI (`--model`), e.g. 'haiku' | 'sonnet' | 'opus'. */
   model?: string;
@@ -859,6 +895,11 @@ export interface CliOpts {
   onProgress?: (text: string) => void;
   /** Raw model usage payload emitted by supported CLI adapters. */
   onUsage?: (usage: unknown) => void;
+  /** Independent, bounded native-tool evidence; never parsed from UI text. */
+  onTool?: (event: SkillNativeToolEvent) => void;
+  /** Foreground-only scoped Rust skill tools; never a review capsule. */
+  skillTools?: NativeCliSkillToolsOptions;
+  signal?: AbortSignal;
   /**
    * Claude session id for context continuity (claude adapter only). With
    * `resume: false` the call creates this session; with `resume: true` it
@@ -943,6 +984,25 @@ export async function aiEditViaCli(
   }
   __cliSeq += 1;
   const runId = opts.runId ?? `cli_${Date.now()}_${__cliSeq}`;
+  const skillTools = opts.skillTools ? {
+    source: { ...opts.skillTools.source }, enabled: opts.skillTools.config.enabled,
+    mode: opts.skillTools.config.mode,
+  } : null;
+  const skillReady = opts.skillTools?.ready;
+
+  /** Raw native identity stays distinct from the frontend invocation correlation. */
+  type NativeCliEnvelope = SkillNativeToolEvent & {
+    requestRunId?: string;
+    sourceOrigin?: SkillOrigin;
+  };
+  const matchesNativeEvent = (event: NativeCliEnvelope): boolean => {
+    if (event.requestRunId !== undefined) {
+      if (!skillTools || event.requestRunId !== runId || !event.sourceOrigin) return false;
+      return (['hostId', 'workspaceId', 'sessionId', 'turnId', 'runId', 'cwd'] as const)
+        .every((key) => event.sourceOrigin![key] === skillTools.source[key]);
+    }
+    return event.runId === runId;
+  };
 
   // Subscribe to per-run progress events (best-effort; the final result is
   // returned regardless of whether any progress chunks arrive).
@@ -951,50 +1011,73 @@ export async function aiEditViaCli(
   const progressBatcher = opts.onProgress
     ? createProgressBatcher(opts.onProgress)
     : null;
-  if (opts.onProgress || opts.onUsage) {
-    try {
-      const listen = await getListen();
-      if (progressBatcher) {
-        try {
-          unlisteners.push(
-            await listen<{ runId: string; text: string }>(
-              "ai-cli-progress",
-              (event) => {
-                if (event.payload?.runId === runId) {
-                  progressBatcher.push(event.payload.text);
-                }
-              },
-            ),
-          );
-        } catch {
-          // Streaming events are optional; the command result remains usable.
-        }
-      }
-      if (opts.onUsage) {
-        try {
-          unlisteners.push(
-            await listen<{ runId: string; usage: unknown }>(
-              "ai-cli-usage",
-              (event) => {
-                if (event.payload?.runId === runId) {
-                  usageSeen = true;
-                  opts.onUsage!(event.payload.usage);
-                }
-              },
-            ),
-          );
-        } catch {
-          // Usage is also returned with the final command result when available.
-        }
-      }
-    } catch {
-      // Event APIs may be unavailable even when command IPC is healthy.
-    }
-  }
-
+  let cancelDispatched: (() => void) | undefined;
+  let nativeDispatched = false;
+  let cancelledNative = false;
   try {
+    if (opts.signal?.aborted) throw new DOMException('The operation was aborted.', 'AbortError');
+    if (skillTools) await waitForHttpBudget(() => Promise.resolve(skillReady), opts.signal, undefined);
+    if (opts.onProgress || opts.onUsage || opts.onTool) {
+      try {
+        const listen = await getListen();
+        if (progressBatcher) {
+          try {
+            unlisteners.push(
+              await listen<{ runId: string; text: string }>(
+                'ai-cli-progress',
+                (event) => {
+                  if (event.payload?.runId === runId) {
+                    progressBatcher.push(event.payload.text);
+                  }
+                },
+              ),
+            );
+          } catch {
+            // Streaming events are optional; the command result remains usable.
+          }
+        }
+        if (opts.onUsage) {
+          try {
+            unlisteners.push(
+              await listen<{ runId: string; usage: unknown }>(
+                'ai-cli-usage',
+                (event) => {
+                  if (event.payload?.runId === runId) {
+                    usageSeen = true;
+                    opts.onUsage!(event.payload.usage);
+                  }
+                },
+              ),
+            );
+          } catch {
+            // Usage is also returned with the final command result when available.
+          }
+        }
+        if (opts.onTool) {
+          unlisteners.push(
+            await listen<NativeCliEnvelope>('ugs-cli-tool', (event) => {
+              if (event.payload && matchesNativeEvent(event.payload)) opts.onTool!(event.payload);
+            }),
+          );
+        }
+      } catch (error) {
+        // Requested native evidence must be observable before granting tool authority.
+        if (opts.onTool) throw error;
+      }
+    }
+
     const invoke = await getInvoke();
-    const result = await invoke<string | AiCliResult>("ai_cli", {
+    cancelDispatched = () => {
+      if (!nativeDispatched || cancelledNative) return;
+      cancelledNative = true;
+      // Rust revokes the scoped dispatcher before killing its child. The IPC
+      // call can reject during shutdown; cancellation must still settle JS.
+      try { void invoke('cancel_ai_cli', { runId }).catch(() => {}); } catch { /* best effort */ }
+    };
+    opts.signal?.addEventListener('abort', cancelDispatched, { once: true });
+    const result = await waitForHttpBudget(() => {
+      nativeDispatched = true;
+      return invoke<string | AiCliResult>('ai_cli', {
       prompt,
       adapter,
       cliCommand: opts.cliCommand ?? null,
@@ -1007,11 +1090,13 @@ export async function aiEditViaCli(
       timeoutSeconds: opts.timeoutSeconds ?? null,
       idleTimeoutSeconds: opts.idleTimeoutSeconds ?? null,
       runId,
+      skillTools,
       sessionId: opts.sessionId ?? null,
       resume: opts.resume ?? null,
       languageDirective: opts.languageDirective ?? null,
       shell: runShellPayload(),
-    });
+      });
+    }, opts.signal, undefined);
     if (isAiCliResult(result)) {
       if (result.usage != null && !usageSeen) {
         usageSeen = true;
@@ -1021,6 +1106,7 @@ export async function aiEditViaCli(
     }
     return result;
   } finally {
+    if (cancelDispatched) opts.signal?.removeEventListener('abort', cancelDispatched);
     try {
       progressBatcher?.flush();
     } finally {
@@ -2145,6 +2231,40 @@ export async function previewLocalFile(
   });
 }
 
+/** Paged read of a PPTX/XLSX. Only the leading `maxPages` slides/sheets are
+ *  parsed, so preview cost stays flat regardless of document length. */
+export async function previewOfficeDocument(
+  path: string,
+  opts?: { cwd?: string; maxPages?: number },
+): Promise<OfficePreview> {
+  if (!tauriAvailable()) {
+    throw new Error('NO_BACKEND');
+  }
+  const invoke = await getInvoke();
+  return invoke<OfficePreview>('preview_office_document', {
+    path,
+    cwd: opts?.cwd ?? null,
+    maxPages: opts?.maxPages ?? null,
+  });
+}
+
+/** Downscaled JPEG for chat thumbnails. Decoding stops at `maxEdge` pixels, so
+ *  a multi-megabyte screenshot never reaches the renderer at full size. */
+export async function readImageThumbnail(
+  path: string,
+  opts?: { cwd?: string; maxEdge?: number },
+): Promise<ImageThumbnail> {
+  if (!tauriAvailable()) {
+    throw new Error('NO_BACKEND');
+  }
+  const invoke = await getInvoke();
+  return invoke<ImageThumbnail>('read_image_thumbnail', {
+    path,
+    cwd: opts?.cwd ?? null,
+    maxEdge: opts?.maxEdge ?? null,
+  });
+}
+
 /** Check whether a local file exists. Desktop-only; mirrors preview_local_file
  *  path resolution (including cwd fallbacks) but is lightweight because it
  *  only stats the file. Uses the Rust backend so it is not restricted by the
@@ -3155,16 +3275,133 @@ function base64ToBytes(base64: string): Uint8Array {
   return bytes;
 }
 
+/** Optional hard limits; omitted options retain ordinary fetch semantics. */
+export interface TauriFetchOptions {
+  timeoutMs?: number;
+  maxResponseBytes?: number;
+}
+
+async function nativeFetchWithBudget(
+  input: string | URL | Request,
+  init: RequestInit | undefined,
+  timeoutMs: number | undefined,
+  maxResponseBytes: number | undefined,
+  startedAt: number,
+): Promise<Response> {
+  const deadline = timeoutMs !== undefined ? startedAt + timeoutMs : undefined;
+  const preparedInit = { ...init };
+  const sourceSignal = preparedInit.signal ?? (input instanceof Request ? input.signal : undefined);
+  if (sourceSignal?.aborted) throw new DOMException('The operation was aborted.', 'AbortError');
+  if (deadline !== undefined && performance.now() >= deadline) {
+    throw new DOMException('HTTP_TIMEOUT: hard budget exhausted', 'TimeoutError');
+  }
+  const controller = new AbortController();
+  let rejectCancelled!: (reason: unknown) => void;
+  const cancelled = new Promise<never>((_, reject) => { rejectCancelled = reject; });
+  const abort = (reason: DOMException) => {
+    controller.abort(reason);
+    rejectCancelled(reason);
+  };
+  const onAbort = () => abort(new DOMException('The operation was aborted.', 'AbortError'));
+  sourceSignal?.addEventListener('abort', onAbort, { once: true });
+  const timer = deadline !== undefined
+    ? setTimeout(() => abort(new DOMException('HTTP_TIMEOUT: hard budget exhausted', 'TimeoutError')),
+      Math.max(0, deadline - performance.now()))
+    : undefined;
+  try {
+    const response = await Promise.race([cancelled, (async () => {
+      const upstream = await fetch(input as RequestInfo, { ...preparedInit, signal: controller.signal });
+      const chunks: Uint8Array[] = [];
+      let length = 0;
+      const reader = upstream.body?.getReader();
+      if (reader) {
+        try {
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            length += value.byteLength;
+            if (maxResponseBytes !== undefined && length > maxResponseBytes) {
+              controller.abort();
+              void reader.cancel().catch(() => {});
+              throw new Error(`HTTP_RESPONSE_TOO_LARGE: response exceeds ${maxResponseBytes} bytes`);
+            }
+            chunks.push(value);
+          }
+        } finally {
+          reader.releaseLock();
+        }
+      }
+      const bytes = new Uint8Array(length);
+      let offset = 0;
+      for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+      const noBody = !upstream.body || upstream.status === 204 || upstream.status === 205 || upstream.status === 304;
+      const buffered = new Response(noBody ? null : bytes, {
+        status: upstream.status, statusText: upstream.statusText, headers: upstream.headers,
+      });
+      Object.defineProperty(buffered, 'url', { value: upstream.url });
+      return buffered;
+    })()]);
+    if (sourceSignal?.aborted) throw new DOMException('The operation was aborted.', 'AbortError');
+    if (deadline !== undefined && performance.now() >= deadline) {
+      throw new DOMException('HTTP_TIMEOUT: hard budget exhausted', 'TimeoutError');
+    }
+    return response;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    sourceSignal?.removeEventListener('abort', onAbort);
+  }
+}
+
+async function waitForHttpBudget<T>(
+  run: () => Promise<T>,
+  signal: AbortSignal | undefined,
+  deadline: number | undefined,
+): Promise<T> {
+  const assertActive = () => {
+    if (signal?.aborted) throw new DOMException('The operation was aborted.', 'AbortError');
+    if (deadline !== undefined && performance.now() >= deadline) {
+      throw new DOMException('HTTP_TIMEOUT: hard budget exhausted', 'TimeoutError');
+    }
+  };
+  assertActive();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: (() => void) | undefined;
+  const cancelled = new Promise<never>((_, reject) => {
+    onAbort = () => reject(new DOMException('The operation was aborted.', 'AbortError'));
+    signal?.addEventListener('abort', onAbort, { once: true });
+    if (deadline !== undefined) {
+      timer = setTimeout(() => reject(new DOMException('HTTP_TIMEOUT: hard budget exhausted', 'TimeoutError')),
+        Math.max(0, deadline - performance.now()));
+    }
+  });
+  try {
+    const result = await Promise.race([cancelled, run()]);
+    assertActive();
+    return result;
+  } finally {
+    if (onAbort) signal?.removeEventListener('abort', onAbort);
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 /** `fetch`-compatible request that bypasses WebView CORS when in the desktop shell. */
 export async function tauriFetch(
   input: string | URL | Request,
   init?: RequestInit,
+  options?: TauriFetchOptions,
 ): Promise<Response> {
+  const startedAt = performance.now();
+  if ((options?.timeoutMs !== undefined && (!Number.isFinite(options.timeoutMs) || options.timeoutMs <= 0 || options.timeoutMs > 1800000)) ||
+    (options?.maxResponseBytes !== undefined && (!Number.isSafeInteger(options.maxResponseBytes) || options.maxResponseBytes < 0))) {
+    throw new Error('HTTP_INVALID_BUDGET: invalid timeout or response byte limit');
+  }
   if (!tauriAvailable()) {
-    return fetch(input as RequestInfo, init);
+    return options?.timeoutMs !== undefined || options?.maxResponseBytes !== undefined
+      ? nativeFetchWithBudget(input, init, options.timeoutMs, options.maxResponseBytes, startedAt)
+      : fetch(input as RequestInfo, init);
   }
 
-  // Only Request/string/URL inputs are used by our call sites. Merge a Request's
+  // Only Request/string/URL inputs are used by our call sites.
   // own fields with the explicit init (init wins, matching fetch()).
   const reqObj = input instanceof Request ? input : null;
   const url = reqObj
@@ -3177,7 +3414,9 @@ export async function tauriFetch(
   // local or same-origin and must go through the native fetch (the Rust proxy
   // only understands http/https). This keeps the wrapper a safe drop-in.
   if (!/^https?:\/\//i.test(url)) {
-    return fetch(input as RequestInfo, init);
+    return options?.timeoutMs !== undefined || options?.maxResponseBytes !== undefined
+      ? nativeFetchWithBudget(input, init, options.timeoutMs, options.maxResponseBytes, startedAt)
+      : fetch(input as RequestInfo, init);
   }
   const method = (init?.method ?? reqObj?.method ?? "GET").toUpperCase();
   const signal = init?.signal ?? reqObj?.signal ?? undefined;
@@ -3186,33 +3425,29 @@ export async function tauriFetch(
     throw new DOMException("The operation was aborted.", "AbortError");
   }
 
-  const headers = normalizeHeaders(
-    init?.headers ?? reqObj?.headers ?? undefined,
-  );
-  const bodyBase64 = await bodyInitToBase64(init?.body ?? undefined);
-
-  const invoke = await getInvoke();
-  const call = invoke<ProxyHttpResponsePayload>("proxy_http", {
-    request: { method, url, headers, bodyBase64 },
-  });
-
-  // Bridge AbortSignal to a rejected promise; the Rust side still runs to
-  // completion but the caller sees the same AbortError as native fetch.
-  const payload = await (signal
-    ? Promise.race([
-        call,
-        new Promise<never>((_, reject) => {
-          signal.addEventListener(
-            "abort",
-            () =>
-              reject(
-                new DOMException("The operation was aborted.", "AbortError"),
-              ),
-            { once: true },
-          );
-        }),
-      ])
-    : call);
+  const headers = normalizeHeaders(init?.headers ?? reqObj?.headers ?? undefined);
+  const deadline = options?.timeoutMs !== undefined ? startedAt + options.timeoutMs : undefined;
+  const bodyBase64 = await waitForHttpBudget(() => bodyInitToBase64(init?.body ?? undefined), signal, deadline);
+  const invoke = await waitForHttpBudget(getInvoke, signal, deadline);
+  if (signal?.aborted) throw new DOMException('The operation was aborted.', 'AbortError');
+  if (options?.timeoutMs !== undefined && performance.now() - startedAt >= options.timeoutMs) {
+    throw new DOMException('HTTP_TIMEOUT: hard budget exhausted', 'TimeoutError');
+  }
+  // Cancellation stops JS waiting, not Rust I/O; the remaining per-call timeout bounds that I/O.
+  // Install the abort listener before dispatch to avoid losing an abort during invoke().
+  const payload = await waitForHttpBudget(() => {
+    const timeoutMs = deadline !== undefined ? Math.floor(deadline - performance.now()) : undefined;
+    if (timeoutMs !== undefined && timeoutMs < 1) {
+      throw new DOMException('HTTP_TIMEOUT: hard budget exhausted', 'TimeoutError');
+    }
+    return invoke<ProxyHttpResponsePayload>('proxy_http', {
+      request: {
+        method, url, headers, bodyBase64,
+        ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+        ...(options?.maxResponseBytes !== undefined ? { maxResponseBytes: options.maxResponseBytes } : {}),
+      },
+    });
+  }, signal, deadline);
 
   const responseHeaders = new Headers();
   for (const { name, value } of payload.headers) {
@@ -3222,7 +3457,19 @@ export async function tauriFetch(
       // Skip forbidden/invalid header names rather than failing the response.
     }
   }
+  if (options?.maxResponseBytes !== undefined) {
+    // Rust emits canonical padded base64. Reject an oversized IPC payload before atob allocates it.
+    const encoded = payload.bodyBase64;
+    const padding = encoded.endsWith('==') ? 2 : encoded.endsWith('=') ? 1 : 0;
+    const decodedLength = Math.floor(encoded.length * 3 / 4) - padding;
+    if (decodedLength > options.maxResponseBytes) {
+      throw new Error(`HTTP_RESPONSE_TOO_LARGE: response exceeds ${options.maxResponseBytes} bytes`);
+    }
+  }
   const bodyBytes = base64ToBytes(payload.bodyBase64);
+  if (options?.maxResponseBytes !== undefined && bodyBytes.byteLength > options.maxResponseBytes) {
+    throw new Error(`HTTP_RESPONSE_TOO_LARGE: response exceeds ${options.maxResponseBytes} bytes`);
+  }
   // 204/205/304 must not carry a body per the Response constructor contract.
   const nullBody =
     payload.status === 204 || payload.status === 205 || payload.status === 304;
@@ -3239,6 +3486,10 @@ export async function tauriFetch(
     Object.defineProperty(response, "url", { value: payload.url || url });
   } catch {
     // Non-fatal: some engines lock the property. Callers rarely need it.
+  }
+  if (signal?.aborted) throw new DOMException('The operation was aborted.', 'AbortError');
+  if (deadline !== undefined && performance.now() >= deadline) {
+    throw new DOMException('HTTP_TIMEOUT: hard budget exhausted', 'TimeoutError');
   }
   return response;
 }

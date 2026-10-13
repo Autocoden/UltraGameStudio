@@ -72,6 +72,26 @@ test('ignores host-level config outside the project and dedupes', async () => {
   }
 });
 
+test('legacy slash scanning includes managed skills and propagates stable identity plus changed revision', async () => {
+  const dir = await makeWorkspace();
+  try {
+    await mkdir(join(dir, '.ultragamestudio', 'skills', 'managed-check'), { recursive: true });
+    const path = join(dir, '.ultragamestudio', 'skills', 'managed-check', 'SKILL.md');
+    await writeFile(path, '---\nname: managed-check\ndescription: "Use when a YAML colon: appears."\n---\n# Managed\n');
+    const first = await listWorkspaceSkills({ dir, hostId: 'ugs-remote-runner', workspaceId: 'p' });
+    const entry = first.entries.find((e) => e.name === '/managed-check');
+    assert.ok(entry);
+    assert.match(entry.skillId, /^skill:/);
+    assert.match(entry.revision, /^[a-f0-9]{64}$/);
+    assert.equal(entry.detail['en-US'], 'Use when a YAML colon: appears.');
+    await writeFile(path, '---\nname: managed-check\ndescription: Use when changed text must remain visible.\n---\n# Managed\n');
+    const changed = (await listWorkspaceSkills({ dir, hostId: 'ugs-remote-runner', workspaceId: 'p' })).entries.find((e) => e.name === '/managed-check');
+    assert.equal(changed.id, entry.id);
+    assert.equal(changed.skillId, entry.skillId);
+    assert.notEqual(changed.revision, entry.revision);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
 test('returns empty snapshot for missing dir', async () => {
   const snapshot = await listWorkspaceSkills({ dir: join(tmpdir(), 'does-not-exist-ugs') });
   assert.equal(snapshot.ready, true);

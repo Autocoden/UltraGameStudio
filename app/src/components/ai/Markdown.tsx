@@ -4,6 +4,7 @@ import {
   useRef,
   isValidElement,
   cloneElement,
+  type MouseEvent as ReactMouseEvent,
   type ReactElement,
   type ReactNode,
 } from 'react';
@@ -28,6 +29,7 @@ import {
   detectDetailsTitle,
 } from './lib/htmlDetails';
 import { scanFileRefs } from './lib/fileScan';
+import { parseFileRef } from './lib/filePath';
 import { parseToolLine } from './lib/toolLine';
 import CodeBlock from './CodeBlock';
 import DetailsBlock from './DetailsBlock';
@@ -38,9 +40,12 @@ import Callout from './Callout';
 import { detectCallout, stripCalloutMarker } from './lib/callout';
 import {
   FileChipLimitNotice,
+  FoldedFileChip,
   VisibleFileChip,
   type OpenFileFn,
 } from './FileChip';
+import type { FileActionItem } from './FileActionsMenu';
+import { useFileActionsMenu } from './useFileActionsMenu';
 import { claimFileChipSlot, useFileChipBudget } from './lib/fileChipBudget';
 import { isModelUrl } from './lib/modelLink';
 import { createImagePreviewRef } from './lib/imagePreview';
@@ -48,6 +53,90 @@ import {
   highlightSearchMarks,
   type SearchHighlightState,
 } from './lib/searchHighlight';
+import { Eye, FolderOpen, FolderTree } from 'lucide-react';
+import { useStore } from '@/store/useStore';
+import { t } from '@/lib/i18n';
+
+const imageMenuIconClass = 'shrink-0 text-fg-faint';
+
+/**
+ * A markdown image is a clickable file reference too: `![](E:\…\shot.png)` is
+ * exactly how pasted and generated images reach the transcript. Right-clicking
+ * it offers the same "open containing folder" / "reveal in folder" actions as a
+ * file chip, so the image can be located on disk without opening the preview
+ * drawer first. Remote and data: sources have no folder to jump to, so they
+ * keep only the preview action.
+ */
+function MarkdownImage({
+  source,
+  alt,
+  onOpenFile,
+}: {
+  source: string;
+  alt: string;
+  onOpenFile?: OpenFileFn;
+}) {
+  const locale = useStore((s) => s.locale);
+  const { open, element } = useFileActionsMenu();
+
+  const image = (
+    <img
+      src={source}
+      alt={alt}
+      loading="lazy"
+      className="ai-generated-image"
+    />
+  );
+  if (!source || !onOpenFile) return image;
+
+  const previewRef = createImagePreviewRef(source, alt || undefined);
+  const localFile = !/^(?:https?:\/\/|data:)/i.test(source);
+
+  const openContextMenu = (event: ReactMouseEvent<HTMLButtonElement>) => {
+    const items: FileActionItem[] = [
+      {
+        key: 'preview-in-app',
+        label: t(locale, 'chat.previewInApp'),
+        icon: <Eye size={13} className={imageMenuIconClass} />,
+        onSelect: () => void onOpenFile(previewRef),
+      },
+    ];
+    if (localFile) {
+      items.push(
+        {
+          key: 'open-containing-folder',
+          label: t(locale, 'chat.openContainingFolder'),
+          icon: <FolderTree size={13} className={imageMenuIconClass} />,
+          onSelect: () =>
+            void onOpenFile(previewRef, { openContainingFolder: true }),
+        },
+        {
+          key: 'reveal-in-folder',
+          label: t(locale, 'chat.reveal'),
+          icon: <FolderOpen size={13} className={imageMenuIconClass} />,
+          onSelect: () => void onOpenFile(previewRef, { reveal: true }),
+        },
+      );
+    }
+    open(event, items);
+  };
+
+  return (
+    <span className="relative inline-flex max-w-full align-baseline">
+      <button
+        type="button"
+        className="ai-generated-image-trigger"
+        data-file-preview-trigger="true"
+        title={`在右侧预览\n${t(locale, 'chat.revealHint')}`}
+        onClick={() => void onOpenFile(previewRef)}
+        onContextMenu={openContextMenu}
+      >
+        {image}
+      </button>
+      {element}
+    </span>
+  );
+}
 
 function markdownUrlTransform(url: string, key: string): string | null | undefined {
   if (
@@ -70,14 +159,10 @@ function markdownUrlTransform(url: string, key: string): string | null | undefin
   }
   if (key === 'href' && isModelUrl(url)) return url;
   if (key === 'href' && /^data:text\/plain;base64,/i.test(url)) return url;
-  // Windows drive-letter paths (E:\…) and UNC paths (\\host\…) look like
-  // unknown-protocol URLs to defaultUrlTransform, which sanitises them to
-  // "". When the AI wraps a clipboard-image path in a markdown link
-  // ([截图](E:\…\shot.png)) the href must survive so SmartLink can detect it
-  // as a local file reference and render a clickable FileChip.
-  // CommonMark percent-encodes backslashes in link destinations, so the URL
-  // arrives as "E:%5C…%5C…" rather than "E:\…\…". Match both forms.
-  if (key === 'href' && /^(?:[A-Za-z]:(?:[\\/]|%5[Cc])|\\\\)/.test(url)) return url;
+  // Preserve recognised local destinations (drive paths, /E:/..., file URLs,
+  // UNC, percent-encoded paths). SmartLink handles them through the file
+  // preview bridge instead of asking the webview to navigate to a file URL.
+  if (key === 'href' && parseFileRef(url, { allowSpaces: true })) return url;
   return defaultUrlTransform(url);
 }
 
@@ -215,7 +300,22 @@ function MarkdownImpl({
     if (slot === 'notice') {
       return { node: <FileChipLimitNotice key={key} />, hidden: false };
     }
-    if (slot === 'hidden') return { node: null, hidden: true };
+    if (slot === 'hidden') {
+      // 折叠只该省掉装饰，不该省掉可点击性：AI 交付物（生成的 HTML/MD 报告）
+      // 常常正是一条长回复里最靠后的那批引用，落到这里就变成不可点的死文本。
+      // 渲染为无装饰但仍可打开的链接，保证「AI 输出的文件路径都能点」。
+      return {
+        node: (
+          <FoldedFileChip
+            key={key}
+            refData={refData}
+            onOpenFile={onOpenFile}
+            cwd={cwd}
+          />
+        ),
+        hidden: false,
+      };
+    }
     return {
       node: (
         <VisibleFileChip
@@ -446,27 +546,13 @@ function MarkdownImpl({
       return <blockquote>{children}</blockquote>;
     },
     img: ({ src, alt }) => {
-      const image = (
-        <img
-          src={src}
-          alt={alt ?? ''}
-          loading="lazy"
-          className="ai-generated-image"
-        />
-      );
       const source = typeof src === 'string' ? src : '';
-      const openImage = ctxRef.current.onOpenFile;
-      if (!source || !openImage) return image;
-
       return (
-        <button
-          type="button"
-          className="ai-generated-image-trigger"
-          title="在右侧预览"
-          onClick={() => void openImage(createImagePreviewRef(source, alt ?? undefined))}
-        >
-          {image}
-        </button>
+        <MarkdownImage
+          source={source}
+          alt={alt ?? ''}
+          onOpenFile={ctxRef.current.onOpenFile}
+        />
       );
     },
   };

@@ -111,6 +111,9 @@ async function completeGatewayTextViaCli(
     idleTimeoutSeconds: request.idleTimeoutSeconds,
     runId: request.runId,
     onProgress: request.onDelta,
+    skillTools: request.skillTools,
+    signal: request.signal,
+    onTool: request.onToolEvent,
     onUsage: (rawUsage) => {
       const report = usageReportFromCliUsage(rawUsage);
       if (!report) return;

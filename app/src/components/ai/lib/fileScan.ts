@@ -72,18 +72,58 @@ export function scanFileRefs(text: string): FileScanPart[] {
     let core = run;
 
     // Prose glued onto an absolute path with no separating space lands the whole
-    // thing in one run (`看这个图片E:\…\shot.png`). An absolute anchor — a drive
-    // letter (`E:\`/`E:/`) or UNC prefix (`\\`) — marks a path start that can't
-    // have valid path content before it. When one appears mid-run AND the
-    // remainder parses as a file, split there and emit the prefix as plain text.
-    // Gating on a successful parse keeps URLs (`https://…`, whose `s://` also
-    // matches the drive shape) and other non-paths from being fragmented.
+    // thing in one run (`看这个图片E:\…\shot.png` or `图片E:\…\pasted-….png这样`).
+    // An absolute anchor — a drive letter (`E:\`/`E:/`) or UNC prefix (`\\`) —
+    // marks a path start that can't have valid path content before it. When one
+    // appears mid-run we split there and emit the prefix as plain text. The
+    // remainder may ALSO carry trailing prose glued after the extension (`…png这样`),
+    // which poisons the extension check inside parseFileRef; so we progressively
+    // trim trailing CJK/non-path chars from the candidate until it parses, and
+    // emit whatever we trimmed as trailing plain text. Gating on a successful
+    // parse keeps URLs (`https://…`, whose `s://` also matches the drive shape)
+    // and other non-paths from being fragmented.
     const anchor = core.search(EMBEDDED_ABS_ANCHOR);
-    if (anchor > 0 && parseFileRef(stripTrailingPunctuation(core.slice(anchor)).core)) {
-      pushText(text.slice(cursor, start + anchor));
-      cursor = start + anchor;
-      start += anchor;
-      core = run.slice(anchor);
+    if (anchor > 0) {
+      const candidate = core.slice(anchor);
+      // Walk the end of the candidate back over any trailing char that is not
+      // a plausible path continuation. We must allow trailing `.: digits` for
+      // line suffixes and backslashes for directory paths, so the stop set is
+      // the inverse: CJK letters (which PATH_RUN happily swallows into the run)
+      // plus obvious prose punctuation that can never be a filename character.
+      // We deliberately keep this narrower than "non-ASCII" so legitimate
+      // CJK basenames (`报告_v3.docx`) still parse in one shot.
+      let end = candidate.length;
+      while (end > 0) {
+        const ch = candidate[end - 1];
+        // CJK Unified Ideographs + extensions, Hiragana, Katakana, Hangul
+        // syllables. PATH_RUN happily swallows these into a run, but they can
+        // never appear in a Windows filename extension, so a run of them at
+        // the tail is prose glued after the path. We deliberately do NOT
+        // trim a broader "non-ASCII" set: legitimate CJK basenames such as
+        // `报告_v3.docx` keep their CJK chars in the middle of the basename
+        // and must still parse via the anchor split above.
+        if (/[぀-ヿ㐀-鿿豈-﫿가-힯]/.test(ch)) {
+          end--;
+          continue;
+        }
+        break;
+      }
+      const pathCandidate = candidate.slice(0, end);
+      const tailProse = candidate.slice(end);
+      const parsed = parseFileRef(stripTrailingPunctuation(pathCandidate).core);
+      if (parsed && pathCandidate.length > 1) {
+        pushText(text.slice(cursor, start + anchor));
+        cursor = start + anchor;
+        start += anchor;
+        // Push the parsed ref and any trailing prose we trimmed off. Advance
+        // the cursor past the entire original slice so the outer loop does not
+        // re-emit the tail.
+        pushText(text.slice(cursor, start));
+        out.push(parsed);
+        if (tailProse) pushText(tailProse);
+        cursor = start + candidate.length;
+        continue;
+      }
     }
 
     // Peel trailing sentence punctuation, but never strip a `:NN` line suffix.
@@ -97,6 +137,56 @@ export function scanFileRefs(text: string): FileScanPart[] {
       out.push(ref);
       if (trailing) pushText(trailing);
       cursor = start + core.length + trailing.length;
+      continue;
+    }
+
+    // Space-containing paths (common for AI-generated documents such as
+    // `UGS Game Analysis Report.md` or Chinese-named reports) break PATH_RUN at
+    // the first space, leaving the absolute-path prefix unparsed and only the
+    // last segment as a chip. When the current run ends at a space, try merging
+    // subsequent space-separated PATH_RUN matches until parseFileRef succeeds,
+    // so the whole path becomes one chip instead of a bare filename.
+    const afterRun = start + run.length;
+    if (
+      core.length > 1 &&
+      afterRun < text.length &&
+      text[afterRun] === ' ' &&
+      /[\\/]/.test(core) &&
+      !ref
+    ) {
+      let mergedEnd = afterRun;
+      let scanFrom = afterRun;
+      let mergedOk = false;
+      let attempts = 0;
+      const MAX_MERGE_ATTEMPTS = 10;
+      while (attempts < MAX_MERGE_ATTEMPTS && scanFrom < text.length) {
+        if (text[scanFrom] !== ' ') break;
+        // Look ahead for the next PATH_RUN match after this space
+        PATH_RUN.lastIndex = scanFrom;
+        const next = PATH_RUN.exec(text);
+        if (!next) break;
+        // If there's a gap between the space and the next match, stop merging
+        if (next.index > scanFrom + 1) break;
+        const merged = text.slice(start, next.index + next[0].length);
+        mergedEnd = next.index + next[0].length;
+        const mergedPeeled = stripTrailingPunctuation(merged);
+        const mergedRef = parseFileRef(mergedPeeled.core, { allowSpaces: true });
+        if (mergedRef) {
+          pushText(text.slice(cursor, start));
+          out.push(mergedRef);
+          if (mergedPeeled.trailing) pushText(mergedPeeled.trailing);
+          cursor = mergedEnd;
+          mergedOk = true;
+          break;
+        }
+        scanFrom = mergedEnd;
+        attempts++;
+      }
+      // Continue the outer scan after the merged ref on success, or after the
+      // original (failed) run so it stays in the pending plain-text span.
+      // Never reuse `cursor` here — it may still point at a previous ref.
+      PATH_RUN.lastIndex = mergedOk ? mergedEnd : afterRun;
+      continue;
     }
     // No match: leave the run in the pending plain-text span (flushed below).
   }

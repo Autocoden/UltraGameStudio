@@ -495,10 +495,14 @@ describe('AIDock pasted clipboard images', () => {
         '[data-testid="composer-file-refs"]',
       );
       expect(strip).not.toBeNull();
+      // Image refs render as a thumbnail-only tile: the path text is gone (it
+      // stays in the textarea), so the strip stays one horizontal row.
       expect(
         strip!.querySelectorAll('.ai-file-chip, .ai-file-chip-thumb'),
       ).toHaveLength(1);
       expect(strip!.querySelector('.ai-file-chip-thumb')).not.toBeNull();
+      expect(strip!.querySelector('.ai-file-chip')).toBeNull();
+      expect(strip!.textContent).toBe('');
       expect(strip!.textContent).not.toContain('App.tsx');
       expect(strip!.textContent).not.toContain('notes.txt');
     } finally {
@@ -537,6 +541,87 @@ describe('AIDock pasted clipboard images', () => {
         MESSAGE_FILE_CHIP_LIMIT,
       );
       expect(strip!.querySelectorAll('.ai-file-chip-limit')).toHaveLength(1);
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it('lays the composer image previews out in one horizontal, scrollable row', async () => {
+    resetStore();
+    const B = String.fromCharCode(92);
+    useStore.setState({
+      composerDraft: ['a', 'b', 'c']
+        .map(
+          (name) =>
+            `E:${B}UltraGameStudio${B}.ultragamestudio${B}clipboard-images${B}${name}.png`,
+        )
+        .join('\n'),
+    });
+    tauriMocks.previewLocalFile.mockResolvedValue({
+      path: 'E:\\UltraGameStudio\\.ultragamestudio\\clipboard-images\\a.png',
+      fileName: 'a.png',
+      kind: 'image',
+      mime: 'image/png',
+      sizeBytes: 3,
+      truncated: false,
+      text: null,
+      base64: 'AQID',
+    });
+    const view = await renderDock();
+
+    try {
+      const strip = view.container.querySelector<HTMLElement>(
+        '[data-testid="composer-file-refs"]',
+      );
+      expect(strip).not.toBeNull();
+      // Horizontal single row instead of a wrapping stack: three 56px tiles
+      // share one line, the row scrolls when it runs out of width.
+      expect(strip!.className).toContain('flex-nowrap');
+      expect(strip!.className).toContain('overflow-x-auto');
+      expect(strip!.querySelectorAll('.ai-file-chip-thumb')).toHaveLength(3);
+      expect(strip!.textContent).toBe('');
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it('removes the draft path when a composer image preview is deleted', async () => {
+    resetStore();
+    const imagePath =
+      'E:\\UltraGameStudio\\.ultragamestudio\\clipboard-images\\shot.png';
+    useStore.setState({
+      composerDraft: `\`${imagePath}\`\n看下这张图`,
+    });
+    tauriMocks.previewLocalFile.mockResolvedValue({
+      path: imagePath,
+      fileName: 'shot.png',
+      kind: 'image',
+      mime: 'image/png',
+      sizeBytes: 3,
+      truncated: false,
+      text: null,
+      base64: 'AQID',
+    });
+    const view = await renderDock();
+
+    try {
+      const strip = view.container.querySelector(
+        '[data-testid="composer-file-refs"]',
+      );
+      const remove = strip!.querySelector<HTMLButtonElement>(
+        'button[aria-label^="删除"]',
+      );
+      expect(remove).not.toBeNull();
+
+      await act(async () => {
+        remove!.click();
+        await flushAsync();
+      });
+
+      expect(useStore.getState().composerDraft).toBe('看下这张图');
+      expect(
+        view.container.querySelector('[data-testid="composer-file-refs"]'),
+      ).toBeNull();
     } finally {
       await view.cleanup();
     }

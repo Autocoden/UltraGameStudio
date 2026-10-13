@@ -16,6 +16,32 @@ import {
   remoteRunnerApiUrl,
 } from '../../packages/protocol/index.js';
 
+test('RunnerClient skillRequest uses the bound-project route and preserves the Rust wire result', async () => {
+  const protocol = await import('../../packages/protocol/index.js');
+  assert.equal(typeof protocol.matchRemoteRunnerProjectSkillServicePath, 'function');
+  assert.equal(REMOTE_RUNNER_API_PATHS.projectSkillService('proj 1'), '/projects/proj%201/skill-service');
+  assert.equal(protocol.matchRemoteRunnerProjectSkillServicePath('/projects/proj%201/skill-service'), 'proj 1');
+  assert.equal(protocol.matchRemoteRunnerProjectSkillServicePath('/projects/proj%2F1/skill-service'), null);
+  assert.equal(protocol.matchRemoteRunnerProjectSkillServicePath('/projects/proj_1/skill-service/manage'), null);
+  const original = globalThis.fetch;
+  const request = { action: 'list', origin: { hostId: 'ugs-remote-runner', workspaceId: 'proj 1', sessionId: 's', turnId: 't', runId: 'r' }, mode: 'auto-safe' };
+  const result = { revision: 'revision', entries: [] };
+  const calls = [];
+  globalThis.fetch = async (url, init) => { calls.push({ url, init }); return new Response(JSON.stringify({ ok: true, result }), { status: 200 }); };
+  try {
+    assert.deepEqual(await new RunnerClient('https://runner.test/', 'tok').skillRequest('proj 1', request), result);
+    assert.equal(calls[0].url, 'https://runner.test/projects/proj%201/skill-service');
+    assert.equal(calls[0].init.method, 'POST');
+    assert.equal(calls[0].init.headers.Authorization, 'Bearer tok');
+    assert.deepEqual(JSON.parse(calls[0].init.body), request);
+    assert.equal(calls[0].init.headers['x-ugs-skill-control'], undefined);
+    await new RunnerClient('https://runner.test/', 'tok').skillRequest('proj 1', request, { ownerControl: true, userInputEvidence: true });
+    assert.equal(calls[1].init.headers['x-ugs-skill-control'], 'owner');
+    assert.equal(calls[1].init.headers['x-ugs-skill-user-input'], 'correction');
+    assert.deepEqual(JSON.parse(calls[1].init.body), request, 'authority never enters the model/wire request body');
+  } finally { globalThis.fetch = original; }
+});
+
 test('protocol route constants and matchers stay symmetric', () => {
   assert.equal(remoteRunnerApiUrl('https://runner.test/', REMOTE_RUNNER_API_PATHS.health), 'https://runner.test/health');
   assert.equal(REMOTE_RUNNER_API_PATHS.authLogin, '/auth/login');

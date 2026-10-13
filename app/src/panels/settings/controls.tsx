@@ -140,7 +140,7 @@ export function SelectControl<T extends string>({
                       <li
                         role="presentation"
                         className={cn(
-                          'px-3 pb-1 pt-1.5 font-mono text-[9px] uppercase tracking-wider text-fg-faint',
+                          'px-3 pb-1 pt-1.5 text-[11px] font-semibold uppercase tracking-wide text-fg-faint',
                           index > 0 && 'mt-1 border-t border-border-soft',
                         )}
                       >
@@ -217,14 +217,14 @@ export function TextField({
         className={cn(
           'w-full rounded border border-border bg-bg px-2 py-1.5 text-xs text-fg outline-none transition-colors focus:border-accent',
           mono && 'font-mono',
-          error && 'border-rose-500/60',
+          error && 'border-status-error/60',
         )}
       />
       {description && (
         <p className="text-[11px] leading-relaxed text-fg-faint">{description}</p>
       )}
       {error && (
-        <p className="text-[11px] leading-relaxed text-rose-300">{error}</p>
+        <p className="text-[11px] leading-relaxed text-status-error">{error}</p>
       )}
     </label>
   );

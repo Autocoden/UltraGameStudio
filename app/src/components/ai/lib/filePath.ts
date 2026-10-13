@@ -68,6 +68,23 @@ export function displayFileRefPath(ref: FileRef, cwd?: string): string {
   return `${root}${separator}${normalizedRelative}`;
 }
 
+/**
+ * The directory that contains `path`, computed from the string alone (no fs
+ * access, no cwd). Returns '' when the path carries no separator — a bare
+ * `readme.md` has no parent of its own, so callers fall back to the workspace
+ * root. Windows drive roots (`C:\`) and POSIX `/` are kept intact so
+ * "open containing folder" never lands on `C:` (an unusable pseudo-path).
+ */
+export function parentDirectoryPath(path: string): string {
+  const trimmed = path.trim().replace(/[\\/]+$/, '');
+  if (!trimmed) return '';
+  const index = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'));
+  if (index < 0) return '';
+  if (index === 0) return trimmed.slice(0, 1);
+  if (/^[A-Za-z]:$/.test(trimmed.slice(0, index))) return trimmed.slice(0, index + 1);
+  return trimmed.slice(0, index);
+}
+
 export function displayFileRefLabel(ref: FileRef, cwd?: string): string {
   return `${displayFileRefPath(ref, cwd)}${fileRefLineSuffix(ref)}`;
 }
@@ -283,6 +300,15 @@ function stripFileMentionPrefix(path: string): string {
   return path.startsWith('@') ? path.slice(1) : path;
 }
 
+// Codex links use /E:/... on Windows. Strip the link's leading slash before
+// parsing drive letters and line hints or passing the path to the filesystem.
+function normalizeFileRefPath(raw: string): string {
+  return (pathFromFileUrl(raw) ?? decodePercentPath(raw)).replace(
+    /^\/([A-Za-z]:[\\/])/,
+    '$1',
+  );
+}
+
 function pathFromFileUrl(raw: string): string | null {
   if (!/^file:\/\//i.test(raw)) return null;
   try {
@@ -300,7 +326,7 @@ function pathFromFileUrl(raw: string): string | null {
 
 /** Cheap pre-filter: reject obvious non-paths before the precise regex. */
 export function looksLikePath(raw: string, opts: FileRefParseOptions = {}): boolean {
-  const s = decodePercentPath(raw.trim());
+  const s = normalizeFileRefPath(raw.trim());
   if (!s || s.length > 240) return false;
   if (!opts.allowSpaces && /\s/.test(s)) return false;
   const fileUrlPath = pathFromFileUrl(s);
@@ -340,7 +366,7 @@ export function parseFileRef(
   opts: FileRefParseOptions = {},
 ): FileRef | null {
   const trimmed = raw.trim();
-  const s = pathFromFileUrl(trimmed) ?? decodePercentPath(trimmed);
+  const s = normalizeFileRefPath(trimmed);
   if (!looksLikePath(s, opts)) return null;
   const candidate = stripFileMentionPrefix(s);
 

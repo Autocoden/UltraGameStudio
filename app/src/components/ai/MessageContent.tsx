@@ -1,30 +1,17 @@
 import { memo } from 'react';
 import { segmentMessage } from './lib/segmenter';
 import Markdown from './Markdown';
-import ReasoningBlock from './ReasoningBlock';
+import ExecutionProcess from './ExecutionProcess';
+import { groupExecutionSegments } from './executionSegments';
 import CopyButton from './CopyButton';
-import ToolCard from './ToolCard';
-import type { ToolEvent } from './lib/toolEvent';
 import { FileChipBudgetProvider, type OpenFileFn } from './FileChip';
 import { answerActionText } from './lib/messageText';
 import { type SearchHighlightState } from './lib/searchHighlight';
 import { useStore } from '@/store/useStore';
 import { t } from '@/lib/i18n';
+import SkillLearningCard, { type SkillLearningCardProps } from './SkillLearningCard';
+import type { SkillReviewState } from '@/runtime/skills/types';
 
-/** Group tool events into parents + their `parentId` children (one level). */
-function nestTools(events: ToolEvent[]): Array<{ event: ToolEvent; children: ToolEvent[] }> {
-  const childrenByParent = new Map<string, ToolEvent[]>();
-  for (const e of events) {
-    if (e.parentId) {
-      const list = childrenByParent.get(e.parentId) ?? [];
-      list.push(e);
-      childrenByParent.set(e.parentId, list);
-    }
-  }
-  return events
-    .filter((e) => !e.parentId)
-    .map((event) => ({ event, children: childrenByParent.get(event.id) ?? [] }));
-}
 
 /**
  * Top-level renderer for one assistant/user/system message's text. Segments the
@@ -44,6 +31,10 @@ function MessageContentImpl({
   onOpenFile,
   cwd,
   searchState = null,
+  skillLearning,
+  onSkillApprove,
+  onSkillReject,
+  onSkillRollback,
 }: {
   text: string;
   streaming?: boolean;
@@ -51,11 +42,15 @@ function MessageContentImpl({
   onOpenFile?: OpenFileFn;
   cwd?: string;
   searchState?: SearchHighlightState | null;
+  skillLearning?: SkillReviewState;
+  onSkillApprove?: SkillLearningCardProps['onApprove'];
+  onSkillReject?: SkillLearningCardProps['onReject'];
+  onSkillRollback?: SkillLearningCardProps['onRollback'];
 }) {
   const locale = useStore((s) => s.locale);
   const segments = segmentMessage(text, streaming);
 
-  if (segments.length === 0) {
+  if (segments.length === 0 && !skillLearning) {
     return streaming ? <span className="ai-caret" aria-hidden /> : null;
   }
 
@@ -86,31 +81,18 @@ function MessageContentImpl({
             />
           </div>
         )}
-        {segments.map((seg, i) => {
-          if (seg.type === 'reasoning') {
+        {groupExecutionSegments(segments).map((seg) => {
+          const i = seg.index;
+          if (seg.type === 'execution') {
             return (
-              <ReasoningBlock
-                key={`r${i}`}
-                text={seg.text}
-                done={seg.done}
-                streaming={streaming && !seg.done}
+              <ExecutionProcess
+                key={`e${i}`}
+                segments={seg.segments}
+                streaming={streaming}
+                onOpenFile={onOpenFile}
+                cwd={cwd}
                 searchState={searchState}
               />
-            );
-          }
-          if (seg.type === 'tools') {
-            return (
-              <div key={`t${i}`} className="ai-tools-group flex flex-col">
-                {nestTools(seg.events).map(({ event, children }) => (
-                  <ToolCard
-                    key={event.id}
-                    event={event}
-                    childrenEvents={children}
-                    onOpenFile={onOpenFile}
-                    cwd={cwd}
-                  />
-                ))}
-              </div>
             );
           }
           return (
@@ -128,6 +110,8 @@ function MessageContentImpl({
             </div>
           );
         })}
+        {skillLearning && <SkillLearningCard state={skillLearning} locale={locale}
+          onApprove={onSkillApprove} onReject={onSkillReject} onRollback={onSkillRollback} />}
       </div>
     </FileChipBudgetProvider>
   );

@@ -7,6 +7,8 @@ import type {
 } from '@/lib/tauri';
 import type { HistoryMetadata, WorkspaceSummary } from '@/store/history/types';
 import { uniqueWorkspaceHistory } from '@/lib/workspaceHistory';
+import { normalizeSkillLearningConfig } from '@/lib/skillLearningConfig';
+import type { SkillLearningConfig } from '@/runtime/skills/types';
 import {
   isUiDesignChannelCategory,
   isUiDesignChannelId,
@@ -66,6 +68,8 @@ export interface ProjectSkillSettings {
   enabledRootIds: string[];
   disabledSkillNames: string[];
   recommendedSkillIds: string[];
+  /** Absent on legacy projects so the global learning preferences remain inherited. */
+  learning?: SkillLearningConfig;
 }
 
 export type ProjectLspServerSource = 'catalog' | 'custom';
@@ -374,6 +378,7 @@ export function projectSettingsFromMetadata(
         : defaults.skills.enabledRootIds,
       disabledSkillNames: stringArray(skills.disabledSkillNames),
       recommendedSkillIds: stringArray(skills.recommendedSkillIds),
+      ...(isRecord(skills.learning) ? { learning: normalizeSkillLearningConfig(skills.learning) } : {}),
     },
     lsp: {
       enabled:
@@ -421,6 +426,9 @@ export function projectSettingsPatch(
   return {
     [PROJECT_SETTINGS_METADATA_KEY]: {
       ...settings,
+      ...(settings.skills.learning === undefined ? {} : {
+        skills: { ...settings.skills, learning: normalizeSkillLearningConfig(settings.skills.learning) },
+      }),
       updatedAt: new Date().toISOString(),
     },
   };

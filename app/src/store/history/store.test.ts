@@ -13,6 +13,22 @@ import type {
   WorkspaceSummary,
 } from './types';
 
+describe('compression history persistence', () => {
+  it('retains compression in the index across later messages and cache reload', async () => {
+    const record = await historyStore.createSession({
+      workspaceId: '__default__', id: 'compressed-history', isWorkflow: false,
+      messages: [{ id: 'a', role: 'assistant', text: '回答', createdAt: 1, contextCompressed: true }],
+    });
+    await historyStore.appendMessage(record.workspaceId, record.id, {
+      id: 'u', role: 'user', text: '继续', createdAt: 2,
+    });
+    __resetHistorySessionCacheForTests();
+    const summaries = await historyStore.listSessions(record.workspaceId);
+    expect(summaries.find((item) => item.id === record.id)?.contextCompressed).toBe(true);
+    expect((await historyStore.getSession(record.workspaceId, record.id))?.messages[0]?.contextCompressed).toBe(true);
+  });
+});
+
 const FALLBACK_PREFIX = 'ultragamestudio.history.v1:';
 
 function writeHistoryJson(relPath: string, value: unknown): void {
@@ -74,6 +90,52 @@ afterEach(() => {
 });
 
 describe('historyStore session title derivation', () => {
+  it('merges a stale chat snapshot without dropping later messages or downgrading learning state', async () => {
+    const origin = { hostId: 'local', workspaceId: '__default__', sessionId: 'merge-source', turnId: 'initial', runId: 'review-a' };
+    const initial = { id: 'initial', role: 'user' as const, text: 'Original task.', createdAt: 1 };
+    const queuedCard = { id: 'skill-card', role: 'assistant' as const, text: '', createdAt: 3, localOnly: true,
+      skillLearning: { origin, status: 'queued' as const } };
+    const source = await historyStore.createSession({
+      workspaceId: origin.workspaceId, id: origin.sessionId, isWorkflow: false, messages: [initial, queuedCard],
+    });
+    await historyStore.appendMessage(source.workspaceId, source.id, {
+      id: 'later', role: 'user', text: 'Later task.', createdAt: 4,
+    });
+    await historyStore.upsertMessage(source.workspaceId, source.id, {
+      ...queuedCard, skillLearning: { origin, status: 'applied' },
+    }, true);
+    const updated = await historyStore.updateSession(source.workspaceId, source.id, {
+      messages: [initial, { id: 'reply', role: 'assistant', text: 'Original reply.', createdAt: 2 }, queuedCard],
+      mergeMessages: true,
+    });
+    expect(updated.messages.map((message) => message.id)).toEqual(['initial', 'reply', 'skill-card', 'later']);
+    expect(updated.messages.find((message) => message.id === queuedCard.id)?.skillLearning?.status).toBe('applied');
+  });
+
+  it('merges a background result into the fresh source record without losing queued messages', async () => {
+    const source = await historyStore.createSession({
+      workspaceId: '__default__', id: 'skill-source', isWorkflow: false,
+      messages: [{ id: 'initial', role: 'user', text: 'Original task.', createdAt: 1 }],
+    });
+    const queued = historyStore.appendMessage(source.workspaceId, source.id, {
+      id: 'next-turn', role: 'user', text: 'A newer task.', createdAt: 2,
+    });
+    const result = historyStore.upsertMessage(source.workspaceId, source.id, {
+      id: 'skill-card', role: 'assistant', localOnly: true, text: 'Background result.', createdAt: 3,
+    }, true);
+    await Promise.all([queued, result]);
+    const record = await historyStore.getSession(source.workspaceId, source.id);
+    expect(record?.messages.map((message) => message.id)).toEqual(['initial', 'next-turn', 'skill-card']);
+    await historyStore.upsertMessage(source.workspaceId, source.id, {
+      id: 'skill-card', role: 'assistant', localOnly: true, text: 'Updated result.', createdAt: 4,
+    }, true);
+    const updated = await historyStore.getSession(source.workspaceId, source.id);
+    expect(updated?.messages.filter((message) => message.id === 'skill-card')).toEqual([{
+      id: 'skill-card', role: 'assistant', localOnly: true, text: 'Updated result.', createdAt: 3,
+    }]);
+    expect(updated?.updatedAt).toBe(record?.updatedAt);
+  });
+
   it('drops leading pasted image paths from prompt-derived titles', () => {
     const title = titleFromText(
       '`E:\\UltraGameStudio\\.ultragamestudio\\clipboard-images\\pasted-1783578658027-52db4c04aa12e57d-0.png`，这里的失败是因为什么，好像我不应该失败才对，是因为超时吗，还是什么原因',
@@ -195,7 +257,7 @@ describe('historyStore session activity timestamps', () => {
       shortSession.id,
     ]);
     expect(sessions[0]?.updatedAt).toBe(longEnd);
-    expect(sessions[0]?.activityVersion).toBe(2);
+    expect(sessions[0]?.activityVersion).toBe(3);
   });
 });
 

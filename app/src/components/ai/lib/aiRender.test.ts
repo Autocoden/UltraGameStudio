@@ -295,6 +295,49 @@ describe('scanFileRefs (glued absolute paths)', () => {
       'HAMMER_LAZAREK_RIP+&+TEAR++BREAKING+DOWN+THE+RENDERING+OF+DOOM+THE+DARK+AGES.pdf',
     );
   });
+
+  it('merges space-separated segments of an ascii absolute path into one chip', () => {
+    // AI-generated report names often contain spaces ("UGS Game Analysis
+    // Report.md"). PATH_RUN stops at whitespace, which used to split the path
+    // into a plain-text prefix and a bare-basename chip that failed the
+    // existence check and rendered grey/disabled. The merge pass must
+    // reassemble the full path so the chip points at the real file.
+    const spaced = `E:${BS}UltraGameStudio${BS}docs${BS}temp${BS}screenshots${BS}UGS Game Analysis Report.md`;
+    const parts = scanFileRefs(`报告已生成：${spaced}，请查看`);
+    const ref = parts.find((p) => typeof p === 'object');
+    expect(ref && typeof ref === 'object' && ref.path).toBe(spaced);
+    expect(ref && typeof ref === 'object' && ref.basename).toBe('UGS Game Analysis Report.md');
+  });
+
+  it('merges space-separated segments of a CJK absolute path into one chip', () => {
+    // The original failure: `E:\…\贴图问题汇总\UGS 游戏开发平台竞品深度分析报告.md`
+    // rendered as a grey unclickable chip because only the bare basename was
+    // detected and it resolved to a non-existent cwd-relative file.
+    const spaced = `E:${BS}UltraGameStudio${BS}docs${BS}temp${BS}贴图问题汇总${BS}UGS 游戏开发平台竞品深度分析报告.md`;
+    const parts = scanFileRefs(`报告已生成：${spaced}，请查看`);
+    const ref = parts.find((p) => typeof p === 'object');
+    expect(ref && typeof ref === 'object' && ref.path).toBe(spaced);
+    expect(ref && typeof ref === 'object' && ref.basename).toBe(
+      'UGS 游戏开发平台竞品深度分析报告.md',
+    );
+  });
+
+  it('does not merge a failed prefix into the next token', () => {
+    // "the C: drive is full" — `C:` has no separator so the merge branch is
+    // never entered, and no chip should be produced.
+    expect(scanFileRefs('the C: drive is full')).toEqual(['the C: drive is full']);
+  });
+
+  it('leaves unresolvable spaced prefixes as plain text without duplicating', () => {
+    // A run containing a separator but never parsing (last segment has no
+    // dot, so parseFileRef rejects it as "looks like a directory, not a
+    // file") must not duplicate text when the merge loop gives up — the
+    // outer loop's flush at `cursor` is the single source of the text.
+    const weird = `E:${BS}UltraGameStudio${BS}docs${BS}temp${BS}report Draft Final`;
+    const parts = scanFileRefs(`see ${weird} done`);
+    expect(parts.every((p) => typeof p === 'string')).toBe(true);
+    expect(parts.join('')).toBe(`see ${weird} done`);
+  });
 });
 
 describe('displayFileRefPath', () => {

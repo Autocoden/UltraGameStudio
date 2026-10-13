@@ -73,6 +73,9 @@ pub struct AutosaveConfig {
     pub enabled: bool,
     pub interval_minutes: u64,
     pub retention_days: u64,
+    /// 可选显示名，用作快照目录名前缀（写入目录名与 meta.json）。
+    #[serde(default)]
+    pub name: String,
 }
 
 impl Default for AutosaveConfig {
@@ -81,6 +84,7 @@ impl Default for AutosaveConfig {
             enabled: false,
             interval_minutes: DEFAULT_INTERVAL_MINUTES,
             retention_days: DEFAULT_RETENTION_DAYS,
+            name: String::new(),
         }
     }
 }
@@ -113,6 +117,7 @@ pub struct AutosaveSnapshotInfo {
     pub id: String,
     pub generated_at_ms: u64,
     pub generated_at: String,
+    pub name: String,
     pub vcs: String,
     pub workspace: String,
     pub file_count: usize,
@@ -138,6 +143,8 @@ struct AutosaveSnapshotMeta {
     workspace: String,
     generated_at_ms: u64,
     generated_at: String,
+    #[serde(default)]
+    name: String,
     file_count: usize,
     saved_count: usize,
     #[serde(default)]
@@ -250,6 +257,9 @@ fn read_config() -> AutosaveConfig {
                 if let Some(days) = value.get("retentionDays").and_then(|v| v.as_u64()) {
                     config.retention_days = days.clamp(MIN_RETENTION_DAYS, MAX_RETENTION_DAYS);
                 }
+                if let Some(name) = value.get("name").and_then(|v| v.as_str()) {
+                    config.name = name.trim().chars().take(64).collect();
+                }
             }
         }
     }
@@ -291,7 +301,7 @@ fn run_autosave_pass_with(config: &AutosaveConfig) -> AutosaveRunSummary {
     };
 
     for workspace in &workspaces {
-        match snapshot_workspace(workspace) {
+        match snapshot_workspace(workspace, &config.name) {
             Ok(Some(stats)) => {
                 summary.snapshotted_workspaces += 1;
                 summary.files_backed_up += stats.files;
@@ -309,7 +319,7 @@ fn run_autosave_pass_with(config: &AutosaveConfig) -> AutosaveRunSummary {
 }
 
 /// 快照单个工作区；无改动时返回 Ok(None)。
-fn snapshot_workspace(workspace: &Path) -> Result<Option<SnapshotStats>, String> {
+fn snapshot_workspace(workspace: &Path, name: &str) -> Result<Option<SnapshotStats>, String> {
     let (vcs, entries) = match committable_changes(workspace)? {
         Some(pair) => pair,
         None => return Ok(None),
@@ -329,7 +339,7 @@ fn snapshot_workspace(workspace: &Path) -> Result<Option<SnapshotStats>, String>
     let snapshot_dir = workspace
         .join(storage_paths::PROJECT_ROOT_DIR_NAME)
         .join(AUTOSAVE_DIR_NAME)
-        .join(format!("{generated_ms}"));
+        .join(snapshot_dir_name(name, generated_ms));
     let files_dir = snapshot_dir.join("files");
     fs::create_dir_all(&files_dir).map_err(|e| format!("创建 AutoSave 快照目录失败: {e}"))?;
 
@@ -376,6 +386,7 @@ fn snapshot_workspace(workspace: &Path) -> Result<Option<SnapshotStats>, String>
         workspace: crate::display_preview_path(workspace),
         generated_at_ms: generated_ms,
         generated_at: format_utc(generated_ms / 1000),
+        name: name.to_string(),
         file_count: meta_files.len(),
         saved_count: meta_files.iter().filter(|f| f.saved).count(),
         truncated,
@@ -760,6 +771,52 @@ fn safe_relative_path(path: &str) -> Option<PathBuf> {
     }
 }
 
+/// 把备份名清洗成安全的目录名前缀：移除 Windows/Unix 非法字符、空白与 `.`，
+/// 保留中文、字母、数字、`-`、`_`；空结果返回空串（此时目录名仅用时间戳）。
+fn sanitize_backup_name(raw: &str) -> String {
+    let mut out = String::new();
+    for ch in raw.trim().chars() {
+        match ch {
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' | '.' => out.push('_'),
+            c if c.is_control() => out.push('_'),
+            c if c.is_whitespace() => out.push('_'),
+            c => out.push(c),
+        }
+    }
+    // 合并连续下划线，去掉首尾下划线，避免目录名出现空段或纯符号。
+    let mut cleaned = String::new();
+    let mut prev_underscore = false;
+    for ch in out.chars() {
+        if ch == '_' {
+            if !prev_underscore {
+                cleaned.push('_');
+            }
+            prev_underscore = true;
+        } else {
+            cleaned.push(ch);
+            prev_underscore = false;
+        }
+    }
+    let cleaned = cleaned.trim_matches('_');
+    // 限制前缀长度，避免目录名过长。
+    cleaned.chars().take(48).collect()
+}
+
+/// 生成快照目录名：有名字时为 `{sanitized_name}-{epoch_ms}`，否则保持 `{epoch_ms}`。
+fn snapshot_dir_name(name: &str, generated_ms: u64) -> String {
+    let prefix = sanitize_backup_name(name);
+    if prefix.is_empty() {
+        format!("{generated_ms}")
+    } else {
+        format!("{prefix}-{generated_ms}")
+    }
+}
+
+/// 从快照目录名解析 epoch 毫秒；兼容 `{epoch_ms}` 与 `{name}-{epoch_ms}` 两种形式。
+fn parse_snapshot_epoch_ms(dir_name: &str) -> Option<u64> {
+    dir_name.rsplit('-').next()?.parse::<u64>().ok()
+}
+
 fn prune_workspace_snapshots(workspace: &Path, retention_ms: u64) {
     let autosave_root = workspace
         .join(storage_paths::PROJECT_ROOT_DIR_NAME)
@@ -771,7 +828,7 @@ fn prune_workspace_snapshots(workspace: &Path, retention_ms: u64) {
     let now_ms = crate::now_ms();
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
-        let Some(generated_ms) = name.parse::<u64>().ok() else {
+        let Some(generated_ms) = parse_snapshot_epoch_ms(&name) else {
             continue;
         };
         if now_ms.saturating_sub(generated_ms) > retention_ms {
@@ -797,6 +854,7 @@ fn list_snapshots(autosave_root: &Path) -> Result<Vec<AutosaveSnapshotInfo>, Str
             id,
             generated_at_ms: meta.generated_at_ms,
             generated_at: meta.generated_at,
+            name: meta.name,
             vcs: meta.vcs,
             workspace: meta.workspace,
             file_count: meta.file_count,
@@ -911,6 +969,34 @@ mod tests {
         assert_eq!(format_utc(0), "19700101-000000");
         // 2020-01-01T00:00:00Z
         assert_eq!(format_utc(1_577_836_800), "20200101-000000");
+    }
+
+    #[test]
+    fn sanitize_backup_name_keeps_cjk_and_drops_invalid() {
+        // 中文与字母数字、连字符保留；空白、斜杠、点、冒号等替换为 `_`。
+        assert_eq!(sanitize_backup_name("主线重构"), "主线重构");
+        assert_eq!(sanitize_backup_name("main refactor"), "main_refactor");
+        assert_eq!(
+            sanitize_backup_name("a/b\\c:d"),
+            "a_b_c_d"
+        );
+        assert_eq!(sanitize_backup_name("  "), "");
+        assert_eq!(sanitize_backup_name(".."), "");
+    }
+
+    #[test]
+    fn snapshot_dir_name_with_and_without_name() {
+        assert_eq!(snapshot_dir_name("", 123), "123");
+        assert_eq!(snapshot_dir_name("重构", 123), "重构-123");
+        assert_eq!(snapshot_dir_name("main refactor", 123), "main_refactor-123");
+    }
+
+    #[test]
+    fn parse_snapshot_epoch_ms_compat() {
+        assert_eq!(parse_snapshot_epoch_ms("123"), Some(123));
+        assert_eq!(parse_snapshot_epoch_ms("重构-123"), Some(123));
+        assert_eq!(parse_snapshot_epoch_ms("main_refactor-123"), Some(123));
+        assert_eq!(parse_snapshot_epoch_ms("not-a-number"), None);
     }
 
     #[test]

@@ -71,6 +71,8 @@ function resetStore(): void {
     chattingSessions: [],
     locale: 'zh-CN',
     promptAutoTranslate: false,
+    // 「$组织架构」入口默认隐藏，这个用例要靠它打开组织架构面板。
+    composerToolButtonsVisible: true,
     promptGroups: samplePromptGroups,
     workspaces: [workspace],
     activeWorkspaceId: workspace.id,

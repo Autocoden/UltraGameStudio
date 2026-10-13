@@ -990,3 +990,94 @@ describe('model gateway compatibility', () => {
     expect(migrated.nodes[2].params.gateway).toEqual({ modelClass: 'opus' });
   });
 });
+
+describe('thinking level env plumb-through', () => {
+  it('exports UGS_THINKING_LEVEL and the wire plan for a supported channel', () => {
+    const env = gatewayRouteEnv({
+      transport: 'cli',
+      adapter: 'deepseek-harness',
+      baseUrl: 'https://api.deepseek.com',
+      model: 'deepseek-v4-flash-vision-exp',
+      thinkingLevel: 'max',
+    });
+    expect(env?.UGS_THINKING_LEVEL).toBe('max');
+    const plan = JSON.parse(env!.UGS_THINKING_PLAN) as {
+      channel: string;
+      wire: string | null;
+      thinkingFormat: string | null;
+    };
+    expect(plan.channel).toBe('dsh-deepseek-native');
+    expect(plan.wire).toBe('max');
+  });
+
+  it('drops a level the current channel does not support', () => {
+    // `xhigh` 是 claude-code 的档位，deepseek-harness 的 native 路由没有它。
+    const env = gatewayRouteEnv({
+      transport: 'cli',
+      adapter: 'deepseek-harness',
+      baseUrl: 'https://api.deepseek.com',
+      thinkingLevel: 'xhigh',
+    });
+    expect(env?.UGS_THINKING_LEVEL).toBeUndefined();
+
+    // 没有已验证思考通道的 CLI 适配器不臆造档位。
+    expect(
+      gatewayRouteEnv({
+        transport: 'cli',
+        adapter: 'kimi',
+        thinkingLevel: 'high',
+      })?.UGS_THINKING_LEVEL,
+    ).toBeUndefined();
+  });
+
+  it('keeps levels on a third-party gateway (pi-ai route)', () => {
+    const env = gatewayRouteEnv({
+      transport: 'cli',
+      adapter: 'deepseek-harness',
+      baseUrl: 'https://ai-gateway.example.com',
+      model: 'deepseek-v4-pro',
+      thinkingLevel: 'max',
+    });
+    expect(env?.UGS_THINKING_LEVEL).toBe('max');
+    const plan = JSON.parse(env!.UGS_THINKING_PLAN) as {
+      channel: string;
+      thinkingFormat: string | null;
+      efforts: Record<string, string | null>;
+    };
+    // 第三方网关这一档由 Rust 侧写进 pi-ai 的 reasoningEfforts + compat，
+    // 走标准字段而非 DeepSeek 私有字段。
+    expect(plan.channel).toBe('dsh-pi-ai');
+    expect(plan.thinkingFormat).toBe('deepseek');
+    expect(plan.efforts.off).toBeNull();
+  });
+
+  it('keeps levels on HTTP-direct transports', () => {
+    const direct = gatewayRouteEnv({
+      transport: 'openai-compatible',
+      adapter: 'deepseek-harness',
+      baseUrl: 'https://api.deepseek.com',
+      model: 'deepseek-v4-pro',
+      thinkingLevel: 'max',
+    });
+    expect(direct?.UGS_THINKING_LEVEL).toBe('max');
+    const plan = JSON.parse(direct!.UGS_THINKING_PLAN) as { channel: string };
+    expect(plan.channel).toBe('http-openai');
+  });
+
+  it('passes codex and claude-code native levels through untouched', () => {
+    expect(
+      gatewayRouteEnv({
+        transport: 'cli',
+        adapter: 'codex',
+        thinkingLevel: 'xhigh',
+      })?.UGS_THINKING_LEVEL,
+    ).toBe('xhigh');
+    expect(
+      gatewayRouteEnv({
+        transport: 'cli',
+        adapter: 'claude-code',
+        thinkingLevel: 'xhigh',
+      })?.UGS_THINKING_LEVEL,
+    ).toBe('xhigh');
+  });
+});

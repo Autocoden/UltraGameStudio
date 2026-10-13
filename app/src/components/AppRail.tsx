@@ -47,6 +47,7 @@ export default function AppRail({
   onOpenSettings: () => void;
 }) {
   const locale = useStore((s) => s.locale);
+  const assetCenterEnabled = useStore((s) => s.assetCenterEnabled);
   const workspaces = useStore((s) => s.workspaces);
   const activeWorkspaceId = useStore((s) => s.activeWorkspaceId);
   const assets = useSyncExternalStore(subscribeAssets, getAssets);
@@ -80,7 +81,7 @@ export default function AppRail({
   const boardDoingCount = boardCards.filter((card) => card.status === 'in_progress').length;
 
   useEffect(() => {
-    if (!tauriAvailable()) return;
+    if (!assetCenterEnabled || !tauriAvailable()) return;
     let cancelled = false;
     const refresh = () => {
       void listCachedAssets(assetBadgeCwd)
@@ -95,7 +96,7 @@ export default function AppRail({
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [assetBadgeCwd]);
+  }, [assetBadgeCwd, assetCenterEnabled]);
 
   const scopedAssets = useMemo(
     () =>
@@ -144,7 +145,7 @@ export default function AppRail({
       className="flex h-full w-16 shrink-0 flex-col items-center border-r border-border bg-panel"
     >
       <div className="flex w-full flex-col items-center gap-1 px-0.5 pt-3">
-        {navItems.map((item) => {
+        {navItems.filter((item) => item.view !== 'assets' || assetCenterEnabled).map((item) => {
           const Icon = item.icon;
           const active = activeView === item.view;
           return (
@@ -195,7 +196,7 @@ export default function AppRail({
             <SettingsGlyph size={19} strokeWidth={1.8} aria-hidden="true" />
             {cliUpdate.hasUnseenUpdate && (
               <span
-                className="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-[#ef4444] ring-2 ring-panel"
+                className="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-status-error ring-2 ring-panel"
                 aria-hidden="true"
               />
             )}

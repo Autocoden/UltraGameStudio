@@ -25,12 +25,15 @@ export interface AutosaveConfig {
   intervalMinutes: number;
   /** Snapshots older than this many days are pruned automatically. */
   retentionDays: number;
+  /** Optional display name used as the snapshot folder prefix. */
+  name: string;
 }
 
 export const DEFAULT_AUTOSAVE_CONFIG: AutosaveConfig = {
   enabled: false,
   intervalMinutes: 5,
   retentionDays: 7,
+  name: '',
 };
 
 function clampMinutes(value: unknown): number {
@@ -49,12 +52,18 @@ function clampDays(value: unknown): number {
   return Math.min(365, Math.max(1, n));
 }
 
+function clampName(value: unknown): string {
+  if (typeof value !== 'string') return '';
+  return value.trim().slice(0, 64);
+}
+
 function coerce(raw: Partial<AutosaveConfig> | null | undefined): AutosaveConfig {
   if (!raw || typeof raw !== 'object') return { ...DEFAULT_AUTOSAVE_CONFIG };
   return {
     enabled: raw.enabled ?? DEFAULT_AUTOSAVE_CONFIG.enabled,
     intervalMinutes: clampMinutes(raw.intervalMinutes),
     retentionDays: clampDays(raw.retentionDays),
+    name: clampName(raw.name),
   };
 }
 

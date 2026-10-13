@@ -9,7 +9,7 @@ import { useStore } from '@/store/useStore';
 import { workspaceFileDiff } from '@/lib/tauri';
 import ProjectFileTree from './ProjectFileTree';
 import { OPEN_GAME_TEAM_DETAILS_EVENT } from './GameTeamPanel';
-import { OPEN_PROJECT_RIGHT_PANEL_FILE_PREVIEW_EVENT } from './projectRightPanelEvents';
+import { OPEN_PROJECT_RIGHT_PANEL_FILE_PREVIEW_EVENT, requestProjectRightPanelToggle } from './projectRightPanelEvents';
 
 // The file-preview drawer reads a local file when previewRef is set. Stub it so
 // opening the drawer in this jsdom test resolves to a small text preview instead
@@ -100,6 +100,7 @@ async function renderProjectFileTree(): Promise<{
   await act(async () => {
     root.render(<ProjectFileTree />);
   });
+  await act(async () => requestProjectRightPanelToggle());
 
   return {
     container,
@@ -255,7 +256,7 @@ describe('ProjectFileTree game team details vs file preview drawer', () => {
       ).not.toBeNull();
       expect(workspaceFileDiff).toHaveBeenCalledWith(
         'E:\\UltraGameStudio',
-        'app/src/App.tsx',
+        'E:\\UltraGameStudio/app/src/App.tsx',
       );
 
       const resizeHandle = view.container.querySelector<HTMLElement>(
@@ -278,7 +279,7 @@ describe('ProjectFileTree game team details vs file preview drawer', () => {
     }
   });
 
-  it('collapses a session file preview on outside click and keeps session files visible', async () => {
+  it('closes a session file preview on outside click and releases the right panel', async () => {
     resetStore();
     const view = await renderProjectFileTree();
 
@@ -314,11 +315,10 @@ describe('ProjectFileTree game team details vs file preview drawer', () => {
         );
       });
 
-      const restoredSessionTab = Array.from(
-        view.container.querySelectorAll<HTMLButtonElement>('button[role="tab"]'),
-      ).find((btn) => (btn.textContent ?? '').includes('会话文件'));
-      expect(restoredSessionTab).toBeTruthy();
-      expect(restoredSessionTab?.getAttribute('aria-selected')).toBe('true');
+      expect(view.container.querySelector('aside')).toBeNull();
+      await act(async () => requestProjectRightPanelToggle());
+      const restoredSessionTab = view.container.querySelector('[role="tab"][aria-selected="true"]');
+      expect(restoredSessionTab?.textContent).toContain('会话文件');
       expect(view.container.textContent).toContain('App.tsx');
     } finally {
       await view.cleanup();

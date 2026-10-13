@@ -372,9 +372,7 @@ describe('PromptPanel running lock', () => {
 
       const groupHeaders = Array.from(
         view.container.querySelectorAll('li[role="presentation"]'),
-      ).map((item) =>
-        item.querySelector('button span.flex-1')?.textContent?.trim(),
-      );
+      ).map((item) => item.querySelector('span.flex-1')?.textContent?.trim());
       expect(groupHeaders).toEqual([
         '默认渠道 · Claude Code',
         '默认渠道 · Codex',

@@ -1,3 +1,4 @@
+import { sessionHasContextCompression, CONTEXT_COMPRESSION_TOOL } from '@/lib/contextCompression';
 import { create } from 'zustand';
 import {
   type GatewaySelection,
@@ -98,6 +99,9 @@ import {
   setActiveGatewaySelection,
 } from '@/lib/gatewayConfig';
 import { getCliRuntimeSnapshot } from '@/lib/cliConfig';
+import { beginSkillLearningTurn, performSkillReviewAction, requestExplicitSkillLearning, resumeSkillLearningReview, isSkillReviewLive } from '@/lib/skillLearningDesktop';
+import { loadSkillLearningConfig } from '@/lib/skillLearningConfig';
+import type { SkillMutationResult, SkillOrigin, SkillReviewState } from '@/runtime/skills/types';
 import { ensureFreeProxy, isFreeChannelSelection } from '@/lib/freeChannels';
 import { getManifestModeEnabled } from '@/lib/manifestMode';
 import {
@@ -185,7 +189,9 @@ import {
   isTauri,
   previewLocalFile,
   steerAiCli,
+  tauriAvailable,
   ugsJobWrapperPath,
+  type NativeCliSkillToolsOptions,
 } from '@/lib/tauri';
 import {
   linkManagedAssetsFromMessageText,
@@ -310,7 +316,10 @@ import {
 } from '@/core/memoryReview';
 import {
   INTERACTION_PROTOCOL,
+  detectFallbackInteraction,
+  extractLeadConclusion,
   formatAnswerForPrompt,
+  isPinnableAnswer,
   liveProse,
   parseInteraction,
   stripCliProgressMarkers,
@@ -376,7 +385,10 @@ import {
   remoteModelForAdapter,
   remoteRunnerProviderMatchesWorkspace,
   remoteWorkspaceIdFromPath,
+  RunnerClient,
 } from '@/lib/remoteWorkspace';
+import { REMOTE_SKILL_HOST_ID } from '@ugs/protocol';
+import { createRemoteSkillControlHost } from '@/lib/remoteSkillLearning';
 import {
   autosave,
   exportWorkflowToFile,
@@ -387,6 +399,8 @@ import {
   refreshCachedSessionChanges,
   sessionChangesCacheKey,
 } from '@/lib/sessionChanges';
+import { collectTurnFileChanges, supportsNativeFileChanges } from '@/lib/turnFileChanges';
+import { ensureWorkspaceChangesBaseline, listWorkspaceChanges } from '@/lib/tauri';
 import {
   historyStore,
   isAutoTitlePlaceholder,
@@ -932,7 +946,7 @@ function adapterFromHistoricalRouteName(
   );
 }
 
-function historicalGatewaySelectionFromMessages(
+export function historicalGatewaySelectionFromMessages(
   messages: readonly Message[],
 ): GatewaySelection | null {
   const route = historicalRouteParts(messages);
@@ -2123,6 +2137,7 @@ export function sessionFromSummary(summary: SessionSummary): Session {
     messageCount: summary.messageCount,
     ...(runStatus ? { runStatus } : {}),
     ...(summary.unreadCompletion === true ? { unreadCompletion: true } : {}),
+    ...(summary.contextCompressed === true ? { contextCompressed: true } : {}),
     ...(summary.favorite === true ? { favorite: true } : {}),
     ...(scheduledTask ? { scheduledTask } : {}),
   };
@@ -2173,6 +2188,7 @@ export function summaryFromRecord(record: SessionRecord): SessionSummary {
     messageCount: record.messages.length,
     ...(runStatus ? { runStatus } : {}),
     ...(record.meta?.unreadCompletion === true ? { unreadCompletion: true } : {}),
+    ...(sessionHasContextCompression(record.messages, record.meta) ? { contextCompressed: true } : {}),
     ...(record.meta?.favorite === true ? { favorite: true } : {}),
     ...(scheduledTask ? { scheduledTask } : {}),
   };
@@ -2754,6 +2770,7 @@ function activeMessageSummaryPatch(
           updatedAt,
           preview: last ? previewFromText(last.text) : undefined,
           messageCount: messages.length,
+          ...(sessionHasContextCompression(messages) ? { contextCompressed: true } : {}),
         }
       : session;
   return {
@@ -3412,6 +3429,14 @@ async function createNewChatSession(): Promise<void> {
     workspace?.path,
     workspaceFoldersFromMetadata(workspace?.metadata),
   );
+  // Publish the persistence barrier before the optimistic session is visible.
+  // Skill bindings must never race the first history record into existence.
+  const persistenceKey = runKey(workspaceId, sessionId);
+  const sessionPersisted = historyStore.createSession({
+    workspaceId, id: sessionId, isWorkflow: false, messages: [], title,
+  }).then(() => {});
+  pendingSessionCreations.set(persistenceKey, sessionPersisted);
+  void sessionPersisted.catch(() => {});
   useStore.setState((s) => {
     if (s.activeWorkspaceId !== workspaceId) return {};
     const sessionKey = { workspaceId, sessionId };
@@ -3450,13 +3475,7 @@ async function createNewChatSession(): Promise<void> {
   // Persist + reconcile in the background. UI is already on the new session.
   void (async () => {
     try {
-      await historyStore.createSession({
-        workspaceId,
-        id: sessionId,
-        isWorkflow: false,
-        messages: [],
-        title,
-      });
+      await sessionPersisted;
       const current = useStore.getState();
       if (
         current.activeWorkspaceId === workspaceId &&
@@ -3469,6 +3488,10 @@ async function createNewChatSession(): Promise<void> {
       }
     } catch (err) {
       console.error('[new-session] failed to persist new chat session', err);
+    } finally {
+      if (pendingSessionCreations.get(persistenceKey) === sessionPersisted) {
+        pendingSessionCreations.delete(persistenceKey);
+      }
     }
   })();
 }
@@ -3833,6 +3856,9 @@ async function activateHistorySession(
   // deliberately excludes for read-only-lock purposes) and falls back to the
   // retained snapshot so a finished stream still restores its final messages.
   const aiEditSnapshot = getAiEditViewSource(targetWorkspaceId, session.id);
+  const liveAiEdit = aiEditSnapshot && activeAiEdits.get(aiEditSnapshot.key) === aiEditSnapshot
+    ? aiEditSnapshot
+    : null;
 
   const recordWorkflow = record.workflow
     ? restoreWorkflowRunSnapshot(record.workflow, record.meta)
@@ -3857,11 +3883,40 @@ async function activateHistorySession(
       : recordWorkflow
         ? runProgressFromSnapshot(workflow, workflow.meta.run ?? null)
         : emptyRunProgress();
+  // The persisted record is the authority, but a retained snapshot can be
+  // either ahead of it (a stream that kept running while another session was on
+  // screen) or behind it (an intermediate commit frozen mid-turn). Arbitrate per
+  // message id by freshness so a stale snapshot can never bury the final answer
+  // that is already on disk, while a fresh snapshot still restores in-flight
+  // text the debounced write has not flushed yet.
   const viewMessages = liveRun
     ? liveRun.messages
     : aiEditSnapshot
-      ? mergeMessagesById(record.messages, aiEditSnapshot.messages)
+      ? mergeMessagesById(record.messages, aiEditSnapshot.messages, (base, update) => {
+          // Streaming chunks keep createdAt unchanged; the debounced disk copy
+          // can therefore have the same timestamp while still being empty.
+          // The live turn owns its messages. Retained snapshots and messages
+          // belonging to other turns still use persisted freshness arbitration.
+          if (liveAiEdit && (!liveAiEdit.chat || liveAiEdit.ownedMessageIds?.has(update.id))) {
+            return update;
+          }
+          return newerMessage(base, update);
+        })
       : record.messages;
+  // Converge the RETAINED snapshot (channel already torn down) onto what we just
+  // rendered. Without this the stale snapshot keeps winning on every later
+  // switch back — it is never otherwise invalidated. Live channels are skipped:
+  // their buffer is still being appended to, and overwriting the array under a
+  // running stream would drop chunks the streamer still holds indices into.
+  if (
+    !liveRun &&
+    aiEditSnapshot &&
+    viewMessages !== aiEditSnapshot.messages &&
+    !activeAiEdits.has(aiEditSnapshot.key)
+  ) {
+    aiEditSnapshot.messages = viewMessages;
+    aiEditSnapshots.set(aiEditSnapshot.key, aiEditSnapshot);
+  }
   const canvasViewport = canvasViewportForSession(
     targetWorkspaceId,
     session.id,
@@ -4550,6 +4605,7 @@ export const useStore = create<StoreState>((set, get) => ({
   runningWorkspaceId: null,
   jobSessions: [],
   jobSessionProgress: {},
+  jobDetails: [],
 
   initHistory: () => {
     initHistorySlice();
@@ -4804,8 +4860,8 @@ export const useStore = create<StoreState>((set, get) => ({
   runScheduledTaskSession: (sessionId, workspaceId, scheduledTask) =>
     runScheduledTaskHistorySession(sessionId, workspaceId, scheduledTask),
 
-  setBackgroundJobState: (jobSessions, jobSessionProgress) =>
-    useStore.setState({ jobSessions, jobSessionProgress }),
+  setBackgroundJobState: (jobSessions, jobSessionProgress, jobDetails = []) =>
+    useStore.setState({ jobSessions, jobSessionProgress, jobDetails }),
 
   // AI-driven graph edit (design mode only).
   //
@@ -5045,6 +5101,11 @@ export const useStore = create<StoreState>((set, get) => ({
     const ids = new Set([messageId]);
     const ch = entry.channel;
     pruneAiEditSourcesForDeletion(ch.workspaceId, ch.sessionId, ids);
+    // A queued turn's channel may not be registered in `activeAiEdits` before
+    // its FIFO slot starts, in which case the registry walk above cannot see
+    // it. Prune the entry's own buffer explicitly so its `ownedMessageIds` and
+    // messages stop carrying the deleted id.
+    pruneAiEditSourceMessages(ch, ids);
     let nextMessages: Message[] | null = null;
     let nextWorkflow: IRGraph | null = null;
     let persistWorkflow = false;
@@ -5064,6 +5125,15 @@ export const useStore = create<StoreState>((set, get) => ({
         };
       });
     }
+    // Persist AFTER the message leaves the view. `persistQueuedChatConversation`
+    // rebuilds the written list through `mergeAiEditChatMessages`, whose merge
+    // base is the visible `store.messages`; persisting first would merge the
+    // just-deleted message straight back into the disk record, and switching to
+    // another session and back would then resurrect it. Always persist (not only
+    // when the session is visible): the conditional `persistCurrentConversation`
+    // below is skipped for background sessions, and without this call the
+    // deletion never reaches disk.
+    persistQueuedChatConversation(ch);
     if (nextMessages) {
       void persistCurrentConversation(
         nextMessages,
@@ -5092,6 +5162,14 @@ export const useStore = create<StoreState>((set, get) => ({
     void branchChatSessionFromMessage(messageId);
   },
 
+  learnSkills: (kind, text) => startExplicitSkillLearning(kind, text),
+
+  reviewSkillLearningAction: (state, action, id) => reviewPersistedSkillLearningAction(state, action, id),
+
+  updateSkillLearningState: async (messageId, state) => {
+    await persistSkillLearningStateForSource(skillHistorySource(state), state, messageId);
+  },
+
   sendPrompt: (text, options) => {
     const trimmed = text.trim();
     if (!trimmed) return false;
@@ -5102,12 +5180,20 @@ export const useStore = create<StoreState>((set, get) => ({
     // /游戏专家/编程/引擎程序 or /引擎程序), gameExpertIds pins exactly those.
     const forceGameExperts = options?.forceGameExperts === true;
     const pinnedGameExpertIds = options?.gameExpertIds ?? [];
+    const selectedSkillIds = [...new Set(options?.skillIds ?? [])];
     const state = useStore.getState();
     if (isWorkflowReadOnly(state)) return false;
     // Image generation is routed explicitly (the /image-mode-* sticky mode and
     // /image one-shot command in AIDock), never inferred from message text here.
     // sendPrompt always means AI editing / workflow authoring.
     const aiEditingSession = activeWorkflowSessionKey(state);
+    // A fresh user message on a session means "I'm answering you with a new
+    // turn, not by clicking the widget". Cancel any parked interaction for
+    // THIS session so the previous chat turn's `awaitInteraction` resolves
+    // null immediately and releases the per-session FIFO — otherwise the new
+    // turn would queue behind an await that never resolves, which is exactly
+    // the "sent it and nothing happened" stall.
+    cancelParkedInteractionsForSession(aiEditingSession);
     const gatewaySelection = workflowDefaultGatewaySelection(
       state.workflow,
       state.composer.model,
@@ -5171,6 +5257,9 @@ export const useStore = create<StoreState>((set, get) => ({
         ? { chat: true, ownedMessageIds: new Set<string>([userMsg.id]) }
         : {}),
     };
+    let skillLearningTurn: ReturnType<typeof beginSkillLearningTurn> | undefined;
+    let skillExecutionOrigin: SkillOrigin | undefined;
+    let nativeSkillTools: NativeCliSkillToolsOptions | undefined;
     addAiEditChannel(ch);
     if (aiEditViewActive(ch)) {
       set({
@@ -5610,10 +5699,11 @@ ${previousReply.slice(0, 4000)}
         opts.cliCommand,
         opts.permission,
       ).catch(() => false);
-      // Always expose a steer surface so the lightning action works on every
-      // adapter. `native` marks the ones with a real in-turn steer channel
-      // (codex/claude/zcode); the rest fall back to queue-steer semantics —
-      // see trySteerQueuedCliTurn.
+      // Always record the steer surface for the running turn. Only `native`
+      // adapters (codex/claude/zcode — the ones with a real in-turn channel,
+      // per the Rust `ai_cli_steer_channel`) surface the ⚡ 插话 action; for the
+      // rest it stays hidden and the queued message simply keeps its place in
+      // the FIFO — see trySteerQueuedCliTurn.
       ch.liveSteer = {
         adapter: cli.adapter,
         runId,
@@ -5632,6 +5722,9 @@ ${previousReply.slice(0, 4000)}
           timeoutSeconds: policy.timeoutSeconds,
           idleTimeoutSeconds: policy.idleTimeoutSeconds,
           runId,
+          onTool: (event) => skillLearningTurn?.onTool(event),
+          skillTools: nativeSkillTools,
+          signal: ch.abortController.signal,
           onUsage: (raw) => {
             realUsage = mergeUsageReports(realUsage, usageReportFromCliUsage(raw));
           },
@@ -5716,6 +5809,8 @@ ${previousReply.slice(0, 4000)}
           maxTokens: 8192,
           signal: ch.abortController.signal,
           runId,
+          onToolEvent: (event) => skillLearningTurn?.onTool(event),
+          skillTools: nativeSkillTools,
           usageContext: { workspaceId: ch.workspaceId, sessionId: ch.sessionId },
           permission: state.composer.permission || 'full',
           cwd: ch.workspaceRootPath ?? undefined,
@@ -6177,10 +6272,26 @@ ${previousReply.slice(0, 4000)}
       // into an active CLI turn when that adapter exposes real steering.
       // Favorite reruns mint a fresh session per turn, so they need no queue.
       const runChatTurn = async () => {
+        // Capture at FIFO execution time, not send time: queued turns must not
+        // inherit writes from the preceding turn. Native tool metadata wins.
+        const turnChangesKey = `turn:${ch.workspaceId ?? ''}:${ch.sessionId ?? ''}:${userMsg.id}`;
+        let turnBaselineReady = false;
+        let turnToolTrace = '';
+        const ensureTurnBaseline = async (adapter: string) => {
+          if (turnBaselineReady || supportsNativeFileChanges(adapter) || !workspaceRootPath ||
+            isRemoteWorkspacePath(workspaceRootPath)) return;
+          try {
+            await ensureWorkspaceChangesBaseline(workspaceRootPath, turnChangesKey);
+            turnBaselineReady = true;
+          } catch (error) {
+            console.warn('[session-files] 本轮文件基线读取失败', error);
+          }
+        };
         const turnText =
           ch.messages.find((message) => message.id === userMsg.id)?.text.trim() ??
           userMsg.text.trim();
         if (!turnText) return;
+        const skillConfig = loadSkillLearningConfig(ch.workspaceId ?? '__default__');
         const simpleAssetCapabilityBlock = shouldUseAssetCapabilityBlockForPrompt(turnText)
           ? assetCapabilityBlock
           : '';
@@ -6337,7 +6448,8 @@ ${previousReply.slice(0, 4000)}
         const interruptedContinuationDirective = interruptedContinuation
           ? '上一轮任务被用户中断且尚未完成。请保留此前对话中的原始目标、已完成工作和工具结果，把当前用户消息视为对原任务的新约束或补充；除非用户明确取消原任务，否则在新约束下继续完成原任务。不要把当前消息当成孤立的新任务。'
           : '';
-        const chatPrompt = prior.length
+        let requestTurnText = turnText;
+        let chatPrompt = prior.length
           ? interruptedContinuation
             ? `${interruptedContinuationDirective}\n\n以下是中断前的对话：\n\n${prior}\n\n用户补充：${turnText}`
             : `以下是之前的对话，请结合上下文继续回答最后一个「用户」消息：\n\n${prior}\n\n用户：${turnText}`
@@ -6364,8 +6476,53 @@ ${previousReply.slice(0, 4000)}
           if (bodyStart < 0) return;
           setActive(withAiTiming(current.text.slice(bodyStart + 1)));
         }, 1_000);
+        let skillFinalAnswer = '';
+        let skillTerminal: 'completed' | 'cancelled' | 'failed' = 'failed';
         try {
+          if (tauriAvailable()) {
+            const ready = waitForPersistedSkillSource(ch.workspaceId, ch.sessionId);
+            // Automatic context is advisory when history is unavailable; explicit
+            // selection remains fail-closed through the host's same barrier.
+            void ready.catch(() => {});
+            skillExecutionOrigin = Object.freeze({
+              hostId: 'local', workspaceId: ch.workspaceId ?? '__default__',
+              sessionId: ch.sessionId ?? '', turnId: userMsg.id, runId: userMsg.id,
+              ...(workspaceRootPath ? { cwd: workspaceRootPath } : {}),
+            });
+            skillLearningTurn = beginSkillLearningTurn({
+              origin: skillExecutionOrigin,
+              prompt: turnText, selection: { ...gatewaySelection },
+              config: skillConfig,
+              explicitSkillIds: selectedSkillIds,
+              signal: ch.abortController.signal,
+              ...{ ready },
+              onState: (reviewState) => {
+                void persistSkillLearningStateForSource(ch, reviewState).catch((error) => {
+                  console.warn('[skills] 来源会话学习结果回存失败', error);
+                });
+              },
+            });
+          }
           newBubble(withAiTiming('⟳ 生成中…'));
+          if (skillLearningTurn) {
+            try {
+              const context = await skillLearningTurn.loadContext();
+              requestTurnText = context.prompt;
+              chatPrompt += context.prompt.slice(turnText.length);
+              const contextPersisted = persistSkillContextForSource(ch, userMsg.id, {
+                origin: skillExecutionOrigin!, loadedSkills: context.loadedSkills,
+                catalogRevision: context.catalogRevision,
+              });
+              await contextPersisted;
+              if (skillConfig.enabled && skillConfig.mode !== 'off') {
+                nativeSkillTools = { source: { ...skillExecutionOrigin! },
+                  config: { enabled: skillConfig.enabled, mode: skillConfig.mode }, ready: contextPersisted };
+              }
+            } catch (error) {
+              if (selectedSkillIds.length || ch.abortController.signal.aborted) throw error;
+              console.warn('[skills] 本轮技能上下文不可用', error);
+            }
+          }
           let routeLine = gatewayRouteLine(directRoute);
           // The model may emit a click-to-choose interaction block instead of a
           // final answer (see core/interaction.ts). Loop: call → if it asked,
@@ -6374,6 +6531,10 @@ ${previousReply.slice(0, 4000)}
           // asking can't spin forever.
           let continuation = '';
           let finalAnswer = '';
+          // Facts settled by earlier rounds of THIS turn (question → answer).
+          // Fed back with every continuation so a re-invocation cannot re-decide
+          // what the user already answered (see InteractionBaseline).
+          const confirmedBaseline: string[] = [];
           // 「会话文件」列表只能从消息文本里的 <<UGS_TOOL>> 哨兵解析出本会话
           // AI 读/改过的文件。CLI 回合最终化时用的是不含哨兵的纯净答复
           // （result/acc），会把流式期间出现过的工具事件抹掉，导致文件先显示
@@ -6414,11 +6575,11 @@ ${previousReply.slice(0, 4000)}
                 nativeSession && nativeResume
                   ? unseenTranscript
                     ? interruptedContinuation
-                      ? `${interruptedContinuationDirective}\n\n以下是你这个模型会话尚未看到的中间对话：\n\n${unseenTranscript}\n\n用户补充：${turnText}`
-                      : `以下是你这个模型会话尚未看到的中间对话，请先吸收上下文，再回答最后一个「用户」消息：\n\n${unseenTranscript}\n\n用户：${turnText}`
+                      ? `${interruptedContinuationDirective}\n\n以下是你这个模型会话尚未看到的中间对话：\n\n${unseenTranscript}\n\n用户补充：${requestTurnText}`
+                      : `以下是你这个模型会话尚未看到的中间对话，请先吸收上下文，再回答最后一个「用户」消息：\n\n${unseenTranscript}\n\n用户：${requestTurnText}`
                     : interruptedContinuation
-                      ? `${interruptedContinuationDirective}\n\n用户补充：${turnText}`
-                      : turnText
+                      ? `${interruptedContinuationDirective}\n\n用户补充：${requestTurnText}`
+                      : requestTurnText
                   : chatPrompt;
               // On a continuation round, a live native session already carries
               // the prior context via --resume, so send only the user's answer.
@@ -6435,8 +6596,9 @@ ${previousReply.slice(0, 4000)}
                 body: string,
                 session: ChatNativeSession | null,
                 resume: boolean,
-              ) =>
-                aiEditViaCliWithSpeed(
+              ) => {
+                await ensureTurnBaseline(cli.adapter);
+                return aiEditViaCliWithSpeed(
                   `${
                     cli.adapter === 'deepseek-harness'
                       ? dshChatSystem
@@ -6456,6 +6618,14 @@ ${previousReply.slice(0, 4000)}
                   languageDirective: languageDirectiveReminder(state.locale),
                   onProgress: (chunk) => {
                     live += chunk;
+                    turnToolTrace += chunk;
+                    if (!ch.messages.find((message) => message.id === activeId)?.contextCompressed &&
+                      live.includes(CONTEXT_COMPRESSION_TOOL) && extractToolSentinels(live).patches.some((patch) =>
+                      patch.name === CONTEXT_COMPRESSION_TOOL && patch.status === 'done')) {
+                      ch.messages = ch.messages.map((message) => message.id === activeId
+                        ? { ...message, contextCompressed: true } : message);
+                      updateAiEditSessionSummary(ch);
+                    }
                     const displayLive = legacyXmlToolsToSentinels(live, {
                       streamingTail: true,
                     });
@@ -6471,6 +6641,7 @@ ${previousReply.slice(0, 4000)}
                     );
                   },
                 });
+              };
               try {
                 answer = await callNativeCli(promptBody, nativeSession, nativeResume);
               } catch (err) {
@@ -6527,15 +6698,18 @@ ${previousReply.slice(0, 4000)}
               }
               // Preserve any tool-call sentinels the CLI streamed this round so
               // the session-files list keeps the files this turn read/edited.
-              // Also strip the protocol blocks (memory/recall/gen) from this
+              // Also strip the protocol blocks (memory/recall/gen/ask) from this
               // buffer: finalChatBodyWithStreamedTools can resurrect `live` over
               // the stripped `finalProse` when the stream captured more text than
               // the CLI's terminal result, which would re-inject the raw
-              // <<UGS_MEMORY>>/<<UGS_RECALL>>/<<UGS_GEN>> JSON into the bubble.
+              // <<UGS_MEMORY>>/<<UGS_RECALL>>/<<UGS_GEN>>/<<UGS_ASK>> JSON into
+              // the bubble.
               latestCliLive = stripGenRequests(
                 stripRecall(
                   stripMemoryWrites(
-                    legacyXmlToolsToSentinels(live, { streamingTail: true }),
+                    stripInteraction(
+                      legacyXmlToolsToSentinels(live, { streamingTail: true }),
+                    ),
                   ),
                 ),
               );
@@ -6730,7 +6904,18 @@ ${previousReply.slice(0, 4000)}
                 continue;
               }
             }
-            const req = parseInteraction(answer);
+            let req = parseInteraction(answer);
+            if (!req) {
+              // Protocol fallback: the model asked a question as plain text
+              // instead of emitting `<<UGS_ASK>>`. Synthesize a widget from the
+              // question-shaped tail so the user still gets clickable options
+              // (or at minimum an input box) instead of a bubble that ends in
+              // "?" while the turn stays parked on `awaitInteraction`.
+              // `allowInput: true` on the synthesized select gives the user an
+              // escape hatch if the heuristic misfires. Always on by design: no
+              // settings switch, so every harness gets the same behaviour.
+              req = detectFallbackInteraction(stripCliProgressMarkers(answer));
+            }
             if (!req) {
               finalAnswer = answer;
               break;
@@ -6755,8 +6940,23 @@ ${previousReply.slice(0, 4000)}
               break;
             }
             // Continue in a fresh bubble with the user's choice fed back.
+            // The appendix pins two things the next round must not re-decide:
+            // the model's own conclusion from this round (otherwise it re-reads
+            // the source material and re-labels the task) and every Q/A settled
+            // earlier in this turn. It also forbids re-emitting a deliverable
+            // this turn already produced.
             newBubble(withAiTiming('⟳ 生成中…'));
-            continuation = formatAnswerForPrompt(req, userAnswer);
+            continuation =
+              `${formatAnswerForPrompt(req, userAnswer, {
+                roundConclusion: extractLeadConclusion(
+                  stripInteraction(answer),
+                ),
+                confirmations: confirmedBaseline,
+              })}\n\n${SIMPLE_CHAT_INCREMENT_RULE}`;
+            const confirmed = summarizeAnswer(req, userAnswer);
+            if (isPinnableAnswer(req, userAnswer)) {
+              confirmedBaseline.push(`${req.prompt} → ${confirmed}`);
+            }
           }
           const turnMessageId = activeId;
           // Defensive: if a recall block survived into the final answer (e.g.
@@ -6911,10 +7111,17 @@ ${previousReply.slice(0, 4000)}
           }
           // Record the input on the node (keeps the graph a single node).
           commitAiChannelBlueprint(ch, appendStartUserInputs(ch.workflow, [turnText]));
-          syncAndPersistSessionRunStatus(
-            { workspaceId: ch.workspaceId, sessionId: ch.sessionId },
-            'success',
-          );
+          // The user hit Stop mid-turn but the underlying CLI/gateway promise still
+          // resolved (graceful exit flushed remaining text). stopActiveChat already
+          // marked the run 'interrupted'; promoting it to 'success' here would fire
+          // a bogus "会话已完成" desktop notification. Respect the abort signal and
+          // keep the interrupted status.
+          if (!ch.abortController.signal.aborted) {
+            syncAndPersistSessionRunStatus(
+              { workspaceId: ch.workspaceId, sessionId: ch.sessionId },
+              'success',
+            );
+          }
           const userImageCount = sessionTitleImageCount(
             turnText,
             ch.workspaceRootPath ?? undefined,
@@ -6938,6 +7145,8 @@ ${previousReply.slice(0, 4000)}
             cwd: ch.workspaceRootPath ?? undefined,
           });
           stampUsageOnMessage(turnMessageId, usageBefore, explicitUsageDelta());
+          skillFinalAnswer = finalProse;
+          skillTerminal = ch.abortController.signal.aborted ? 'cancelled' : 'completed';
         } catch (err) {
           const msg = (err as Error)?.message ?? String(err);
           // The CLI failed (e.g. ConnectionRefused) before the model call
@@ -6969,7 +7178,32 @@ ${previousReply.slice(0, 4000)}
           }
         } finally {
           globalThis.clearInterval(timingRefresh);
+          try {
+            const ownedMessages = ch.messages.filter((message) =>
+              ch.ownedMessageIds?.has(message.id) ?? message.id === activeId);
+            const tracedMessages: Message[] = turnToolTrace ? [{
+              id: `${userMsg.id}:tools`, role: 'assistant', createdAt: userMsg.createdAt,
+              text: legacyXmlToolsToSentinels(turnToolTrace, { streamingTail: true }),
+            }, ...ownedMessages] : ownedMessages;
+            let changes = collectTurnFileChanges(tracedMessages, null, workspaceRootPath || undefined);
+            if (!changes && turnBaselineReady && workspaceRootPath) {
+              const snapshot = await listWorkspaceChanges(workspaceRootPath, turnChangesKey);
+              changes = collectTurnFileChanges(ownedMessages, snapshot, workspaceRootPath);
+            }
+            const targetId = activeId ?? ownedMessages.filter((message) => message.role === 'assistant').at(-1)?.id;
+            if (changes && targetId) {
+              ch.messages = ch.messages.map((message) => message.id === targetId
+                ? { ...message, fileChanges: changes } : message);
+              aiEditCommitMessages(ch, true);
+            }
+          } catch (error) {
+            console.warn('[session-files] 本轮文件汇总读取失败', error);
+          }
           removeAiEditChannel(ch);
+          skillLearningTurn?.finish({
+            finalAnswer: skillFinalAnswer,
+            terminal: ch.abortController.signal.aborted ? 'cancelled' : skillTerminal,
+          });
         }
       };
       // Every simple-chat turn enters the per-session FIFO. Normal sends stay
@@ -7582,14 +7816,23 @@ function runningSteerEntryForQueued(
 
 function steerableQueuedChatMessageIds(): string[] {
   return [...chatTurnQueueEntries.values()]
-    .filter(
-      (entry) =>
-        !entry.started &&
-        !entry.cancelled &&
-        !entry.steering &&
-        !entry.confirmed &&
-        runningSteerEntryForQueued(entry) !== null,
-    )
+    .filter((entry) => {
+      if (
+        entry.started ||
+        entry.cancelled ||
+        entry.steering ||
+        entry.confirmed
+      ) {
+        return false;
+      }
+      const running = runningSteerEntryForQueued(entry);
+      // Only expose the lightning action when the running CLI exposes a real
+      // in-turn steer channel (codex/claude/zcode). Non-native adapters fall
+      // back to a confirm-only path inside trySteerQueuedCliTurn, which makes
+      // the button feel like a no-op — hide it instead. See issue "GPT 插话
+      // 点击无效".
+      return running?.channel.liveSteer?.native === true;
+    })
     .map((entry) => entry.messageId);
 }
 
@@ -7697,36 +7940,48 @@ async function trySteerQueuedCliTurn(entry: ChatTurnQueueEntry): Promise<boolean
       (message) => message.id === entry.messageId,
     );
     if (userMessage) {
-      // 插话已注入正在运行的这一轮，它属于本轮输入，所以要显示在本轮回复气泡
-      // 之前。否则后续流式内容继续写进它上方那个气泡，插话会被永久压在会话最
-      // 底部（时间条之上、操作按钮之下），看起来像还没发出去。
+      // 插话显示在「当前正在流式的那条 assistant 气泡」正上方——
+      // 用户视觉上看到的是"我打断了这条回复"。
+      // 定位方式：running.channel.messages 里第一条未完成的 assistant。
       const interjection: Message = { ...userMessage, interjected: true };
-      const firstReplyId = running.channel.messages.find(
-        (message) =>
-          message.role === 'assistant' &&
-          running.channel.ownedMessageIds?.has(message.id),
-      )?.id;
-      const placeInterjection = (list: Message[]): Message[] => {
-        const rest = list.filter((message) => message.id !== interjection.id);
-        const at = firstReplyId
-          ? rest.findIndex((message) => message.id === firstReplyId)
-          : -1;
-        if (at < 0) return [...rest, interjection];
-        return [...rest.slice(0, at), interjection, ...rest.slice(at)];
-      };
       running.channel.ownedMessageIds?.add(interjection.id);
-      running.channel.messages = placeInterjection(running.channel.messages);
+      const nextMessages = running.channel.messages.filter(
+        (message) => message.id !== interjection.id,
+      );
+      // Index must be found AFTER the filter, otherwise a removal before the
+      // target shifts everything by one.
+      const streamTargetIdx = nextMessages.findIndex(
+        (message) => message.role === 'assistant' && !message.completedAt,
+      );
+      if (streamTargetIdx >= 0) {
+        nextMessages.splice(streamTargetIdx, 0, interjection);
+      } else {
+        nextMessages.push(interjection);
+      }
+      running.channel.messages = nextMessages;
       running.channel.workflow = simpleWorkflowFromMessages(
         running.channel.workflow,
         running.channel.messages,
       );
-      // The visible list is the merge base, so it needs the same order — merging
-      // preserves `base` positions and would otherwise pull the interjection
-      // back to the tail on the next streaming commit.
+      // The visible list is the merge base, so it needs the same reposition;
+      // merging preserves `base` positions and would otherwise keep the old
+      // copy at its original slot on the next commit.
       if (aiEditViewActive(running.channel)) {
-        useStore.setState((state) => ({
-          messages: placeInterjection(state.messages),
-        }));
+        useStore.setState((state) => {
+          const filtered = state.messages.filter(
+            (message) => message.id !== interjection.id,
+          );
+          const globalStreamTargetIdx = filtered.findIndex(
+            (message) =>
+              message.role === 'assistant' && !message.completedAt,
+          );
+          if (globalStreamTargetIdx >= 0) {
+            filtered.splice(globalStreamTargetIdx, 0, interjection);
+          } else {
+            filtered.push(interjection);
+          }
+          return { messages: filtered };
+        });
       }
       // Keep the active assistant bubble streaming. The user message was
       // already appended to durable history by sendPrompt; persisting this
@@ -8264,6 +8519,257 @@ function rememberAiEditSnapshot(ch: AiEditChannel): void {
 
 const AI_EDIT_PERSIST_DEBOUNCE_MS = 750;
 
+const pendingSessionCreations = new Map<string, Promise<void>>();
+
+async function waitForPersistedSkillSource(
+  workspaceId: string | null,
+  sessionId: string | null,
+): Promise<void> {
+  if (!workspaceId || !sessionId) throw new Error('SKILL_SOURCE_NOT_PERSISTED');
+  await pendingSessionCreations.get(runKey(workspaceId, sessionId));
+  const record = await historyStore.getSession(workspaceId, sessionId);
+  if (!record || record.workspaceId !== workspaceId ||
+    (record.sessionId ?? record.id) !== sessionId || record.deletedAt) {
+    throw new Error('SKILL_SOURCE_NOT_PERSISTED');
+  }
+}
+
+const skillStateWrites = new Map<string, Promise<void>>();
+
+function skillHistorySource(state: SkillReviewState): { workspaceId: string; sessionId: string } {
+  if (state.origin.hostId === 'local' && state.sourceSession === undefined) {
+    return { workspaceId: state.origin.workspaceId, sessionId: state.origin.sessionId };
+  }
+  const source = state.sourceSession;
+  if (state.origin.hostId !== REMOTE_SKILL_HOST_ID || !source?.workspaceId ||
+    source.sessionId !== state.origin.sessionId || !source.serverUrl || state.origin.cwd !== undefined ||
+    [source.workspaceId, source.sessionId].some((id) => id.length > 256 || /[\\/:]/.test(id) || id.indexOf(String.fromCharCode(0)) !== -1 || id === '.' || id === '..')) {
+    throw new Error('SKILL_SOURCE_ORIGIN_MISMATCH');
+  }
+  return { workspaceId: source.workspaceId, sessionId: source.sessionId };
+}
+
+function sameSkillSourceSession(left: SkillReviewState['sourceSession'], right: SkillReviewState['sourceSession']): boolean {
+  return left === undefined && right === undefined || !!left && !!right &&
+    left.workspaceId === right.workspaceId && left.sessionId === right.sessionId && left.serverUrl === right.serverUrl;
+}
+
+async function reviewRemoteSkillLearningAction(
+  state: SkillReviewState, action: 'approve' | 'reject' | 'rollback', id: string,
+): Promise<SkillMutationResult> {
+  const source = state.sourceSession!;
+  const workspace = await historyStore.getWorkspace(source.workspaceId);
+  if (!workspace?.path || !isRemoteWorkspacePath(workspace.path)) throw new Error('REMOTE_SKILL_SOURCE_UNAVAILABLE');
+  const remoteId = remoteWorkspaceIdFromPath(workspace.path);
+  const config = getRemoteWorkspace(remoteId);
+  if (!config?.projectId || !state.mode) throw new Error('REMOTE_SKILL_SOURCE_UNAVAILABLE');
+  const client = await RunnerClient.fromWorkspaceAsync(remoteId);
+  if (!client || client.serverUrl !== source.serverUrl) throw new Error('REMOTE_SKILL_SERVER_MISMATCH');
+  const project = await client.getProject(config.projectId);
+  if (project.id !== state.origin.workspaceId) throw new Error('REMOTE_SKILL_PROJECT_MISMATCH');
+  const host = createRemoteSkillControlHost({ client, projectId: project.id, origin: state.origin, mode: state.mode });
+  try {
+    const result = await host[action](id);
+    if (!sameSkillOrigin(result.origin, state.origin) || action !== 'rollback' && result.batchId !== id) {
+      throw new Error('SKILL_CONTROL_TARGET_MISMATCH');
+    }
+    const history = await host.history();
+    const saved = history.results.find((record) => record.batchId === result.batchId && sameSkillOrigin(record.origin, state.origin));
+    if (!saved || saved.status !== result.status || saved.operationsApplied !== result.operationsApplied) {
+      throw new Error('SKILL_MUTATION_UNCONFIRMED');
+    }
+    return result;
+  } finally {
+    await host.revoke();
+  }
+}
+
+async function reviewPersistedSkillLearningAction(
+  state: SkillReviewState, action: 'approve' | 'reject' | 'rollback', id: string,
+): Promise<SkillMutationResult> {
+  const snapshot = structuredClone(state);
+  const expectedId = action === 'rollback' ? snapshot.result?.rollbackId : snapshot.result?.batchId;
+  if (!id || id !== expectedId || !snapshot.result || !sameSkillOrigin(snapshot.origin, snapshot.result.origin)) {
+    throw new Error('SKILL_CONTROL_TARGET_MISMATCH');
+  }
+  const source = skillHistorySource(snapshot);
+  await waitForPersistedSkillSource(source.workspaceId, source.sessionId);
+  const record = await historyStore.getSession(source.workspaceId, source.sessionId);
+  const saved = record?.messages.find((message) => message.skillLearning &&
+    sameSkillOrigin(message.skillLearning.origin, snapshot.origin) &&
+    message.skillLearning.result?.batchId === snapshot.result!.batchId)?.skillLearning;
+  if (!saved || !sameSkillSourceSession(saved.sourceSession, snapshot.sourceSession) || saved.mode !== snapshot.mode || saved.status !== snapshot.status ||
+    (action === 'rollback' ? saved.result?.rollbackId : saved.result?.batchId) !== id) {
+    throw new Error('SKILL_REVIEW_MESSAGE_REQUIRED');
+  }
+  const result = saved.origin.hostId === REMOTE_SKILL_HOST_ID
+    ? await reviewRemoteSkillLearningAction(structuredClone(saved), action, id)
+    : await performSkillReviewAction(structuredClone(saved), action);
+  if (!sameSkillOrigin(result.origin, snapshot.origin) || (action !== 'rollback' && result.batchId !== id)) {
+    throw new Error('SKILL_RESULT_ORIGIN_MISMATCH');
+  }
+  return result;
+}
+
+const skillRetries = new Set<string>();
+export async function retryPersistedSkillLearning(state: SkillReviewState): Promise<void> {
+  const source = skillHistorySource(state);
+  const record = await historyStore.getSession(source.workspaceId, source.sessionId);
+  const saved = record?.messages.find((message) => message.skillLearning && sameSkillOrigin(message.skillLearning.origin, state.origin))?.skillLearning;
+  if (!saved?.resume || !['failed', 'cancelled', 'conflicted'].includes(saved.status)) throw new Error('SKILL_REVIEW_SOURCE_UNAVAILABLE');
+  if (isSkillReviewLive(saved.origin.runId) || skillRetries.has(saved.origin.runId)) return;
+  skillRetries.add(saved.origin.runId);
+  let writes = Promise.resolve();
+  try {
+    await resumeSkillLearningReview(saved, (next) => {
+      writes = writes.then(() => persistSkillLearningStateForSource(source, next));
+      void writes.catch(() => {});
+    });
+    await writes;
+  } finally { skillRetries.delete(saved.origin.runId); }
+}
+
+function startExplicitSkillLearning(kind: 'learn' | 'refine', text: string): boolean {
+  const current = useStore.getState();
+  const { workspaceId, sessionId } = activeWorkflowSessionKey(current);
+  const input = text.trim();
+  const reject = (message: string) => {
+    useStore.setState({ blockedSendTip: { kind: 'slash-command-unavailable', message } });
+    return false;
+  };
+  if (!tauriAvailable() || !current.historyReady || !workspaceId || !sessionId || isWorkflowReadOnly(current)) {
+    return reject(current.locale === 'en-US' ? 'Skill review requires an available host and an existing source session.' : '技能复盘需要可用宿主和已有来源会话。');
+  }
+  if (kind === 'learn' && !input) return reject('/learn requires lesson text.');
+  const config = loadSkillLearningConfig(workspaceId);
+  if (!config.enabled || config.mode === 'off') return reject(current.locale === 'en-US' ? 'Skill learning is disabled.' : '技能学习已关闭。');
+  const previous = [...current.messages].reverse().find((message) => message.role === 'user' &&
+    message.skillContext?.origin.hostId === 'local' && message.skillContext.origin.workspaceId === workspaceId &&
+    message.skillContext.origin.sessionId === sessionId)?.skillContext;
+  if (kind === 'refine' && !previous) return reject(current.locale === 'en-US' ? 'No persisted skill source is available to refine.' : '尚无已保存的技能来源可复盘。');
+  if (previous?.origin.cwd && isRemoteWorkspacePath(previous.origin.cwd)) return reject('REMOTE_SKILL_REVIEW_REQUIRED');
+  const commandId = shortId('m');
+  const origin: SkillOrigin = kind === 'refine' ? { ...previous!.origin } : {
+    hostId: 'local', workspaceId, sessionId, turnId: commandId, runId: commandId,
+    ...(previous?.origin.cwd ? { cwd: previous.origin.cwd } : {}),
+  };
+  const command: Message = { id: commandId, role: 'user', text: `/${kind}${input ? ` ${input}` : ''}`,
+    createdAt: Date.now(), localOnly: true, ...(kind === 'learn' ? { skillContext: {
+      origin: { ...origin }, loadedSkills: [], catalogRevision: '',
+    } } : {}) };
+  const source = { workspaceId, sessionId };
+  const selection = { ...workflowDefaultGatewaySelection(current.workflow, current.composer.model) };
+  useStore.setState({ blockedSendTip: null, messages: [...current.messages, command] });
+  const ready = (async () => {
+    await waitForPersistedSkillSource(workspaceId, sessionId);
+    await historyStore.appendMessage(workspaceId, sessionId, command);
+    const record = await historyStore.getSession(workspaceId, sessionId);
+    if (!record?.messages.some((message) => message.id === commandId && message.text === command.text)) {
+      throw new Error('SKILL_SOURCE_MESSAGE_NOT_PERSISTED');
+    }
+    if (kind === 'refine' && !record.messages.some((message) => message.skillContext && sameSkillOrigin(message.skillContext.origin, origin))) {
+      throw new Error('SKILL_SOURCE_ORIGIN_MISMATCH');
+    }
+  })();
+  void ready.then(() => requestExplicitSkillLearning({ origin, kind, text: input, selection, config, ready,
+    onState: (state) => { void persistSkillLearningStateForSource(source, state).catch((error) => console.warn('[skills] 显式学习状态回存失败', error)); },
+  })).then((result) => persistSkillLearningStateForSource(source, {
+    origin: result.origin, mode: config.mode, status: result.status, result, error: result.error,
+  })).catch((error) => {
+    console.warn('[skills] 显式学习失败', error);
+    if (useStore.getState().activeWorkspaceId === workspaceId && useStore.getState().activeSessionId === sessionId) {
+      useStore.setState({ blockedSendTip: { kind: 'slash-command-unavailable', message: String(error) } });
+    }
+  });
+  return true;
+}
+
+async function persistSkillContextForSource(
+  source: AiEditChannel, messageId: string, context: NonNullable<Message['skillContext']>,
+): Promise<void> {
+  const metadata = structuredClone(context);
+  const { workspaceId, sessionId } = source;
+  if (!workspaceId || !sessionId || metadata.origin.workspaceId !== workspaceId ||
+    metadata.origin.sessionId !== sessionId || metadata.origin.turnId !== messageId) {
+    throw new Error('SKILL_SOURCE_ORIGIN_MISMATCH');
+  }
+  await waitForPersistedSkillSource(workspaceId, sessionId);
+  const message = source.messages.find((item) => item.id === messageId);
+  if (!message || message.role !== 'user') throw new Error('SKILL_SOURCE_MESSAGE_REQUIRED');
+  const updated = { ...message, skillContext: metadata };
+  source.messages = source.messages.map((item) => item.id === messageId ? updated : item);
+  aiEditCommitMessages(source, true);
+  await historyStore.upsertMessage(workspaceId, sessionId, updated, true);
+  const saved = (await historyStore.getSession(workspaceId, sessionId))?.messages.find((item) => item.id === messageId);
+  if (!saved?.skillContext || !sameSkillOrigin(saved.skillContext.origin, metadata.origin) ||
+    saved.skillContext.catalogRevision !== metadata.catalogRevision) throw new Error('SKILL_CONTEXT_NOT_PERSISTED');
+}
+
+function sameSkillOrigin(left: SkillOrigin, right: SkillOrigin): boolean {
+  return (['hostId', 'workspaceId', 'sessionId', 'turnId', 'runId', 'cwd'] as const)
+    .every((field) => left[field] === right[field]);
+}
+
+/** Background results target the captured history bucket, never the active view. */
+export function persistSkillLearningStateForSource(
+  source: Pick<AiEditChannel, 'workspaceId' | 'sessionId'>,
+  state: SkillReviewState,
+  messageId?: string,
+): Promise<void> {
+  const frozen = structuredClone(state);
+  const workspaceId = source.workspaceId;
+  const sessionId = source.sessionId;
+  const locator = skillHistorySource(frozen);
+  if (!workspaceId || !sessionId || locator.workspaceId !== workspaceId ||
+    locator.sessionId !== sessionId || (frozen.result && !sameSkillOrigin(frozen.origin, frozen.result.origin))) {
+    return Promise.reject(new Error('SKILL_RESULT_ORIGIN_MISMATCH'));
+  }
+  const key = runKey(workspaceId, sessionId);
+  const write = (skillStateWrites.get(key) ?? Promise.resolve()).catch(() => {}).then(async () => {
+    await waitForPersistedSkillSource(workspaceId, sessionId);
+    flushAiEditPersistKey(aiEditPersistKey(workspaceId, sessionId));
+    const current = await historyStore.getSession(workspaceId, sessionId);
+    const existing = messageId === undefined ? undefined : current?.messages.find((item) => item.id === messageId);
+    if (messageId !== undefined && (!existing?.skillLearning || !sameSkillOrigin(existing.skillLearning.origin, frozen.origin) ||
+      !sameSkillSourceSession(existing.skillLearning.sourceSession, frozen.sourceSession))) {
+      throw new Error('SKILL_REVIEW_MESSAGE_REQUIRED');
+    }
+    if (existing?.skillLearning && existing.skillLearning.mode !== frozen.mode) {
+      throw new Error('SKILL_REVIEW_MODE_MISMATCH');
+    }
+    const message: Message = {
+      id: messageId ?? `skill-learning:${frozen.origin.runId}`,
+      role: 'assistant', text: '', createdAt: existing?.createdAt ?? Date.now(), localOnly: true,
+      skillLearning: frozen,
+    };
+    await historyStore.upsertMessage(workspaceId, sessionId, message, true);
+    const record = await historyStore.getSession(workspaceId, sessionId);
+    const saved = record?.messages.find((item) => item.id === message.id);
+    if (!saved?.skillLearning || !sameSkillOrigin(saved.skillLearning.origin, frozen.origin)) {
+      throw new Error('SKILL_RESULT_NOT_PERSISTED');
+    }
+    const merge = (messages: Message[]) => messages.some((item) => item.id === saved.id)
+      ? messages.map((item) => item.id === saved.id ? saved : item)
+      : [...messages, saved];
+    for (const channel of getAiEditChannelsForSession(workspaceId, sessionId)) {
+      channel.messages = merge(channel.messages);
+      rememberAiEditSnapshot(channel);
+    }
+    for (const snapshot of aiEditSnapshots.values()) {
+      if (snapshot.workspaceId === workspaceId && snapshot.sessionId === sessionId) snapshot.messages = merge(snapshot.messages);
+    }
+    const pending = pendingAiEditPersists.get(aiEditPersistKey(workspaceId, sessionId));
+    if (pending?.patch.messages) pending.patch.messages = merge(pending.patch.messages);
+    useStore.setState((current) => current.activeWorkspaceId === workspaceId && current.activeSessionId === sessionId
+      ? { messages: merge(current.messages) } : current);
+  });
+  skillStateWrites.set(key, write);
+  void write.finally(() => {
+    if (skillStateWrites.get(key) === write) skillStateWrites.delete(key);
+  }).catch(() => {});
+  return write;
+}
+
 interface PendingAiEditPersist {
   workspaceId: string;
   sessionId: string;
@@ -8313,6 +8819,7 @@ function scheduleAiEditPersist(
     sessionId: ch.sessionId ?? undefined,
     patch: {
       ...(prev?.patch ?? {}),
+      ...(ch.chat ? { mergeMessages: true } : {}),
       ...patch,
       meta: {
         ...(prev?.patch.meta ?? {}),
@@ -8332,12 +8839,44 @@ function aiEditOwnedMessages(ch: AiEditChannel): Message[] {
   return ch.messages.filter((message) => ch.ownedMessageIds?.has(message.id));
 }
 
-export function mergeMessagesById(base: Message[], updates: Message[]): Message[] {
+/**
+ * Wall-clock freshness of a message: the completion stamp when the turn
+ * finished, otherwise its creation stamp. Used to decide which of two copies of
+ * the SAME message id (persisted record vs retained channel snapshot) is the
+ * newer one — a mid-stream commit stamps an early `completedAt`, the final
+ * answer stamps a later one, and a still-streaming reply carries none.
+ */
+export function messageFreshness(message: Message): number {
+  return message.completedAt ?? message.createdAt;
+}
+
+/**
+ * Conflict resolver for {@link mergeMessagesById}: keep whichever copy of the
+ * message id is fresher, preferring `base` when both agree (equal stamps mean
+ * no information either way, and the persisted record is the authority).
+ */
+export function newerMessage(base: Message, update: Message): Message {
+  return messageFreshness(update) > messageFreshness(base) ? update : base;
+}
+
+/**
+ * Merge by id, preserving `base` ordering. `resolve` arbitrates when both sides
+ * carry the same id; without it the `updates` copy wins (in-place edit).
+ */
+export function mergeMessagesById(
+  base: Message[],
+  updates: Message[],
+  resolve?: (baseMessage: Message, updateMessage: Message) => Message,
+): Message[] {
   if (updates.length === 0) return base;
   const byId = new Map(updates.map((message) => [message.id, message]));
   // Apply in-place updates first, preserving `base` ordering for messages that
   // already exist (e.g. live streaming edits to an assistant bubble).
-  const merged = base.map((message) => byId.get(message.id) ?? message);
+  const merged = base.map((message) => {
+    const update = byId.get(message.id);
+    if (!update) return message;
+    return resolve ? resolve(message, update) : update;
+  });
   const indexOfId = new Map(merged.map((message, index) => [message.id, index]));
   // Insert brand-new messages at the position implied by the `updates` order
   // rather than blindly at the tail. A turn's owned messages are ordered
@@ -8365,9 +8904,37 @@ export function mergeMessagesById(base: Message[], updates: Message[]): Message[
   return merged;
 }
 
+/**
+ * Merge base for a background (non-viewed) AI-edit channel.
+ *
+ * Deliberately NON-monotonic sources are banned here. `aiEditSnapshots` is
+ * written on EVERY commit (`rememberAiEditSnapshot`) and never invalidated, so
+ * a snapshot can be OLDER than the conversation: an interjection commits the
+ * still-running reply, freezing that mid-stream text into the snapshot, and the
+ * final answer only lands on disk afterwards. Using the snapshot as the base
+ * then rolls the channel back — and because the rolled-back buffer is what
+ * `persistAiEditMessages` writes out (750 ms debounce), the rollback reaches
+ * disk too. That is exactly "switch away, switch back: the final answer is gone
+ * and an already-dropped mid-stream copy is back".
+ *
+ * The channel's own buffer only ever grows forward, so it is the base whenever
+ * it has anything; the snapshot is a bootstrap fallback for a channel that has
+ * not produced a single message yet.
+ */
+export function aiEditMergeBaseMessages(
+  channelMessages: Message[],
+  snapshotMessages: Message[] | undefined,
+): Message[] {
+  if (channelMessages.length > 0) return channelMessages;
+  return snapshotMessages ?? channelMessages;
+}
+
 function aiEditBaseMessages(ch: AiEditChannel): Message[] {
   if (aiEditViewActive(ch)) return useStore.getState().messages;
-  return getAiEditSnapshot(ch.workspaceId, ch.sessionId)?.messages ?? ch.messages;
+  return aiEditMergeBaseMessages(
+    ch.messages,
+    getAiEditSnapshot(ch.workspaceId, ch.sessionId)?.messages,
+  );
 }
 
 function mergeAiEditChatMessages(ch: AiEditChannel): Message[] {
@@ -8383,6 +8950,10 @@ function startInputsFromWorkflow(workflow: IRGraph): string[] {
 
 function aiEditBaseWorkflow(ch: AiEditChannel): IRGraph {
   if (aiEditViewActive(ch)) return useStore.getState().workflow;
+  // Same monotonic-source rule as `aiEditBaseMessages`: once the channel has
+  // produced anything, its own workflow wins over the retained snapshot, which
+  // may predate it.
+  if (ch.messages.length > 0) return ch.workflow;
   return getAiEditSnapshot(ch.workspaceId, ch.sessionId)?.workflow ?? ch.workflow;
 }
 
@@ -8423,6 +8994,7 @@ export function updateAiEditSessionSummary(ch: AiEditChannel): void {
             updatedAt,
             preview: last ? previewFromText(last) : session.preview,
             messageCount: ch.messages.length,
+            ...(sessionHasContextCompression(ch.messages) ? { contextCompressed: true } : {}),
           };
           if (ch.workflowSession && ch.workflow.meta?.simple === true) {
             return { ...next, simple: true };
@@ -8710,6 +9282,17 @@ function dismissSettledWaitingInputNotifications(
 
 /** Max times a single node may ask the user before we stop re-invoking it. */
 const MAX_INTERACTION_ROUNDS = 6;
+
+/**
+ * Appended to every interaction-continuation in simple-chat mode. Without it a
+ * follow-up answer re-runs the whole task and the model re-emits the entire
+ * deliverable: session 037bb1b8 produced the same 10-question interview set
+ * five times over (each round cost 3–10 minutes) because answering "要不要导出
+ * docx？" was implemented as "run the task again".
+ */
+const SIMPLE_CHAT_INCREMENT_RULE =
+  '本轮只输出相对上一轮的增量或改动部分。如果上一轮已经给出过完整交付物（整套题、文档、报告等），不要重发全量内容；' +
+  '也不要重新读一遍已经读过的资料。只有在你判断上一轮并没有产出可用结果时，才重新给出完整结果。';
 
 /** How many prior chat turns simple-workflow mode folds into the prompt for
  *  multi-turn context (bounded so long chats don't overflow the model). */
@@ -9203,6 +9786,51 @@ function resolvePendingAiEditInteractions(ch: AiEditChannel | null): void {
       : m;
   ch.messages = ch.messages.map(mark);
   aiEditCommitMessages(ch, true);
+}
+
+/**
+ * New user message arrived on a session: cancel every parked interaction for
+ * that session so the previous chat turn's `awaitInteraction` resolves null
+ * immediately and unwinds through its `finally`, releasing the per-session
+ * FIFO (`enqueueChatTurn`) for the new turn. Without this, a user who replies
+ * by typing a fresh message instead of clicking the widget would queue behind
+ * an await that never resolves — the visible "send it and nothing happens".
+ *
+ * Only cancels entries whose sessionKey matches; widgets on OTHER sessions are
+ * left alone so the user can still answer them after switching back. Pending
+ * widgets are marked cancelled on the channel so they stop looking clickable.
+ */
+function cancelParkedInteractionsForSession(
+  sessionKey: WorkflowSessionKey | null,
+): void {
+  if (!sessionKey) return;
+  const targetId = workflowSessionKeyId(sessionKey);
+  const settledSessionKeys: Array<WorkflowSessionKey | null> = [];
+  const cancelledMessageIds = new Set<string>();
+  for (const [id, entry] of [...pendingInteractionResolvers]) {
+    if (!entry.sessionKey) continue;
+    if (workflowSessionKeyId(entry.sessionKey) !== targetId) continue;
+    pendingInteractionResolvers.delete(id);
+    settledSessionKeys.push(entry.sessionKey);
+    cancelledMessageIds.add(id);
+    entry.resolve(null);
+  }
+  if (cancelledMessageIds.size === 0) return;
+  syncWaitingInputSessions();
+  dismissSettledWaitingInputNotifications(settledSessionKeys);
+  // Mark the parked widgets cancelled in any ai-edit channel that owns them so
+  // the user sees "交互已取消" instead of a dead-clickable widget. We scan the
+  // session's channels rather than track a single owner because the same
+  // session can be rendered by multiple channels across reconnects.
+  for (const ch of getAiEditChannelsForSession(sessionKey.workspaceId, sessionKey.sessionId)) {
+    if (!ch.messages.some((m) => cancelledMessageIds.has(m.id))) continue;
+    ch.messages = ch.messages.map((m) =>
+      cancelledMessageIds.has(m.id) && m.interaction && m.interactionStatus === 'pending'
+        ? { ...m, interactionStatus: 'cancelled' }
+        : m,
+    );
+    aiEditCommitMessages(ch, true);
+  }
 }
 
 /** Append a system log line to the message stream (routed through the run channel). */

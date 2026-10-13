@@ -67,7 +67,12 @@ describe('installQuitFlushHandler', () => {
     expect(listener).toBeTypeOf('function');
     listener?.();
 
-    expect(mocks.flushSecretsToLocalStorageFallback).toHaveBeenCalledOnce();
+    // The handler defers to an async IIFE (it awaits the running-session
+    // guard first), so the secrets flush lands a tick later — assert it inside
+    // waitFor rather than synchronously.
+    await vi.waitFor(() => {
+      expect(mocks.flushSecretsToLocalStorageFallback).toHaveBeenCalledOnce();
+    });
     await vi.waitFor(() => {
       expect(mocks.invoke).toHaveBeenCalledWith('ugs_quit_flush_done');
     });

@@ -1,12 +1,19 @@
-import { act, createElement } from 'react';
+import { act, createElement, useCallback, useState } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import FilePreviewDrawer from './FilePreviewDrawer';
+import FilePreviewDrawer, { rewriteLocalAssetsInHtml } from './FilePreviewDrawer';
 import { previewLocalFile, workspaceFileDiff } from '@/lib/tauri';
+import GeneratedArtifactsCard from './GeneratedArtifactsCard';
+import FileChip from './FileChip';
+import SmartLink from './SmartLink';
+import EditedFilesCard from './EditedFilesCard';
+import type { FileRef } from './lib/filePath';
 
 vi.mock('@/lib/tauri', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/tauri')>()),
   openLocalPath: vi.fn(),
+  fileExists: vi.fn().mockResolvedValue(true),
+  readImageThumbnail: vi.fn().mockRejectedValue(new Error('No thumbnail')),
   previewLocalFile: vi.fn(),
   workspaceFileDiff: vi.fn(),
 }));
@@ -249,6 +256,73 @@ describe('FilePreviewDrawer', () => {
     expect(onClose).toHaveBeenCalledOnce();
   });
 
+  it.each(['overlay', 'embedded'] as const)(
+    '%s switches directly between preview entries without closing on pointerdown',
+    async (variant) => {
+      const first = { path: 'report.md', basename: 'report.md' };
+      const second = { path: 'result.svg', basename: 'result.svg' };
+      const onClose = vi.fn();
+      vi.mocked(previewLocalFile).mockImplementation(async (path) => ({
+        path,
+        fileName: path,
+        kind: 'text',
+        mime: 'text/plain',
+        sizeBytes: 16,
+        truncated: false,
+        text: `Preview: ${path}`,
+        base64: null,
+      }));
+
+      function PreviewEntries() {
+        const [refData, setRefData] = useState<FileRef | null>(first);
+        const close = useCallback(() => {
+          onClose();
+          setRefData(null);
+        }, []);
+        return createElement('div', {},
+          createElement(GeneratedArtifactsCard, {
+            artifacts: [{ ref: first, label: 'Report' }, { ref: second, label: 'Image' }],
+            onOpenFile: setRefData,
+          }),
+          createElement(FileChip, { refData: first, onOpenFile: setRefData }),
+          createElement(FileChip, { refData: second, onOpenFile: setRefData, thumbnailOnly: true }),
+          createElement(SmartLink, {
+            href: 'https://example.com/remote.png', children: 'Remote image', onOpenFile: setRefData,
+          }),
+          createElement(EditedFilesCard, {
+            changes: { source: 'agent', files: [{ path: 'source.ts', status: 'modified', added: 1, deleted: 0 }] },
+            locale: 'zh-CN', onOpenFile: setRefData,
+          }),
+          refData && createElement(FilePreviewDrawer, { refData, variant, onClose: close }),
+        );
+      }
+
+      await act(async () => root.render(createElement(PreviewEntries)));
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+
+      for (const [selector, expectedLabel] of [
+        ['button[aria-label="打开生成物：result.svg"] span span', second.basename],
+        ['.ai-file-chip__label', first.basename],
+        ['.ai-file-chip-thumb', second.basename],
+        ['button[title="在右侧预览"]', 'Remote image'],
+        ['[data-ugs-edited-files] button[title="source.ts"] span', 'source.ts'],
+      ]) {
+        const target = container.querySelector<HTMLElement>(selector);
+        expect(target, selector).not.toBeNull();
+        await act(async () => {
+          target!.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
+        });
+        expect(onClose, `Pointerdown on ${selector} must preserve the preview`).not.toHaveBeenCalled();
+        await act(async () => target!.click());
+        expect(container.querySelector('header')?.textContent).toContain(expectedLabel);
+      }
+
+      await act(async () => document.body.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true })));
+      expect(onClose).toHaveBeenCalledOnce();
+      expect(container.querySelector('header')).toBeNull();
+    },
+  );
+
   it('renders image previews through a blob URL instead of a large data URL', async () => {
     vi.useFakeTimers();
     const createObjectUrl = vi.fn(() => 'blob:preview-image');
@@ -409,3 +483,60 @@ describe('FilePreviewDrawer', () => {
     expect(container.querySelector('.ai-file-preview-diff__minimap')).not.toBeNull();
   });
 });
+
+describe('rewriteLocalAssetsInHtml', () => {
+  it('converts Windows absolute paths inside src/srcset/href to asset URLs', () => {
+    const html =
+      '<img src="E:\\UltraGameStudio\\.ultragamestudio\\clipboard-images\\pasted-1.png">' +
+      '<source srcset="E:/x/a.png 1x, E:/x/a@2x.png 2x">' +
+      '<a href="E:\\x\\doc.pdf">link</a>';
+    const out = rewriteLocalAssetsInHtml(html, '');
+    expect(out).toContain(
+      `http://asset.localhost/${encodeURIComponent(
+        'E:\\UltraGameStudio\\.ultragamestudio\\clipboard-images\\pasted-1.png',
+      )}`,
+    );
+    expect(out).toContain(
+      `http://asset.localhost/${encodeURIComponent('E:/x/a.png')} 1x`,
+    );
+    expect(out).toContain(
+      `http://asset.localhost/${encodeURIComponent('E:/x/a@2x.png')} 2x`,
+    );
+    expect(out).toContain(
+      `http://asset.localhost/${encodeURIComponent('E:\\x\\doc.pdf')}`,
+    );
+  });
+
+  it('resolves relative paths against baseDir', () => {
+    const out = rewriteLocalAssetsInHtml(
+      '<img src="./img/pic.png">',
+      'E:\\site',
+    );
+    expect(out).toContain(
+      `http://asset.localhost/${encodeURIComponent('E:\\site\\img\\pic.png')}`,
+    );
+  });
+
+  it('leaves network/data URLs untouched', () => {
+    const html =
+      '<img src="https://cdn/x.png"><img src="data:image/png;base64,AAAA">';
+    expect(rewriteLocalAssetsInHtml(html, '')).toBe(html);
+  });
+
+  it('rewrites CSS url() values', () => {
+    const out = rewriteLocalAssetsInHtml(
+      '<style>.a{background:url(E:\\x\\bg.png)}</style>',
+      '',
+    );
+    expect(out).toContain(
+      `url("http://asset.localhost/${encodeURIComponent('E:\\x\\bg.png')}")`,
+    );
+  });
+
+  it('does not mistake a drive letter for a scheme', () => {
+    const out = rewriteLocalAssetsInHtml('<img src="E:\\a\\b.png">', '');
+    expect(out).not.toContain('src="E:\\a\\b.png"');
+    expect(out).toContain('asset.localhost');
+  });
+});
+

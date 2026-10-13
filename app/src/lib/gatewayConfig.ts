@@ -70,23 +70,24 @@ async function getInvoke() {
   return invoke;
 }
 
-// Track in-flight disk writes so the quit-flush handshake can await them.
-// Write-behind is fire-and-forget during normal operation, but on exit we must
-// drain the queue or the on-disk settings files go stale.
-const inflightDiskWrites = new Set<Promise<void>>();
+// Serialize writes per key, as apiConfig does. Provider synchronization can
+// write a default selection just before settings writes the thinking level;
+// concurrent writes would let that older value overwrite the user's choice.
+const pendingDiskWrites = new Map<string, Promise<void>>();
 
-function diskWriteSoon(relPath: string, json: string): void {
+function diskWriteSoon(key: string, relPath: string): void {
   if (!tauriAvailable()) return;
-  const write = (async () => {
+  const previous = pendingDiskWrites.get(key) ?? Promise.resolve();
+  const write = previous.catch(() => {}).then(async () => {
+    const json = diskCache.get(key) ?? 'null';
     try {
       const invoke = await getInvoke();
       await invoke<void>('history_write_json', { relPath, json });
     } catch (err) {
       console.error('[gatewayConfig] disk write failed', relPath, err);
     }
-  })();
-  inflightDiskWrites.add(write);
-  void write.then(() => inflightDiskWrites.delete(write));
+  });
+  pendingDiskWrites.set(key, write);
 }
 
 /**
@@ -95,13 +96,13 @@ function diskWriteSoon(relPath: string, json: string): void {
  * even if individual writes failed (errors are logged inside diskWriteSoon).
  */
 export async function flushGatewayConfigDiskWrites(): Promise<void> {
-  await Promise.all([...inflightDiskWrites]);
+  await Promise.all([...pendingDiskWrites.values()]);
 }
 
-function diskDeleteSoon(relPath: string): void {
+function diskDeleteSoon(key: string, relPath: string): void {
   // history_write_json validates the payload as JSON, so a deletion is recorded
   // as the JSON literal `null`; the sync readers treat "null"/"" as absent.
-  diskWriteSoon(relPath, 'null');
+  diskWriteSoon(key, relPath);
 }
 
 function localStorageSet(key: string, value: string): boolean {
@@ -145,7 +146,7 @@ export async function initializeGatewayConfigStore(): Promise<void> {
         }
         if (legacy != null) {
           diskCache.set(key, legacy);
-          diskWriteSoon(relPath, legacy);
+          diskWriteSoon(key, relPath);
         }
       }),
     );
@@ -179,7 +180,7 @@ function rawSet(key: string, value: string): void {
     // change event fires reliably even when the localStorage mirror is full.
     diskCache.set(key, value);
     localStorageSet(key, value); // best-effort mirror
-    diskWriteSoon(relPath, value);
+    diskWriteSoon(key, relPath);
     if (hasWindow()) window.dispatchEvent(new Event('ugs:gateway-config-changed'));
     return;
   }
@@ -197,7 +198,7 @@ function rawRemove(key: string): void {
     } catch {
       /* ignore */
     }
-    diskDeleteSoon(relPath);
+    diskDeleteSoon(key, relPath);
     if (hasWindow()) window.dispatchEvent(new Event('ugs:gateway-config-changed'));
     return;
   }
@@ -213,6 +214,7 @@ function rawRemove(key: string): void {
 /** Test-only: reset the disk-backed cache between cases. */
 export function resetGatewayConfigStoreForTests(): void {
   diskCache.clear();
+  pendingDiskWrites.clear();
   diskReady = false;
 }
 
@@ -263,10 +265,15 @@ function normalizeSelection(value: unknown): GatewaySelection | null {
     typeof raw.modelOverride === 'string' && raw.modelOverride.trim()
       ? raw.modelOverride.trim()
       : undefined;
+  const thinkingLevel =
+    typeof raw.thinkingLevel === 'string' && raw.thinkingLevel.trim()
+      ? raw.thinkingLevel.trim()
+      : undefined;
   return {
     adapter: normalizeAdapter(raw.adapter),
     modelClass,
     ...(modelOverride ? { modelOverride } : {}),
+    ...(thinkingLevel ? { thinkingLevel } : {}),
     ...(systemDefault ? { systemDefault: true } : {}),
     ...(systemDefault
       ? {}

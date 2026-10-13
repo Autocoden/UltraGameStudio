@@ -1,7 +1,7 @@
 import { isValidElement, type MouseEvent, type ReactNode } from 'react';
 import { ExternalLink, Image as ImageIcon } from 'lucide-react';
 import { openExternal } from '@/lib/tauri';
-import { parseFileRef } from './lib/filePath';
+import { parseFileRef, type FileRef } from './lib/filePath';
 import FileChip, { type OpenFileFn } from './FileChip';
 import AudioPlayer from './AudioPlayer';
 import VideoPlayer from './VideoPlayer';
@@ -61,7 +61,7 @@ export default function SmartLink({
     );
   }
 
-  if (ref) return <FileChip refData={ref} onOpenFile={onOpenFile} cwd={cwd} />;
+  if (ref) return <FileChip refData={ref} onOpenFile={onOpenFile} cwd={cwd} label={children} />;
 
   if (isVideoUrl) {
     return <VideoPlayer src={url} label={labelText} />;
@@ -76,6 +76,7 @@ export default function SmartLink({
       <button
         type="button"
         onClick={() => void onOpenFile(createImagePreviewRef(url, labelText))}
+        data-file-preview-trigger="true"
         title="在右侧预览"
         className="inline-flex items-center gap-0.5 text-accent underline decoration-accent/40 underline-offset-2 hover:decoration-accent"
       >
@@ -86,9 +87,9 @@ export default function SmartLink({
   }
 
   if (!isExternal) {
-    const childRef = parseFileRef(labelText, { allowSpaces: true });
+    const childRef = resolveLabelRef(labelText);
     if (childRef) {
-      return <FileChip refData={childRef} onOpenFile={onOpenFile} cwd={cwd} />;
+      return <FileChip refData={childRef} onOpenFile={onOpenFile} cwd={cwd} label={children} />;
     }
   }
 
@@ -113,8 +114,29 @@ export default function SmartLink({
     );
   }
 
-  // Unknown scheme / relative anchor — render as plain styled text.
-  return <span className="text-accent underline underline-offset-2">{children}</span>;
+  // Unknown scheme / relative anchor — there is no local file behind the text,
+  // and no web target either. Render it as dimmed plain text instead of an
+  // accent-coloured, underlined span: a link that looks clickable but does
+  // nothing is exactly the "交付物点不动" report this branch keeps producing.
+  return <span className="text-fg-dim">{children}</span>;
+}
+
+/**
+ * Resolve the *link text* to a local file when the href itself is unusable
+ * (folder destination, sanitised scheme, empty string).
+ *
+ * Models routinely label a deliverable with a human-readable annotation —
+ * `[report.md（162 KB / 1757 行 / 113 张图引用）](…)` — which is not a valid path
+ * as a whole string. Try the whole label first, then retry with one trailing
+ * bracketed annotation stripped, so the annotation stops costing the user a
+ * clickable artifact.
+ */
+function resolveLabelRef(label: string): FileRef | null {
+  const direct = parseFileRef(label, { allowSpaces: true });
+  if (direct) return direct;
+  const stripped = label.replace(/[（(][^（）()]*[)）]\s*$/u, '').trim();
+  if (!stripped || stripped === label) return null;
+  return parseFileRef(stripped, { allowSpaces: true });
 }
 
 function childrenToText(children: ReactNode): string {

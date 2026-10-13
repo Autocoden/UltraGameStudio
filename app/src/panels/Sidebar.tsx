@@ -1,8 +1,11 @@
 import { useState, useCallback, useEffect, useMemo } from 'react';
 import {
   AlarmClock,
+  Check,
   ChevronDown,
   ChevronRight,
+  Copy,
+  Layers,
   FolderOpen,
   MoreHorizontal,
   Pencil,
@@ -37,7 +40,11 @@ import {
   type WorkflowSessionKey,
 } from '@/store/useStore';
 import type { ScheduledTaskConfig, Session } from '@/store/types';
-import type { WorkspaceSummary } from '@/store/history/types';
+import {
+  DEFAULT_WORKSPACE_ID,
+  HISTORY_ROOT_DIR,
+  type WorkspaceSummary,
+} from '@/store/history/types';
 import type { Locale } from '@/lib/i18n';
 import {
   projectHealth,
@@ -230,6 +237,7 @@ function historyStatusLabel(
   if (status === 'draft') return t(locale, 'sidebar.hasDraft');
   if (status === 'successUnread') return t(locale, 'sidebar.completedUnread');
   if (status === 'success') return t(locale, 'sidebar.completed');
+  if (status === 'interrupted') return t(locale, 'sidebar.interrupted');
   return t(locale, 'sidebar.failed');
 }
 
@@ -247,20 +255,18 @@ function historyStatusTone(
   if (session.runStatus === 'success') {
     return session.unreadCompletion === true ? 'successUnread' : 'success';
   }
-  if (
-    session.runStatus === 'error' ||
-    session.runStatus === 'interrupted'
-  ) {
-    return 'failed';
-  }
+  if (session.runStatus === 'error') return 'failed';
+  if (session.runStatus === 'interrupted') return 'interrupted';
   return session.isWorkflow && !session.simple ? 'unrun' : null;
 }
 
 function projectStatusClassName(tone: ProjectHealthTone): string {
-  if (tone === 'connected') return 'bg-emerald-400 shadow-[0_0_0_2px_rgba(52,211,153,0.16)]';
-  if (tone === 'failed') return 'bg-red-400 shadow-[0_0_0_2px_rgba(248,113,113,0.16)]';
-  if (tone === 'configured') return 'bg-amber-400 shadow-[0_0_0_2px_rgba(251,191,36,0.16)]';
-  if (tone === 'detected') return 'bg-sky-400 shadow-[0_0_0_2px_rgba(56,189,248,0.16)]';
+  // Ring instead of a literal rgba() glow: the old shadows were hardcoded samples
+  // of Tailwind's palette, so they never matched the themed status colors.
+  if (tone === 'connected') return 'bg-status-success ring-2 ring-status-success/20';
+  if (tone === 'failed') return 'bg-status-error ring-2 ring-status-error/20';
+  if (tone === 'configured') return 'bg-status-warning ring-2 ring-status-warning/20';
+  if (tone === 'detected') return 'bg-status-info ring-2 ring-status-info/20';
   return 'bg-fg-faint/40';
 }
 
@@ -317,22 +323,77 @@ function sessionVisibleInTab(session: Session, tab: SidebarTab): boolean {
 const sidebarPrimaryButtonClassName =
   'group flex w-full items-center gap-3 rounded-md border border-border bg-accent/5 px-3 py-2 text-left text-sm font-medium text-fg transition-colors hover:border-accent/30 hover:bg-accent/10 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/60 disabled:cursor-not-allowed disabled:opacity-40';
 
-function historySessionRowClassName(active: boolean): string {
-  return (
-    'group flex w-full flex-col items-start gap-0.5 rounded-md border px-2 py-1.5 text-left transition-colors ' +
-    (active
-      ? 'border-border bg-panel-2 text-fg shadow-[inset_2px_0_0_var(--accent)]'
-      : 'border-transparent bg-transparent text-fg-dim hover:border-border-soft hover:bg-panel-2/45 hover:text-fg') +
-    ' disabled:cursor-not-allowed disabled:opacity-50'
+function historySessionRowClassName(active: boolean, status: StatusTone | null): string {
+  return cn(
+    'ugs-sidebar-session group flex w-full flex-col items-start gap-0.5 rounded-md px-3 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/60',
+    active
+      ? 'ugs-sidebar-session--selected bg-panel-2 text-fg'
+      : 'bg-transparent text-fg-dim hover:bg-panel-2/45 hover:text-fg',
+    (status === 'running' || status === 'thinking') && 'ugs-sidebar-session--live',
+    'disabled:cursor-not-allowed disabled:opacity-50',
   );
 }
 
-function historySessionEditRowClassName(active: boolean): string {
+function historySessionEditRowClassName(active: boolean, status: StatusTone | null): string {
+  return cn(
+    'ugs-sidebar-session ugs-sidebar-session--editing group flex w-full flex-col items-start gap-1 rounded-md px-3 py-2 text-left transition-colors',
+    active
+      ? 'ugs-sidebar-session--selected bg-panel-2 text-fg'
+      : 'bg-transparent text-fg-dim hover:bg-panel-2/45 hover:text-fg',
+    (status === 'running' || status === 'thinking') && 'ugs-sidebar-session--live',
+  );
+}
+
+function HistorySessionMetadata({
+  session,
+  status,
+  label,
+  percent,
+  locale,
+}: {
+  session: Pick<Session, 'createdAt' | 'updatedAt' | 'preview' | 'contextCompressed'>;
+  status: StatusTone | null;
+  label?: string;
+  percent?: number | null;
+  locale: Locale;
+}) {
+  const time = formatTime(session.updatedAt ?? session.createdAt);
+  let summary = session.preview;
+  if (status === 'running') {
+    const progress = clampPercent(percent);
+    summary = t(locale, 'sidebar.runningShort') + (progress == null ? '' : ` · ${progress}%`);
+  } else if (
+    status === 'thinking' || status === 'waiting' || status === 'draft' ||
+    status === 'successUnread' || status === 'failed' || status === 'interrupted'
+  ) {
+    summary = label;
+  } else if (status === 'success') {
+    // Only compact the explicit legacy timing prefix; never infer a duration.
+    summary = session.preview?.match(
+      /^⏱\s*\d{1,2}:\d{2}(?::\d{2})?\s*→\s*\d{1,2}:\d{2}(?::\d{2})?\s*·\s*(耗时\s+(?:\d+h\s+)?(?:\d+m\s+)?\d+s)(?=\s|$)/u,
+    )?.[1] ?? session.preview;
+  }
+
   return (
-    'group flex w-full flex-col items-start gap-1 rounded-md border px-2 py-1.5 text-left transition-colors ' +
-    (active
-      ? 'border-border bg-panel-2 text-fg shadow-[inset_2px_0_0_var(--accent)]'
-      : 'border-transparent bg-transparent text-fg-dim hover:border-border-soft hover:bg-panel-2/45 hover:text-fg')
+    <span
+      className="ugs-sidebar-meta flex w-full min-w-0 items-center gap-1.5 text-[11px] leading-4 text-fg-dim"
+      data-session-status={status ?? 'none'}
+      title={[time, label, session.contextCompressed ? '上下文已压缩' : undefined, session.preview].filter(Boolean).join('\n')}
+    >
+      {session.contextCompressed === true ? (
+        <span role="img" aria-label="上下文已压缩" title="上下文已压缩"
+          data-context-compressed="true" className="shrink-0 text-status-info">
+          <Layers size={12} strokeWidth={1.8} aria-hidden="true" />
+        </span>
+      ) : null}
+      <span className="shrink-0 tabular-nums">{time}</span>
+      {summary ? (
+        <>
+          <span aria-hidden="true" className="shrink-0 text-fg-faint">·</span>
+          <span className="ugs-sidebar-session-summary min-w-0 flex-1 truncate">{summary}</span>
+        </>
+      ) : null}
+    </span>
   );
 }
 
@@ -379,6 +440,7 @@ export default function Sidebar({
   const sessions = useStore((s) => s.sessions);
   const historyReady = useStore((s) => s.historyReady);
   const historyError = useStore((s) => s.historyError);
+  const historyRootPath = useStore((s) => s.historyRootPath);
   const workspaces = useStore((s) => s.workspaces);
   const sessionTree = useStore((s) => s.sessionTree);
   const activeWorkspaceId = useStore((s) => s.activeWorkspaceId);
@@ -1217,7 +1279,7 @@ export default function Sidebar({
 
   return (
     <aside
-      className="relative flex h-full shrink-0 flex-col border-r border-border bg-panel"
+      className="ugs-sidebar relative flex h-full shrink-0 flex-col border-r border-border bg-panel"
       style={{ width }}
     >
       {/* Resize handle — right edge, drag horizontally. */}
@@ -1257,7 +1319,7 @@ export default function Sidebar({
                 aria-selected={activeTab === tab}
                 onClick={() => setActiveTab(tab)}
                 className={
-                  'relative -mb-px min-w-0 border-b-2 px-0.5 pb-2 pt-1 text-xs font-medium transition-colors ' +
+                  'ugs-sidebar-tab relative -mb-px min-w-0 border-b-2 px-0.5 pb-2 pt-1 text-[13px] font-medium transition-colors ' +
                   (activeTab === tab
                     ? 'border-accent text-fg'
                     : 'border-transparent text-fg-faint hover:text-fg-dim')
@@ -1295,7 +1357,7 @@ export default function Sidebar({
                 onChange={(event) => setSearchQuery(event.target.value)}
                 onKeyDown={handleSearchKeyDown}
                 spellCheck={false}
-                className="ugs-history-search-input h-8 w-full min-w-0 appearance-none rounded-md border border-transparent bg-panel-2/40 pl-7 pr-7 text-xs text-fg outline-none transition-colors placeholder:text-fg-faint focus:border-border-soft focus:bg-panel-2/60 disabled:cursor-wait disabled:opacity-60"
+                className="ugs-history-search-input h-8 w-full min-w-0 appearance-none rounded-md border border-transparent bg-panel-2/40 pl-7 pr-7 text-[13px] text-fg outline-none transition-colors placeholder:text-fg-faint focus:border-border-soft focus:bg-panel-2/60 disabled:cursor-wait disabled:opacity-60"
               />
               {searchQuery.length > 0 && (
                 <button
@@ -1434,10 +1496,10 @@ export default function Sidebar({
                     <div
                       onContextMenu={(e) => onWorkspaceContextMenu(e, workspace)}
                       className={
-                        'group/ws grid w-full grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-1.5 rounded-md border px-2.5 py-1.5 transition-colors ' +
+                        'ugs-sidebar-workspace group/ws grid w-full grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-1.5 rounded-md px-2.5 py-1.5 transition-colors ' +
                         (workspaceActive
-                          ? 'border-border bg-panel-2'
-                          : 'border-border-soft bg-panel hover:border-border hover:bg-panel-2/60')
+                          ? 'bg-panel-2'
+                          : 'bg-panel hover:bg-panel-2/60')
                       }
                     >
                       <button
@@ -1446,7 +1508,7 @@ export default function Sidebar({
                         aria-label={workspaceCollapsed ? t(locale, 'sidebar.expandWorkspaceSessions') : t(locale, 'sidebar.collapseWorkspaceSessions')}
                         title={workspaceCollapsed ? t(locale, 'sidebar.expandWorkspaceSessions') : t(locale, 'sidebar.collapseWorkspaceSessions')}
                         onClick={() => toggleWorkspaceCollapsed(workspace.id)}
-                        className="flex h-6 w-6 shrink-0 items-center justify-center rounded border border-border-soft bg-bg-alt text-fg-faint transition-colors hover:border-accent hover:text-fg"
+                        className="ugs-control ugs-control--icon flex h-6 w-6 shrink-0 items-center justify-center rounded text-fg-faint transition-colors hover:bg-border-soft hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
                       >
                         {workspaceCollapsed ? (
                           <ChevronRight size={12} aria-hidden="true" />
@@ -1464,7 +1526,7 @@ export default function Sidebar({
                         }
                         className="min-w-0 text-left"
                       >
-                        <div className="flex min-w-0 items-center gap-2 text-[11px] font-semibold leading-4 text-fg">
+                        <div className="flex min-w-0 items-center gap-2 text-[13px] font-semibold leading-5 text-fg">
                           <span
                             className={cn(
                               'h-2 w-2 shrink-0 rounded-full',
@@ -1497,7 +1559,7 @@ export default function Sidebar({
                           )}
                         </div>
                         {visibleHeaderPaths.length > 0 && (
-                          <div className="mt-0.5 flex min-w-0 flex-col gap-0.5 pl-8 font-mono text-[9px] leading-3 text-fg-faint">
+                          <div className="ugs-sidebar-meta mt-0.5 flex min-w-0 flex-col gap-0.5 pl-4 font-mono text-[11px] leading-4 text-fg-dim">
                             {visibleHeaderPaths.map((path) => (
                               <span
                                 key={workspacePathKey(path)}
@@ -1519,7 +1581,7 @@ export default function Sidebar({
                         )}
                       </button>
                       <div className="flex h-6 shrink-0 items-center gap-1 self-center">
-                        <span className="inline-flex h-5 min-w-6 items-center justify-center rounded border border-border-soft bg-bg-alt px-1.5 font-mono text-[10px] font-semibold leading-none tabular-nums text-fg-dim">
+                        <span className="inline-flex h-5 min-w-6 items-center justify-center rounded border border-border-soft bg-bg-alt px-1.5 text-[11px] font-medium leading-none tabular-nums text-fg-dim">
                           {fullList.length}
                         </span>
                         <button
@@ -1527,7 +1589,7 @@ export default function Sidebar({
                           title={t(locale, 'sidebar.moreWorkspaceActions')}
                           aria-label={t(locale, 'sidebar.moreWorkspaceActions')}
                           onClick={(e) => onWorkspaceMoreClick(e, workspace)}
-                          className="flex h-6 w-6 shrink-0 items-center justify-center rounded border border-border-soft bg-bg-alt text-fg-faint transition-colors hover:border-accent hover:text-fg"
+                          className="ugs-control ugs-control--icon flex h-6 w-6 shrink-0 items-center justify-center rounded text-fg-faint transition-colors hover:bg-border-soft hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
                         >
                           <MoreHorizontal size={14} aria-hidden="true" />
                         </button>
@@ -1589,6 +1651,7 @@ export default function Sidebar({
                                   }
                                   className={historySessionEditRowClassName(
                                     active,
+                                    status,
                                   )}
                                 >
                                   <span className="grid w-full grid-cols-[minmax(0,1fr)_var(--ugs-status-slot-size)] items-center gap-1.5">
@@ -1654,7 +1717,7 @@ export default function Sidebar({
                                     </button>
                                   </span>
                                   {renameError && (
-                                    <span className="text-[11px] leading-snug text-rose-300">
+                                    <span className="text-[11px] leading-snug text-status-error">
                                       {renameError}
                                     </span>
                                   )}
@@ -1662,6 +1725,7 @@ export default function Sidebar({
                               ) : (
                                 <button
                                   type="button"
+                                  aria-current={active ? 'true' : undefined}
                                   onClick={() => selectSession(session.id, workspace.id)}
                                   onContextMenu={(e) =>
                                     onSessionContextMenu(
@@ -1675,7 +1739,7 @@ export default function Sidebar({
                                       session.scheduledTask,
                                     )
                                   }
-                                  className={historySessionRowClassName(active)}
+                                  className={historySessionRowClassName(active, status)}
                                 >
                                   <span className="grid w-full grid-cols-[minmax(0,1fr)_var(--ugs-status-slot-size)] items-center gap-1.5">
                                     <span className="flex min-w-0 flex-1 items-center gap-1">
@@ -1687,7 +1751,7 @@ export default function Sidebar({
                                         scheduledTask={session.scheduledTask}
                                         locale={locale}
                                       />
-                                      <span className="min-w-0 flex-1 truncate text-sm">
+                                      <span title={session.title} className="min-w-0 flex-1 truncate text-sm">
                                         {session.title}
                                       </span>
                                     </span>
@@ -1696,14 +1760,13 @@ export default function Sidebar({
                                       tone={status}
                                     />
                                   </span>
-                                  <span className="flex w-full items-center gap-1 font-mono text-[10px] text-fg-faint">
-                                    <span>{formatTime(session.updatedAt ?? session.createdAt)}</span>
-                                    {session.preview && (
-                                      <span className="min-w-0 flex-1 truncate">
-                                        {session.preview}
-                                      </span>
-                                    )}
-                                  </span>
+                                  <HistorySessionMetadata
+                                    session={session}
+                                    status={status}
+                                    label={statusLabel}
+                                    percent={runProgress?.percent}
+                                    locale={locale}
+                                  />
                                 </button>
                               )}
                             </li>
@@ -1782,7 +1845,7 @@ export default function Sidebar({
                             session.scheduledTask,
                           )
                         }
-                        className={historySessionEditRowClassName(active)}
+                        className={historySessionEditRowClassName(active, status)}
                       >
                         <span className="grid w-full grid-cols-[minmax(0,1fr)_var(--ugs-status-slot-size)] items-center gap-1.5">
                           <input
@@ -1836,7 +1899,7 @@ export default function Sidebar({
                           </button>
                         </span>
                         {renameError && (
-                          <span className="text-[11px] leading-snug text-rose-300">
+                          <span className="text-[11px] leading-snug text-status-error">
                             {renameError}
                           </span>
                         )}
@@ -1844,6 +1907,7 @@ export default function Sidebar({
                     ) : (
                       <button
                         type="button"
+                        aria-current={active ? 'true' : undefined}
                         onClick={() => selectSession(session.id)}
                         onContextMenu={(e) =>
                           onSessionContextMenu(
@@ -1857,7 +1921,7 @@ export default function Sidebar({
                             session.scheduledTask,
                           )
                         }
-                        className={historySessionRowClassName(active)}
+                        className={historySessionRowClassName(active, status)}
                       >
                         <span className="grid w-full grid-cols-[minmax(0,1fr)_var(--ugs-status-slot-size)] items-center gap-1.5">
                           <span className="flex min-w-0 flex-1 items-center gap-1">
@@ -1869,15 +1933,19 @@ export default function Sidebar({
                               scheduledTask={session.scheduledTask}
                               locale={locale}
                             />
-                            <span className="min-w-0 flex-1 truncate text-sm">
+                            <span title={session.title} className="min-w-0 flex-1 truncate text-sm">
                               {session.title}
                             </span>
                           </span>
                           <StatusIndicator label={statusLabel} tone={status} />
                         </span>
-                        <span className="font-mono text-[10px] text-fg-faint">
-                          {formatTime(session.updatedAt ?? session.createdAt)}
-                        </span>
+                        <HistorySessionMetadata
+                          session={session}
+                          status={status}
+                          label={statusLabel}
+                          percent={runProgress?.percent}
+                          locale={locale}
+                        />
                       </button>
                     )}
                     </li>
@@ -1923,6 +1991,9 @@ export default function Sidebar({
           x={menu.x}
           y={menu.y}
           locale={locale}
+          sessionId={menu.sessionId}
+          workspaceId={menu.workspaceId ?? activeWorkspaceId}
+          historyRootPath={historyRootPath}
           canFavorite={true}
           isFavorite={menu.favorite}
           canSchedule={menu.favorite}
@@ -2013,7 +2084,7 @@ function WorkspaceRemoveHistoryDialog({
       >
         <header className="border-b border-border-soft bg-bg-alt px-5 py-4">
           <div className="flex items-start gap-3">
-            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-rose-500/15 text-rose-300">
+            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-status-error/15 text-status-error">
               <Trash2 size={18} strokeWidth={2.2} />
             </span>
             <div className="min-w-0 flex-1">
@@ -2064,7 +2135,7 @@ function WorkspaceRemoveHistoryDialog({
           <button
             type="button"
             onClick={onConfirm}
-            className="rounded-md border border-rose-400/50 bg-rose-500/15 px-3 py-1.5 text-sm font-semibold text-rose-200 transition-colors hover:bg-rose-500/25"
+            className="rounded-md border border-status-error/50 bg-status-error/15 px-3 py-1.5 text-sm font-semibold text-status-error transition-colors hover:bg-status-error/25"
           >
             {t(locale, 'sidebar.removeWorkspaceHistoryConfirmAction')}
           </button>
@@ -2163,9 +2234,9 @@ function WorkspaceContextMenu({
           disabled={removeDisabledReason != null}
           title={removeDisabledReason ?? undefined}
           onClick={onRemoveHistory}
-          className="flex w-full items-center gap-2 whitespace-nowrap border-t border-border-soft px-3 py-2 text-left text-sm text-rose-300 transition-colors hover:bg-panel-2 hover:text-rose-200 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-rose-300"
+          className="flex w-full items-center gap-2 whitespace-nowrap border-t border-border-soft px-3 py-2 text-left text-sm text-status-error transition-colors hover:bg-panel-2 hover:text-status-error disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-status-error"
         >
-          <Trash2 size={13} className="shrink-0 text-rose-300/80" />
+          <Trash2 size={13} className="shrink-0 text-status-error/80" />
           <span>{t(locale, 'sidebar.removeWorkspaceHistory')}</span>
         </button>
       </div>
@@ -2181,6 +2252,9 @@ function SessionContextMenu({
   x,
   y,
   locale,
+  sessionId,
+  workspaceId,
+  historyRootPath,
   canFavorite,
   isFavorite,
   canSchedule,
@@ -2195,6 +2269,9 @@ function SessionContextMenu({
   x: number;
   y: number;
   locale: Locale;
+  sessionId: string;
+  workspaceId: string | null;
+  historyRootPath: string | null;
   canFavorite: boolean;
   isFavorite: boolean;
   canSchedule: boolean;
@@ -2206,6 +2283,46 @@ function SessionContextMenu({
   onDelete: () => void;
   onClose: () => void;
 }) {
+  const [copiedSessionId, setCopiedSessionId] = useState(false);
+
+  const copySessionLocation = useCallback(async () => {
+    const resolvedWorkspaceId = workspaceId ?? DEFAULT_WORKSPACE_ID;
+    const relativePath = `workspaces/${resolvedWorkspaceId}/sessions/${sessionId}.json`;
+    const root =
+      historyRootPath && !historyRootPath.startsWith('localStorage://')
+        ? historyRootPath
+        : HISTORY_ROOT_DIR;
+    const text = [
+      `Session ID: ${sessionId}`,
+      `Workspace ID: ${resolvedWorkspaceId}`,
+      `File: ${root}/${relativePath}`,
+    ].join('\n');
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        try {
+          ta.select();
+          document.execCommand('copy');
+        } finally {
+          if (ta.parentNode) ta.parentNode.removeChild(ta);
+        }
+      }
+      setCopiedSessionId(true);
+      window.setTimeout(() => {
+        setCopiedSessionId(false);
+        onClose();
+      }, 1200);
+    } catch {
+      onClose();
+    }
+  }, [historyRootPath, onClose, sessionId, workspaceId]);
+
   return (
     <>
       {/* Backdrop catches the next click anywhere and dismisses the menu. */}
@@ -2268,6 +2385,22 @@ function SessionContextMenu({
             <span>{t(locale, 'sidebar.renameSession')}</span>
           </button>
         )}
+        <button
+          type="button"
+          onClick={() => void copySessionLocation()}
+          className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-fg-dim transition-colors hover:bg-panel-2 hover:text-fg"
+        >
+          {copiedSessionId ? (
+            <Check size={13} className="text-accent-2" />
+          ) : (
+            <Copy size={13} className="text-fg-faint" />
+          )}
+          <span>
+            {copiedSessionId
+              ? t(locale, 'chat.copied')
+              : t(locale, 'sidebar.copySessionLocation')}
+          </span>
+        </button>
         <button
           type="button"
           disabled={deleteDisabledReason != null}

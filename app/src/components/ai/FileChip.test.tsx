@@ -3,7 +3,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fileExists, openLocalPath, previewLocalFile } from '@/lib/tauri';
 import { useStore } from '@/store/useStore';
-import { VisibleFileChip } from './FileChip';
+import { VisibleFileChip, FoldedFileChip } from './FileChip';
 
 vi.mock('@/lib/tauri', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/tauri')>()),
@@ -84,6 +84,91 @@ describe('VisibleFileChip', () => {
     await act(async () => chip!.click());
 
     expect(onOpenFile).toHaveBeenCalledWith(refData);
+    expect(openLocalPath).not.toHaveBeenCalled();
+  });
+
+  it('offers "open containing folder" on the visible chip menu', async () => {
+    const onOpenFile = vi.fn();
+
+    await act(async () => {
+      root.render(
+        <VisibleFileChip
+          refData={{ path: 'src/store/useStore.ts', basename: 'useStore.ts' }}
+          cwd="E:\\UltraGameStudio"
+          onOpenFile={onOpenFile}
+        />,
+      );
+    });
+
+    const chip = container.querySelector<HTMLButtonElement>('.ai-file-chip');
+    expect(chip).not.toBeNull();
+
+    await act(async () => {
+      chip!.dispatchEvent(
+        new MouseEvent('contextmenu', {
+          bubbles: true,
+          cancelable: true,
+          clientX: 20,
+          clientY: 24,
+        }),
+      );
+    });
+
+    const containing = container.querySelector<HTMLButtonElement>(
+      '[data-file-action="open-containing-folder"]',
+    );
+    expect(containing?.textContent).toContain('打开所在目录');
+
+    await act(async () => containing!.click());
+
+    expect(onOpenFile).toHaveBeenCalledWith(
+      { path: 'src/store/useStore.ts', basename: 'useStore.ts' },
+      { openContainingFolder: true },
+    );
+    expect(openLocalPath).not.toHaveBeenCalled();
+  });
+
+  it('keeps the containing-folder menu on folded chips past the budget', async () => {
+    const onOpenFile = vi.fn();
+    const refData = {
+      path: 'E:\\UltraGameStudio\\.ultragamestudio\\clipboard-images\\shot.png',
+      basename: 'shot.png',
+    };
+
+    await act(async () => {
+      root.render(
+        <FoldedFileChip
+          refData={refData}
+          cwd="E:\\UltraGameStudio"
+          onOpenFile={onOpenFile}
+        />,
+      );
+    });
+
+    const chip = container.querySelector<HTMLButtonElement>('.ai-file-chip--folded');
+    expect(chip).not.toBeNull();
+
+    await act(async () => {
+      chip!.dispatchEvent(
+        new MouseEvent('contextmenu', {
+          bubbles: true,
+          cancelable: true,
+          clientX: 20,
+          clientY: 24,
+        }),
+      );
+    });
+
+    const containing = container.querySelector<HTMLButtonElement>(
+      '[data-file-action="open-containing-folder"]',
+    );
+    expect(containing?.textContent).toContain('打开所在目录');
+
+    await act(async () => containing!.click());
+
+    expect(onOpenFile).toHaveBeenCalledWith(refData, {
+      openContainingFolder: true,
+    });
     expect(openLocalPath).not.toHaveBeenCalled();
   });
 });

@@ -157,7 +157,7 @@ export default function CapabilityTranslateDialog({
                           {agent.label}
                         </span>
                         {agent.supported ? null : (
-                          <span className="mt-0.5 block text-[11px] text-amber-300">
+                          <span className="mt-0.5 block text-[11px] text-status-warning">
                             {agent.reason ?? (zh ? '待接入' : 'Not supported')}
                           </span>
                         )}
@@ -182,7 +182,7 @@ export default function CapabilityTranslateDialog({
               ) : null}
 
               {error ? (
-                <p className="mt-3 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-300">
+                <p className="mt-3 rounded-md border border-status-error/40 bg-status-error/10 px-3 py-2 text-xs text-status-error">
                   {error}
                 </p>
               ) : null}
@@ -195,15 +195,15 @@ export default function CapabilityTranslateDialog({
                       className={cn(
                         'rounded-md border px-3 py-2',
                         item.ok
-                          ? 'border-emerald-500/40 bg-emerald-500/10'
-                          : 'border-amber-500/40 bg-amber-500/10',
+                          ? 'border-status-success/40 bg-status-success/10'
+                          : 'border-status-warning/40 bg-status-warning/10',
                       )}
                     >
                       <div className="flex items-center gap-2 text-xs">
                         {item.ok ? (
-                          <Check size={13} className="shrink-0 text-emerald-300" />
+                          <Check size={13} className="shrink-0 text-status-success" />
                         ) : (
-                          <ChevronRight size={13} className="shrink-0 text-amber-300" />
+                          <ChevronRight size={13} className="shrink-0 text-status-warning" />
                         )}
                         <span className="font-semibold text-fg">{item.label}</span>
                       </div>

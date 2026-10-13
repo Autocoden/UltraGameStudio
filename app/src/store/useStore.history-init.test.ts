@@ -80,4 +80,106 @@ describe('history initialization', () => {
       failure,
     );
   });
+
+  it('restores the last-used model from session messages on startup', async () => {
+    const { useStore } = await import('./useStore');
+    const { historyStore } = await import('./history/store');
+    const { setActiveGatewaySelection } = await import('@/lib/gatewayConfig');
+    const { workflowDefaultGatewaySelection } = await import(
+      '@/lib/modelGateway/resolver'
+    );
+
+    // 全局编程模型固定为 opus，与历史会话模型（sonnet）不同，模拟重启前的
+    // 全局选择。修复后启动恢复必须沿用历史模型，而不是全局默认。
+    setActiveGatewaySelection({ adapter: 'claude-code', modelClass: 'opus' });
+
+    await historyStore.ready();
+    const workspace = await historyStore.resolveWorkspaceByPath('');
+    const record = await historyStore.createSession({
+      workspaceId: workspace.id,
+      isWorkflow: false,
+      messages: [
+        { id: 'u1', role: 'user', text: '你好', createdAt: 1 },
+        {
+          id: 'a1',
+          role: 'assistant',
+          text: '⚙ 路由：Claude Code · 模型：sonnet\n你好。',
+          routeLabel: 'Claude Code · sonnet',
+          createdAt: 2,
+        },
+      ],
+      title: '聊天',
+    });
+    await historyStore.patchConfig({
+      lastActiveWorkspaceId: workspace.id,
+      lastActiveSessionId: record.id,
+    });
+
+    useStore.getState().initHistory();
+    await waitFor(() => useStore.getState().historyReady, 'history init ready');
+
+    const selection = workflowDefaultGatewaySelection(
+      useStore.getState().workflow,
+    );
+    expect(selection.modelClass).toBe('sonnet');
+  });
+
+  it('rehydrates in-memory composerDrafts for non-active sessions with a persisted draft', async () => {
+    const { useStore } = await import('./useStore');
+    const { historyStore } = await import('./history/store');
+    const { workflowSessionKeyId } = await import('./sessionKey');
+
+    await historyStore.ready();
+    const workspace = await historyStore.resolveWorkspaceByPath('');
+
+    // Active session: no draft.
+    const active = await historyStore.createSession({
+      workspaceId: workspace.id,
+      isWorkflow: false,
+      messages: [{ id: 'u1', role: 'user', text: '当前', createdAt: 1 }],
+      title: '当前会话',
+    });
+    // Background session: persisted draft from a previous run that the user
+    // never sent. After a restart the sidebar draft badge / draft-first
+    // ordering must still see it without the user re-opening the session.
+    const withDraft = await historyStore.createSession({
+      workspaceId: workspace.id,
+      isWorkflow: false,
+      messages: [{ id: 'u2', role: 'user', text: '带草稿', createdAt: 2 }],
+      title: '带草稿会话',
+    });
+    await historyStore.updateSession(workspace.id, withDraft.id, {
+      meta: { composerDraft: '还没发送的内容' },
+      preserveUpdatedAt: true,
+    });
+    // Background session without a draft must stay absent from composerDrafts.
+    const noDraft = await historyStore.createSession({
+      workspaceId: workspace.id,
+      isWorkflow: false,
+      messages: [{ id: 'u3', role: 'user', text: '没草稿', createdAt: 3 }],
+      title: '没草稿会话',
+    });
+
+    await historyStore.patchConfig({
+      lastActiveWorkspaceId: workspace.id,
+      lastActiveSessionId: active.id,
+    });
+
+    useStore.getState().initHistory();
+    await waitFor(() => useStore.getState().historyReady, 'history init ready');
+
+    const state = useStore.getState();
+    const draftKey = workflowSessionKeyId({
+      workspaceId: workspace.id,
+      sessionId: withDraft.id,
+    });
+    const noDraftKey = workflowSessionKeyId({
+      workspaceId: workspace.id,
+      sessionId: noDraft.id,
+    });
+    expect(state.composerDrafts[draftKey]).toBe('还没发送的内容');
+    expect(state.composerDrafts[noDraftKey]).toBeUndefined();
+    // Active session has no draft; switching target stays empty.
+    expect(state.composerDraft).toBe('');
+  });
 });

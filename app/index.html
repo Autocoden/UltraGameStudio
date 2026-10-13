@@ -5,12 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" type="image/png" href="/icon-256.png" />
     <title>UltraGameStudio</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap"
-      rel="stylesheet"
-    />
+    <!-- Inter + JetBrains Mono are self-hosted (src/styles/fonts.css, fetched by
+         scripts/fetch-fonts.mjs). No CDN request: this app must render the same
+         offline, on an intranet, or behind a blocked network. -->
   </head>
   <body>
     <div id="root"></div>
@@ -31,6 +28,31 @@
           'solarized-dark',
           'terminal',
         ]);
+        const locales = new Set([
+          'zh-CN',
+          'en-US',
+          'fr-FR',
+          'ru-RU',
+          'es-ES',
+          'hi-IN',
+          'ar-SA',
+          'pt-BR',
+          'ja-JP',
+          'de-DE',
+          'ko-KR',
+        ]);
+        try {
+          // <html lang> drives font selection, line breaking and screen-reader
+          // pronunciation, so it must match the UI language before first paint.
+          const storedLocale = localStorage.getItem('ultragamestudio.locale.v1');
+          const lang =
+            storedLocale && locales.has(storedLocale)
+              ? storedLocale
+              : navigator.language;
+          if (lang) document.documentElement.lang = lang;
+        } catch {
+          // keep the markup default
+        }
         try {
           const raw =
             localStorage.getItem('ultragamestudio.appearance.v1') ??

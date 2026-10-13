@@ -38,9 +38,17 @@
   --ugs-status-draft-contrast: #1a0a2a;
   --ugs-status-interrupted: #d995a6;
   --ugs-status-interrupted-contrast: #2a0a1a;
-  --ugs-font-family: 'Inter', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans SC', system-ui, -apple-system, sans-serif;
-  --ugs-mono-font-family: 'JetBrains Mono', ui-monospace, monospace;
+  --ugs-font-family: 'Inter', 'PingFang SC', 'Microsoft YaHei UI', 'Microsoft YaHei', 'Noto Sans SC', 'Noto Sans CJK SC', system-ui, -apple-system, sans-serif;
+  /* Mono stack is CJK-aware on purpose: JetBrains Mono has no hanzi/kana, so
+     without a CJK face every CJK glyph in a code line falls back per-glyph with
+     mismatched metrics. Sarasa Mono SC / Noto Sans Mono CJK are true CJK
+     monospace faces, so they keep columns aligned when installed; the sans CJK
+     faces behind them only guarantee a consistent fallback. */
+  --ugs-mono-font-family: 'JetBrains Mono', 'Sarasa Mono SC', 'Noto Sans Mono CJK SC', 'Cascadia Mono', ui-monospace, SFMono-Regular, 'Microsoft YaHei UI', 'PingFang SC', monospace;
   --ugs-font-size: 16px;
+  /* Reader face for streamed answers / reasoning prose. Follows the user's font
+     family by default; set it to var(--ugs-mono-font-family) for a terminal look. */
+  --ugs-reader-font-family: var(--ugs-font-family);
 
   /* Semantic tokens consumed by Tailwind and component styles. */
   --bg: var(--ugs-color-bg);
@@ -56,6 +64,8 @@
   --accent-2: var(--ugs-color-accent-2);
   --accent-3: var(--ugs-color-accent-3);
   --accent-4: var(--ugs-color-accent-4);
+  --selection-bg: color-mix(in oklab, var(--accent) 28%, var(--bg));
+  --selection-fg: var(--fg);
   --file-preview-link: color-mix(in oklab, var(--accent-2) 82%, var(--fg) 18%);
   --file-preview-link-hover: color-mix(in oklab, var(--accent-2) 64%, var(--fg) 36%);
   --file-preview-link-bg: color-mix(in oklab, var(--accent-2) 12%, transparent);
@@ -82,10 +92,17 @@
   --status-interrupted: var(--ugs-status-interrupted);
   --status-interrupted-contrast: var(--ugs-status-interrupted-contrast);
   --status-interrupted-border: #9b6a05;
+  /* Info / warning roles. These had no token at all, so panels hardcoded
+     `sky-*` / `amber-*` instead — which is why warning text measured 1.4:1 on the
+     light presets while the matching token is theme-aware. One hue per role:
+     info reuses the blue family, warning reuses the amber one. */
+  --status-info: var(--ugs-status-ai-edit);
+  --status-info-contrast: var(--ugs-status-ai-edit-contrast);
+  --status-warning: var(--ugs-status-running);
+  --status-warning-contrast: var(--ugs-status-running-contrast);
   --status-running-track: var(--border);
   --ugs-status-slot-size: 20px;
   --ugs-status-indicator-size: 14px;
-  --ugs-status-spinner-ring: 2px;
   --ugs-composer-chat-border: color-mix(
     in oklab,
     var(--border) 68%,
@@ -159,6 +176,7 @@ html.ugs-style-pencil {
   --ugs-color-text-muted: #9da7b3;
   --ugs-color-text-faint: #6e7681;
   --ugs-color-accent: #7c8cff;
+  --ugs-accent-contrast: #000000;
   --ugs-color-accent-2: #37c2a8;
   --ugs-color-accent-3: #e3a008;
   --ugs-color-accent-4: #f778ba;
@@ -170,6 +188,8 @@ html.ugs-style-pencil {
   --ugs-status-success-contrast: #06231d;
   --ugs-status-error: #f778ba;
   --ugs-status-error-contrast: #2a0a1a;
+  --ugs-status-draft: #a371f7;
+  --ugs-status-draft-contrast: #160b2b;
   --ugs-status-interrupted: #d995a6;
   --ugs-status-interrupted-contrast: #2a0a1a;
   /* Terminal-style syntax: GitHub-dark softened. */
@@ -201,6 +221,7 @@ html.ugs-style-cherry-dark {
   --ugs-color-text-muted: #b8b8b8;
   --ugs-color-text-faint: #737373;
   --ugs-color-accent: #f05265;
+  --ugs-accent-contrast: #000000;
   --ugs-color-accent-2: #18c782;
   --ugs-color-accent-3: #d7a84f;
   --ugs-color-accent-4: #6aa7ff;
@@ -273,6 +294,7 @@ html.ugs-style-cherry-light {
   --ugs-color-text-muted: #606066;
   --ugs-color-text-faint: #96969d;
   --ugs-color-accent: #f05265;
+  --ugs-accent-contrast: #000000;
   --ugs-color-accent-2: #18b978;
   --ugs-color-accent-3: #c9902f;
   --ugs-color-accent-4: #4f87e8;
@@ -345,6 +367,7 @@ html.ugs-style-midnight {
   --ugs-color-text-muted: #a7aecb;
   --ugs-color-text-faint: #6e7699;
   --ugs-color-accent: #7c6cff;
+  --ugs-accent-contrast: #000000;
   --ugs-color-accent-2: #2dd4d4;
   --ugs-color-accent-3: #f5b73c;
   --ugs-color-accent-4: #f062c8;
@@ -356,6 +379,8 @@ html.ugs-style-midnight {
   --ugs-status-success-contrast: #03200f;
   --ugs-status-error: #ff5c7a;
   --ugs-status-error-contrast: #2c0710;
+  --ugs-status-draft: #a78bfa;
+  --ugs-status-draft-contrast: #14082e;
   --ugs-status-interrupted: #6b7194;
   --ugs-status-interrupted-contrast: #0a0d18;
   --node-glass: var(--panel);
@@ -415,6 +440,7 @@ html.ugs-style-aurora {
   --ugs-color-text-muted: #c0c8d6;
   --ugs-color-text-faint: #838ca0;
   --ugs-color-accent: #8fbcbb;
+  --ugs-accent-contrast: #000000;
   --ugs-color-accent-2: #a3be8c;
   --ugs-color-accent-3: #ebcb8b;
   --ugs-color-accent-4: #b48ead;
@@ -426,6 +452,8 @@ html.ugs-style-aurora {
   --ugs-status-success-contrast: #232831;
   --ugs-status-error: #bf616a;
   --ugs-status-error-contrast: #fdf2f3;
+  --ugs-status-draft: #a78bfa;
+  --ugs-status-draft-contrast: #170a33;
   --ugs-status-interrupted: #6b7080;
   --ugs-status-interrupted-contrast: #14181f;
   --node-glass: var(--panel);
@@ -485,6 +513,7 @@ html.ugs-style-daylight {
   --ugs-color-text-muted: #566072;
   --ugs-color-text-faint: #828b9b;
   --ugs-color-accent: #2f6fed;
+  --ugs-accent-contrast: #000000;
   --ugs-color-accent-2: #13a07a;
   --ugs-color-accent-3: #d98a07;
   --ugs-color-accent-4: #d6489b;
@@ -558,6 +587,7 @@ html.ugs-style-ember {
   --ugs-color-text-muted: #c2a890;
   --ugs-color-text-faint: #8c7461;
   --ugs-color-accent: #f5843e;
+  --ugs-accent-contrast: #000000;
   --ugs-color-accent-2: #3fb8a8;
   --ugs-color-accent-3: #f0b429;
   --ugs-color-accent-4: #e06b8b;
@@ -569,6 +599,8 @@ html.ugs-style-ember {
   --ugs-status-success-contrast: #06201c;
   --ugs-status-error: #e0566b;
   --ugs-status-error-contrast: #2a0810;
+  --ugs-status-draft: #b48ead;
+  --ugs-status-draft-contrast: #1c0f1c;
   --ugs-status-interrupted: #8c7461;
   --ugs-status-interrupted-contrast: #1c1510;
   --node-glass: var(--panel);
@@ -628,6 +660,7 @@ html.ugs-style-campbell {
   --ugs-color-text-muted: #cccccc;
   --ugs-color-text-faint: #767676;
   --ugs-color-accent: #3b78ff;
+  --ugs-accent-contrast: #000000;
   --ugs-color-accent-2: #16c60c;
   --ugs-color-accent-3: #f9f1a5;
   --ugs-color-accent-4: #b4009e;
@@ -639,6 +672,8 @@ html.ugs-style-campbell {
   --ugs-status-success-contrast: #031a02;
   --ugs-status-error: #e74856;
   --ugs-status-error-contrast: #260407;
+  --ugs-status-draft: #c586c0;
+  --ugs-status-draft-contrast: #1e0a1e;
   --ugs-status-interrupted: #767676;
   --ugs-status-interrupted-contrast: #050505;
   /* Terminal-style syntax: Windows Terminal Campbell. */
@@ -671,6 +706,7 @@ html.ugs-style-terminal {
   --ugs-color-text-muted: #b0b0b0;
   --ugs-color-text-faint: #717171;
   --ugs-color-accent: #2fc8a8;
+  --ugs-accent-contrast: #000000;
   --ugs-color-accent-2: #4da3ff;
   --ugs-color-accent-3: #e3c25a;
   --ugs-color-accent-4: #f778ba;
@@ -715,6 +751,7 @@ html.ugs-style-campbell-powershell {
   --ugs-color-text-muted: #d7e8ff;
   --ugs-color-text-faint: #84a8d6;
   --ugs-color-accent: #79c0ff;
+  --ugs-accent-contrast: #000000;
   --ugs-color-accent-2: #61d6d6;
   --ugs-color-accent-3: #f9f1a5;
   --ugs-color-accent-4: #d2a8ff;
@@ -726,6 +763,8 @@ html.ugs-style-campbell-powershell {
   --ugs-status-success-contrast: #03210f;
   --ugs-status-error: #ff9da4;
   --ugs-status-error-contrast: #2a0509;
+  --ugs-status-draft: #d2a8ff;
+  --ugs-status-draft-contrast: #1b0a33;
   --ugs-status-interrupted: #84a8d6;
   --ugs-status-interrupted-contrast: #061529;
   /* Terminal-style syntax: PowerShell blue. */
@@ -757,6 +796,7 @@ html.ugs-style-one-half-dark {
   --ugs-color-text-muted: #dcdfe4;
   --ugs-color-text-faint: #8b94a7;
   --ugs-color-accent: #61afef;
+  --ugs-accent-contrast: #000000;
   --ugs-color-accent-2: #98c379;
   --ugs-color-accent-3: #e5c07b;
   --ugs-color-accent-4: #c678dd;
@@ -768,6 +808,8 @@ html.ugs-style-one-half-dark {
   --ugs-status-success-contrast: #0b1d08;
   --ugs-status-error: #e06c75;
   --ugs-status-error-contrast: #2a090b;
+  --ugs-status-draft: #d2a8ff;
+  --ugs-status-draft-contrast: #1a0a2a;
   --ugs-status-interrupted: #8b94a7;
   --ugs-status-interrupted-contrast: #0b0e12;
   /* Terminal-style syntax: Atom One Dark. */
@@ -799,6 +841,7 @@ html.ugs-style-solarized-dark {
   --ugs-color-text-muted: #93a1a1;
   --ugs-color-text-faint: #657b83;
   --ugs-color-accent: #268bd2;
+  --ugs-accent-contrast: #000000;
   --ugs-color-accent-2: #2aa198;
   --ugs-color-accent-3: #b58900;
   --ugs-color-accent-4: #d33682;
@@ -810,6 +853,8 @@ html.ugs-style-solarized-dark {
   --ugs-status-success-contrast: #111600;
   --ugs-status-error: #dc322f;
   --ugs-status-error-contrast: #260605;
+  --ugs-status-draft: #6c71c4;
+  --ugs-status-draft-contrast: #08081a;
   --ugs-status-interrupted: #657b83;
   --ugs-status-interrupted-contrast: #00131a;
   /* Terminal-style syntax: Solarized dark canonical. */
@@ -871,10 +916,19 @@ body {
   --status-success: #3fb950;
 }
 
+::selection {
+  background-color: var(--selection-bg);
+  color: var(--selection-fg);
+  text-shadow: none;
+}
+
 code,
 pre,
 .mono {
   font-family: var(--ugs-mono-font-family);
+  /* Coding ligatures stay off, as they were on the stream surface before. Prose
+     (which is now proportional Inter) keeps its normal typographic features. */
+  font-feature-settings: 'liga' 0, 'calt' 0;
 }
 
 /* Scrollbar */
@@ -919,19 +973,19 @@ pre,
 
 .ugs-ai-input,
 .ugs-ai-input-card {
-  background: color-mix(in oklab, var(--bg) 74%, transparent);
+  background: var(--panel);
   border-color: var(--border);
-  backdrop-filter: blur(10px);
+  backdrop-filter: none;
 }
 
 .ugs-ai-input-toolbar {
-  background: color-mix(in oklab, var(--bg) 42%, transparent);
-  backdrop-filter: blur(8px);
+  background: transparent;
+  backdrop-filter: none;
 }
 
 .ugs-ai-input--chat {
-  background: color-mix(in oklab, var(--panel-2) 70%, var(--bg));
-  border-color: var(--ugs-composer-chat-border);
+  background: var(--panel);
+  border-color: var(--border);
 }
 
 .ugs-ai-input--drop {
@@ -1178,15 +1232,71 @@ pre,
   .omc-pulse-dot {
     animation: none !important;
   }
+}
 
-  .ugs-status-spinner {
-    animation: none !important;
+/* Selection uses the shared row background; live activity stays on both edges. */
+@keyframes ugs-session-light {
+  to {
+    background-position: 100% 0, 100% 100%, 0 0, 0 100%;
   }
 }
 
-@keyframes ugs-status-spin {
-  to {
-    transform: rotate(360deg);
+.ugs-sidebar-session {
+  position: relative;
+  isolation: isolate;
+}
+
+.ugs-sidebar-session--live::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  --ugs-session-light-gradient: linear-gradient(
+    90deg,
+    transparent 35%,
+    var(--status-ai-edit) 48%,
+    color-mix(in oklab, var(--status-ai-edit) 68%, var(--fg)) 50%,
+    var(--status-ai-edit) 52%,
+    transparent 65%
+  );
+  --ugs-session-light-track: linear-gradient(
+    color-mix(in oklab, var(--status-ai-edit) 22%, transparent),
+    color-mix(in oklab, var(--status-ai-edit) 22%, transparent)
+  );
+  background-image:
+    var(--ugs-session-light-gradient), var(--ugs-session-light-gradient),
+    var(--ugs-session-light-track), var(--ugs-session-light-track);
+  background-size: 250% 1px, 250% 1px, 100% 1px, 100% 1px;
+  background-position: 0% 0, 0% 100%, 0 0, 0 100%;
+  background-repeat: no-repeat;
+  opacity: 0.85;
+  pointer-events: none;
+  animation: ugs-session-light 2.6s ease-in-out infinite;
+}
+
+.ugs-sidebar-meta[data-session-status='running'] .ugs-sidebar-session-summary,
+.ugs-sidebar-meta[data-session-status='thinking'] .ugs-sidebar-session-summary {
+  color: color-mix(in oklab, var(--status-ai-edit) 72%, var(--fg-dim));
+}
+
+.ugs-sidebar-meta[data-session-status='waiting'] .ugs-sidebar-session-summary {
+  color: color-mix(in oklab, var(--status-warning) 72%, var(--fg-dim));
+}
+
+.ugs-sidebar-meta[data-session-status='failed'] .ugs-sidebar-session-summary {
+  color: color-mix(in oklab, var(--status-error) 72%, var(--fg-dim));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ugs-sidebar-session--live::after {
+    animation: none;
+    --ugs-session-light-track: linear-gradient(
+      color-mix(in oklab, var(--status-ai-edit) 55%, transparent),
+      color-mix(in oklab, var(--status-ai-edit) 55%, transparent)
+    );
+    background-image: var(--ugs-session-light-track), var(--ugs-session-light-track);
+    background-size: 100% 1px, 100% 1px;
+    background-position: 0 0, 0 100%;
   }
 }
 
@@ -1212,6 +1322,7 @@ pre,
 }
 
 .ugs-status-slot {
+  position: relative;
   contain: layout paint;
   display: inline-flex;
   flex: none;
@@ -1221,31 +1332,38 @@ pre,
   min-width: var(--ugs-status-slot-size);
   height: var(--ugs-status-slot-size);
   line-height: 0;
-  pointer-events: none;
 }
 
 .ugs-status-indicator {
   box-sizing: border-box;
-  display: block;
+  display: inline-flex;
   flex: none;
+  align-items: center;
+  justify-content: center;
   width: var(--ugs-status-indicator-size);
   height: var(--ugs-status-indicator-size);
   border: 0;
-  border-radius: 9999px;
-  background: var(--ugs-status-color, transparent);
+  background: transparent;
+  color: var(--ugs-status-color, var(--fg-faint));
+}
+
+.ugs-status-slot[data-status='success'] .ugs-status-check {
+  color: color-mix(in oklab, var(--ugs-status-color) 70%, var(--fg-dim));
+}
+
+.ugs-status-slot[data-status='draft'] .ugs-status-indicator {
+  color: color-mix(in oklab, var(--ugs-status-color) 62%, var(--fg-dim));
 }
 
 .ugs-status-unread {
-  box-shadow:
-    0 0 0 3px color-mix(in oklab, var(--status-success) 26%, transparent);
-}
-
-.ugs-status-spinner {
-  background: transparent;
-  border: var(--ugs-status-spinner-ring) solid var(--status-running-track);
-  border-right-color: var(--ugs-status-color, var(--status-running));
-  border-top-color: var(--ugs-status-color, var(--status-running));
-  animation: ugs-status-spin 900ms linear infinite;
+  position: absolute;
+  top: 2px;
+  right: 1px;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--status-success);
+  box-shadow: 0 0 0 1.5px var(--panel-2);
 }
 
 /* React Flow dark theme overrides */
@@ -1370,7 +1488,10 @@ pre,
   --diff-del-bg: color-mix(in oklab, #f85149 16%, transparent);
   /* Code-block chrome surfaces, derived from theme tokens. */
   --code-bg: color-mix(in oklab, var(--bg) 86%, #000 14%);
-  --code-header-bg: transparent;
+  /* A real (subtle) band instead of `transparent`: 9 block headers in TSX paint
+     bg-[var(--code-header-bg)], and with no tint they read as a floating row of
+     text above a hairline. Kept within a few % of --code-bg so it stays quiet. */
+  --code-header-bg: color-mix(in oklab, var(--code-bg) 92%, var(--panel-2));
   --code-border: var(--border);
   /* Message-stream semantic tokens. "current" keeps following the UI theme;
      dedicated stream schemes override these below. */
@@ -1480,7 +1601,8 @@ html.ugs-stream-scheme-campbell {
   --diff-add-bg: rgba(22, 198, 12, 0.18);
   --diff-del-bg: rgba(231, 72, 86, 0.18);
   --code-bg: #0f1115;
-  --code-header-bg: transparent;
+  /* This scheme no longer forces --code-header-bg to `transparent` (see :root). The
+     same applies to the three schemes below. */
   --code-border: #2a2a2a;
   --stream-surface-bg: #0c0c0c;
   --stream-surface-header-bg: #0c0c0c;
@@ -1536,7 +1658,6 @@ html.ugs-stream-scheme-campbell-powershell {
   --diff-add-bg: rgba(22, 198, 12, 0.18);
   --diff-del-bg: rgba(231, 72, 86, 0.18);
   --code-bg: #082448;
-  --code-header-bg: transparent;
   --code-border: #1c4a86;
   --stream-surface-bg: #012456;
   --stream-surface-header-bg: #012456;
@@ -1592,7 +1713,6 @@ html.ugs-stream-scheme-one-half-dark {
   --diff-add-bg: rgba(152, 195, 121, 0.18);
   --diff-del-bg: rgba(224, 108, 117, 0.18);
   --code-bg: #23272f;
-  --code-header-bg: transparent;
   --code-border: #3a404d;
   --stream-surface-bg: #282c34;
   --stream-surface-header-bg: #282c34;
@@ -1648,7 +1768,6 @@ html.ugs-stream-scheme-solarized-dark {
   --diff-add-bg: rgba(133, 153, 0, 0.18);
   --diff-del-bg: rgba(220, 50, 47, 0.18);
   --code-bg: #073642;
-  --code-header-bg: transparent;
   --code-border: #144b57;
   --stream-surface-bg: #002b36;
   --stream-surface-header-bg: #002b36;
@@ -1741,12 +1860,17 @@ html.ugs-stream-scheme-solarized-dark {
 .ai-markdown {
   overflow-wrap: anywhere;
   isolation: isolate;
-  font-family: var(--ugs-mono-font-family);
-  font-size: 13px;
+  /* The reader face follows the user's 字体 setting (see --ugs-reader-font-family
+     in :root). It used to be pinned to the mono token, which meant the appearance
+     font controls were a no-op on the product's main reading surface and every
+     hanzi was pushed through a Latin-only mono face. Code keeps its mono face via
+     `code, pre, .mono` above and `.ai-code__scroll code` below. */
+  font-family: var(--ugs-reader-font-family);
+  /* rem, not px: the main reading surface must scale with the user's font-size
+     setting (12-20px) instead of ignoring it. 0.875rem = 14px at the 16px default,
+     which is what the plain-text fallback path already uses (LazyMessageContent). */
+  font-size: 0.875rem;
   line-height: 1.6;
-  font-feature-settings: 'liga' 0, 'calt' 0;
-  /* 让 CJK + 等宽字体稍微松一点；太小会让汉字挤成一片 */
-  letter-spacing: 0.012em;
 }
 .ai-stream-user-bubble {
   border: 1px solid var(--stream-user-bubble-border);
@@ -1791,9 +1915,9 @@ html.ugs-stream-scheme-solarized-dark {
 }
 .ai-markdown h2,
 .ai-markdown h3 {
-  padding: 0 0 0 0.65em;
+  padding: 0;
   background: transparent;
-  border-left: 3px solid color-mix(in oklab, var(--accent) 75%, transparent);
+  border-left: 0;
   border-radius: 0;
 }
 .ai-markdown h1 {
@@ -2297,6 +2421,10 @@ html.ugs-stream-scheme-solarized-dark {
 @media (prefers-reduced-motion: reduce) {
   .ai-reasoning__live { animation: none; color: var(--stream-reasoning-fg); }
   .ai-reasoning__body { transition: none; }
+  /* The streaming caret is the app's most-seen animation (it blinks for the whole
+     turn). Stop the blink but keep the solid block, so "still streaming" is still
+     visible without motion. */
+  .ai-caret { animation: none; }
 }
 
 /* Streaming caret shown before any text arrives. */

@@ -226,7 +226,7 @@ export default function LocalModelSetupDialog({
               : hardwareSummary}
           </div>
           {statusMessage && (
-            <p className="mb-3 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] leading-relaxed text-amber-200">
+            <p className="mb-3 rounded-md border border-status-warning/30 bg-status-warning/10 px-3 py-2 text-[11px] leading-relaxed text-status-warning">
               {statusMessage}
             </p>
           )}
@@ -267,7 +267,7 @@ export default function LocalModelSetupDialog({
                           {profile.label}
                         </span>
                         {recommended && (
-                          <span className="rounded border border-emerald-500/40 px-1.5 py-0.5 text-[10px] text-emerald-300">
+                          <span className="rounded border border-status-success/40 px-1.5 py-0.5 text-[10px] text-status-success">
                             {t(locale, 'settings.localModel.recommended')}
                           </span>
                         )}
@@ -289,12 +289,12 @@ export default function LocalModelSetupDialog({
             {t(locale, 'settings.localModel.setupHint')}
           </p>
           {started && (
-            <p className="mt-3 rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-[11px] leading-relaxed text-emerald-200">
+            <p className="mt-3 rounded-md border border-status-success/30 bg-status-success/10 px-3 py-2 text-[11px] leading-relaxed text-status-success">
               {t(locale, 'settings.localModel.setupStarted')}
             </p>
           )}
           {error && (
-            <p className="mt-3 rounded-md border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-[11px] leading-relaxed text-rose-200">
+            <p className="mt-3 rounded-md border border-status-error/30 bg-status-error/10 px-3 py-2 text-[11px] leading-relaxed text-status-error">
               {error}
             </p>
           )}

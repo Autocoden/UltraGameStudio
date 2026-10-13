@@ -30,6 +30,11 @@
  * Pure Node: no react / zustand / tauri. Imports only `which-cli` (sibling) +
  * `node:*`.
  */
+import { randomUUID } from 'node:crypto';
+import { isContextCompressionEvent, CONTEXT_COMPRESSION_TOOL } from '../../src/lib/contextCompression';
+import type { SkillNativeToolEvent } from '../../src/runtime/skills/types';
+import type { NodeSkillToolOptions } from './skill-tools';
+import { attachNodeCliSkillTools } from './skill-cli';
 import { spawn } from 'node:child_process';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -43,7 +48,9 @@ import {
   whichCli,
 } from './which-cli';
 import {
+  createCliNativeToolParser,
   codexCompletedItem,
+  codexPlanPatch,
   codexProgressLine,
   codexStatusSuccess,
   codexTurnCompletionStatus,
@@ -111,6 +118,15 @@ export interface SpawnCliAgentOpts {
   onProgress?: (text: string) => void;
   /** Raw model usage payload emitted by supported CLI adapters. */
   onUsage?: (usage: unknown) => void;
+  /** Host-assigned native execution identity, independent of session resume. */
+  runId?: string;
+  /** Native parser events, BEFORE UI clipping; prose/sentinels are not input. */
+  onNativeToolEvent?: (event: SkillNativeToolEvent) => void;
+  /** Foreground skill MCP only; never used by completion-only review ports. */
+  skillTools?: NodeSkillToolOptions;
+  onSkillToolsUnavailable?: (reason: string) => void;
+  /** Invocation-owned MCP configuration, assembled only by the host wrapper. */
+  _skillMcp?: { path: string; mcp: Record<string, unknown> };
   /** Claude session continuity. */
   sessionId?: string;
   resume?: boolean;
@@ -307,9 +323,10 @@ function projectMcpSettingsJson(cwd: string | undefined): Record<string, unknown
   return Object.keys(mcpServers).length > 0 ? { mcpServers } : null;
 }
 
-function writeProjectMcpSettings(cwd: string | undefined): { path: string; dir: string } | null {
-  const settings = projectMcpSettingsJson(cwd);
-  if (!settings) return null;
+function writeProjectMcpSettings(cwd: string | undefined, skillMcp?: { path: string; mcp: Record<string, unknown> }): { path: string; dir?: string } | null {
+  const project = projectMcpSettingsJson(cwd);
+  if (!project) return skillMcp ? { path: skillMcp.path } : null;
+  const settings = skillMcp ? { ...project, mcpServers: { ...project.mcpServers as Record<string, unknown>, ugs_skill_tools: skillMcp.mcp } } : project;
   const dir = mkdtempSync(join(tmpdir(), 'ultragamestudio-project-mcp-'));
   const path = join(dir, 'settings.json');
   writeFileSync(path, JSON.stringify(settings), 'utf8');
@@ -471,6 +488,12 @@ function buildArgs(
       args.push('-o', codexOutPath);
     }
     args.push('-');
+  } else if (protocol === 'gemini') {
+    args.push('-p', '', '--output-format', 'stream-json');
+    if (opts.model && shouldPassModel(opts.adapter, opts.model)) args.push('--model', opts.model);
+    if (permission === 'readonly') args.push('--approval-mode', 'plan');
+    else if (permission !== 'ask') args.push('--approval-mode', 'yolo');
+    if (cwd) workdir = cwd;
   } else if (protocol === 'grok') {
     // grok (`@xai-official/grok`): claude-family headless single-turn, but with
     // grok's own flag names. `streaming-messages-json` emits NDJSON in the
@@ -518,10 +541,10 @@ function buildArgs(
     }
     disableAutoupdater = true;
     if (mcpEnabled()) {
-      const projectMcp = writeProjectMcpSettings(cwd);
+      const projectMcp = writeProjectMcpSettings(cwd, opts._skillMcp);
       if (projectMcp) {
         args.push('--mcp-config', projectMcp.path);
-        tempDirs.push(projectMcp.dir);
+        if (projectMcp.dir) tempDirs.push(projectMcp.dir);
       }
     } else {
       args.push('--strict-mcp-config');
@@ -558,8 +581,43 @@ function buildArgs(
  * `runtime/failure.ts#parseRunFailure` can classify (same wording as lib.rs):
  * timeout / idle_timeout / interrupted / exit / spawn.
  */
-export function spawnCliAgent(prompt: string, opts: SpawnCliAgentOpts): Promise<string> {
+export async function spawnCliAgent(prompt: string, opts: SpawnCliAgentOpts): Promise<string> {
+  if (!opts.skillTools) return spawnCliAgentProcess(prompt, opts);
+  const notify = (reason: string) => { try { opts.onSkillToolsUnavailable?.(reason); } catch { /* Auxiliary status observer. */ } };
+  if (!mcpEnabled()) {
+    notify('SKILL_TOOLS_UNAVAILABLE: MCP is explicitly disabled; no reviewer fallback.');
+    return spawnCliAgentProcess(prompt, { ...opts, skillTools: undefined });
+  }
+  const runId = opts.runId ?? `${opts.skillTools.origin.runId}/cli/${randomUUID()}`;
+  const source = opts.skillTools.origin.runId;
+  if (runId !== source && !runId.startsWith(`${source}/cli/`)) throw new Error('SKILL_TOOL_ORIGIN_MISMATCH');
+  const binary = whichCli(opts.adapter, { cliCommand: opts.cliCommand });
+  // Probe transport flags only: this never certifies a background CLI sandbox.
+  let help = '';
+  if (['claude-code', 'claude'].includes(opts.adapter)) {
+    const launch = resolveLaunch(binary, ['--help']);
+    const result = spawnSync(launch.command, launch.args, { encoding: 'utf8', input: '', timeout: 5000, maxBuffer: 262144,
+      env: { ...process.env, DISABLE_AUTOUPDATER: '1' }, windowsHide: true, windowsVerbatimArguments: launch.verbatim });
+    if (result.status === 0) help = String(result.stdout ?? '');
+  }
+  let attachment: Awaited<ReturnType<typeof attachNodeCliSkillTools>>;
+  try {
+    attachment = await attachNodeCliSkillTools({ ...opts.skillTools, origin: { ...opts.skillTools.origin, runId }, adapter: opts.adapter,
+      help, permission: opts.permission, signal: opts.signal ?? opts.skillTools.signal });
+  } catch (error) {
+    if (opts.signal?.aborted || opts.skillTools.signal?.aborted) throw new Error('SKILL_TOOL_CANCELLED');
+    notify(error instanceof Error ? error.message : 'SKILL_TOOLS_UNAVAILABLE');
+    return spawnCliAgentProcess(prompt, { ...opts, skillTools: undefined, runId });
+  }
+  try {
+    return await spawnCliAgentProcess(prompt, { ...opts, skillTools: undefined, runId,
+      env: { ...opts.env, ...attachment.env }, _skillMcp: { path: attachment.path, mcp: attachment.mcp } });
+  } finally { await attachment.close(); }
+}
+
+function spawnCliAgentProcess(prompt: string, opts: SpawnCliAgentOpts): Promise<string> {
   const protocol = adapterProtocol(opts.adapter);
+  const parseNative = createCliNativeToolParser({ adapter: opts.adapter, runId: opts.runId ?? randomUUID() });
   if (protocol === 'claude') {
     repairClaudeBunInstall();
   }
@@ -602,15 +660,30 @@ export function spawnCliAgent(prompt: string, opts: SpawnCliAgentOpts): Promise<
 
   return new Promise<string>((resolve, reject) => {
     const env: NodeJS.ProcessEnv = { ...process.env };
-    // If codex's own `~/.codex/config.toml` already selects a named
-    // `model_provider` (the user's working relay + credential), UGS must NOT
-    // override OPENAI_BASE_URL/OPENAI_API_KEY. Injecting them makes codex
+    // If codex's own `config.toml` already selects a named `model_provider` (the
+    // user's working relay + endpoint/wire layout), UGS must NOT override
+    // OPENAI_BASE_URL/OPENAI_API_KEY/OPENAI_MODEL. Injecting them makes codex
     // resolve a different provider/wire/auth than the configured one, so the
     // relay rejects the turn (HTTP 40x surfaced as "turn status failed"). The
-    // selected model still rides `--model`; codex uses its own config +
-    // auth.json for endpoint/wire/credentials.
+    // selected model still rides `--model`.
+    //
+    // The credential, however, must still come from 设置 → 模型 rather than the
+    // user's global `~/.codex/auth.json`: leaving codex on that stale file is why
+    // editing the channel key had no effect at all. So override *only* the
+    // selected provider's credential slot via
+    // `-c model_providers.<provider>.env_key=…` and export the channel key under
+    // that variable — endpoint and `wire_api` stay exactly as configured.
     const codexRespectsOwnConfig =
       isCodex && codexConfigSelectsNamedModelProviderFromDisk();
+    const codexChannelKey = codexRespectsOwnConfig
+      ? opts.env?.OPENAI_API_KEY?.trim() || null
+      : null;
+    if (codexChannelKey) {
+      const provider = codexProviderCredentialOverride();
+      if (provider) {
+        args.push('-c', `model_providers.${provider}.env_key="${CODEX_CHANNEL_KEY_ENV}"`);
+      }
+    }
     if (opts.env) {
       for (const [k, v] of Object.entries(opts.env)) {
         if (!k.trim() || k === 'UGS_CLAUDE_BARE') continue;
@@ -622,6 +695,12 @@ export function spawnCliAgent(prompt: string, opts: SpawnCliAgentOpts): Promise<
         }
         env[k] = v;
       }
+    }
+    if (codexChannelKey) {
+      // The channel credential, exported under the variable the overridden
+      // `env_key` points at. codex prefers it over the stale `auth.json`, so
+      // 设置 → 模型 finally drives the real request.
+      env[CODEX_CHANNEL_KEY_ENV] = codexChannelKey;
     }
     normalizeSpawnEnv(env);
     if (disableAutoupdater) env.DISABLE_AUTOUPDATER = '1';
@@ -727,7 +806,22 @@ export function spawnCliAgent(prompt: string, opts: SpawnCliAgentOpts): Promise<
       } catch {
         return;
       }
+      if (isContextCompressionEvent(v)) {
+        opts.onProgress?.(encodeToolPatch({
+          id: `compression:${Date.now()}:${toolStartedAt.size}`,
+          name: CONTEXT_COMPRESSION_TOOL, status: 'done', ephemeral: true,
+        }));
+        return;
+      }
+      for (const event of parseNative(v)) {
+        try { opts.onNativeToolEvent?.(event); } catch { /* Auxiliary observers cannot break the foreground task. */ }
+      }
       if (isCodex) {
+        const plan = codexPlanPatch(v);
+        if (plan) {
+          opts.onProgress?.(encodeToolPatch(plan));
+          return;
+        }
         const usage = codexTurnUsage(v);
         if (usage) opts.onUsage?.(usage);
         const status = codexTurnCompletionStatus(v);
@@ -782,6 +876,13 @@ export function spawnCliAgent(prompt: string, opts: SpawnCliAgentOpts): Promise<
               }),
             );
           }
+        }
+        return;
+      }
+      if (protocol === 'gemini') {
+        if (v.type === 'message' && v.role === 'assistant' && typeof v.content === 'string') {
+          acc += v.content;
+          opts.onProgress?.(v.content);
         }
         return;
       }
@@ -940,12 +1041,23 @@ function codexLastMessageReady(path: string): boolean {
 }
 
 /**
- * Codex CLI host name of the user's `~/.codex/config.toml`, or null when the
- * file is missing/unreadable.
+ * Root of the user's Codex home: `CODEX_HOME` when set (codex itself honours it,
+ * as does `which-cli#preferredCodexPath`), else `~/.codex`. Keeping UGS's reads
+ * on the same root codex actually uses avoids the "UGS looked at a file codex
+ * never opens" class of bug.
+ */
+function codexUserHomeDir(): string {
+  const configured = process.env.CODEX_HOME?.trim();
+  return configured || join(homedir(), '.codex');
+}
+
+/**
+ * Codex CLI host name of the user's `config.toml`, or null when the file is
+ * missing/unreadable.
  */
 function codexConfigPath(): string | null {
   try {
-    return join(homedir(), '.codex', 'config.toml');
+    return join(codexUserHomeDir(), 'config.toml');
   } catch {
     return null;
   }
@@ -980,6 +1092,63 @@ function codexConfigSelectsNamedModelProviderFromDisk(): boolean {
     return false;
   }
   return codexConfigSelectsNamedModelProvider(text);
+}
+
+/**
+ * Env var UGS exports the selected channel's key under for Codex spawns.
+ * Overriding `model_providers.<provider>.env_key` to this name is what makes
+ * 设置 → 模型 the credential codex actually sends.
+ */
+export const CODEX_CHANNEL_KEY_ENV = 'UGS_CODEX_CHANNEL_KEY';
+
+/** The non-default `model_provider` selected by a config.toml, or null. */
+export function codexSelectedProvider(text: string): string | null {
+  const match = /^\s*model_provider\s*=\s*"([^"]*)"\s*$/m.exec(text);
+  const value = match?.[1]?.trim();
+  if (!value || value === 'openai') return null;
+  return value;
+}
+
+/** Body lines of `[model_providers.<provider>]`, or null when absent. */
+function codexProviderTable(text: string, provider: string): string | null {
+  const header = `[model_providers.${provider}]`;
+  const lines = text.split(/\r?\n/);
+  const start = lines.findIndex((line) => line.trim() === header);
+  if (start < 0) return null;
+  let end = lines.length;
+  for (let i = start + 1; i < lines.length; i += 1) {
+    if (lines[i].trimStart().startsWith('[')) {
+      end = i;
+      break;
+    }
+  }
+  return lines.slice(start + 1, end).join('\n');
+}
+
+/**
+ * The named provider whose credential slot UGS may override, if the user's
+ * config.toml selects a provider that is actually declared. `-c
+ * model_providers.<provider>.env_key=…` needs the table to exist, otherwise
+ * codex would resolve a provider with no `base_url`/`name`. Mirrors lib.rs
+ * `codex_provider_for_credential_override`.
+ */
+export function codexProviderForCredentialOverride(text: string): string | null {
+  const provider = codexSelectedProvider(text);
+  if (!provider) return null;
+  return codexProviderTable(text, provider) == null ? null : provider;
+}
+
+/** Re-read the user's config.toml and report the provider to override, if any. */
+export function codexProviderCredentialOverride(): string | null {
+  const path = codexConfigPath();
+  if (!path) return null;
+  let text: string;
+  try {
+    text = readFileSync(path, 'utf8');
+  } catch {
+    return null;
+  }
+  return codexProviderForCredentialOverride(text);
 }
 
 const ERROR_CONTEXT_LIMIT = 1200;

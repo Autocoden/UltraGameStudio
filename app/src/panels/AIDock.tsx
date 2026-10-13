@@ -43,6 +43,13 @@ import {
   Zap,
 } from "lucide-react";
 import Select from "@/components/Select";
+import ComposerOptions from "@/components/ComposerOptions";
+import EditedFilesCard from "@/components/ai/EditedFilesCard";
+import SessionChangesSummary from "@/components/ai/SessionChangesSummary";
+import ChatTaskProgress from "@/components/ai/ChatTaskProgress";
+import { collectChatTaskProgress } from "@/lib/chatTasks";
+import { MessageArtifacts } from "@/components/ai/GeneratedArtifactsCard";
+import { collectSessionFileChanges, collectTurnFileChanges } from "@/lib/turnFileChanges";
 import { summarizeAnswer, type InteractionAnswer } from "@/core/interaction";
 import { readStartUserInputs } from "@/core/startInputs";
 import {
@@ -140,12 +147,21 @@ import {
 import type { SelectOption } from "@/store/types";
 import { cacheTtlOptions, startupModeOptions } from "@/store/sampleSessions";
 import {
+  THINKING_LEVEL_DEFAULT_ID,
+  declaredLevelsFor,
+  parseThinkingLevelOverrides,
+  thinkingDefault,
+  thinkingLevelOptions,
+} from "@/lib/thinkingLevels";
+import {
   LANGUAGE_SELECT_OPTIONS,
   localizeSelectOption,
   t,
   type Locale,
 } from "@/lib/i18n";
 import type { Message } from "@/store/types";
+import type { SkillReviewState } from "@/runtime/skills/types";
+import SkillLearningCard from "@/components/ai/SkillLearningCard";
 import {
   buildSlashSuggestions,
   buildGameSkillSuggestions,
@@ -234,7 +250,7 @@ import {
   cleanMessageText,
   renderMessageText,
   routeLabelFromText,
-  timingLineFromText,
+  turnTimingFromMessage,
 } from "@/components/ai/lib/messageText";
 import { translatePublicText } from "@/lib/publicTranslation";
 import { captureConversation } from "@/lib/sessionScreenshot";
@@ -243,7 +259,8 @@ import StudioRunCard from "@/panels/StudioRunCard";
 import GameTeamPanel, {
   OPEN_GAME_TEAM_DETAILS_EVENT,
 } from "@/panels/GameTeamPanel";
-import { requestProjectRightPanelFilePreview } from "@/panels/projectRightPanelEvents";
+import { requestProjectRightPanelFilePreview, requestProjectRightPanelToggle, requestProjectRightPanelSessionFiles,
+  PROJECT_RIGHT_PANEL_VISIBILITY_EVENT } from "@/panels/projectRightPanelEvents";
 import { activeChatTitle, formatMessageTime } from "@/panels/aidock/chatTitle";
 import {
   fileMentionEntryForTarget,
@@ -291,14 +308,16 @@ import type { FileRef } from "@/components/ai/lib/filePath";
 import {
   displayFileRefLabel,
   isImageFileRef,
+  parentDirectoryPath,
 } from "@/components/ai/lib/filePath";
 import { scanFileRefs } from "@/components/ai/lib/fileScan";
+import { orderDisplayMessages } from "@/components/ai/lib/orderDisplayMessages";
 import FileChip, {
   FileChipBudgetProvider,
   type OpenFileIntent,
 } from "@/components/ai/FileChip";
 import { shallow } from "zustand/shallow";
-import { isActiveAiEditingSession, useStore } from "@/store/useStore";
+import { isActiveAiEditingSession, useStore, retryPersistedSkillLearning } from "@/store/useStore";
 import {
   getRemoteWorkspace,
   getCachedRemoteWorkspaceSkills,
@@ -333,6 +352,12 @@ const INITIAL_MESSAGE_WINDOW = 5;
 const BACKGROUND_MESSAGE_WINDOW_TARGET = 80;
 const BACKGROUND_MESSAGE_WINDOW_PAGE = 15;
 const MESSAGE_WINDOW_PAGE = 80;
+/**
+ * Frames spent re-pinning a bottom-restored session while the message window
+ * and lazy markdown upgrade (see scheduleBottomAlignment).
+ */
+const STREAM_BOTTOM_REALIGN_ATTEMPTS = 8;
+const STREAM_BOTTOM_REALIGN_DELAY_MS = 32;
 const TIMELINE_SUMMARY_LIMIT = 40;
 /** Fixed height of the bottom input area in 'chat' layout (return fills the rest). */
 const CHAT_INPUT_HEIGHT = 300;
@@ -759,7 +784,7 @@ function MessageActionToolbar({
               return (
                 <div key={option.id}>
                   {showGroup && (
-                    <div className="px-3 pb-1 pt-1.5 font-mono text-[9px] uppercase tracking-wider text-fg-faint">
+                    <div className="px-3 pb-1 pt-1.5 text-[11px] font-semibold uppercase tracking-wide text-fg-faint">
                       {option.group}
                     </div>
                   )}
@@ -1543,6 +1568,11 @@ function InteractionWidget({
               {interactionOptionCountLabel(locale, req.options?.length ?? 0)}
             </div>
           )}
+          {active && (
+            <div className="mt-1 font-mono text-[10px] leading-4 text-fg-faint">
+              {t(locale, "interaction.waitingHint")}
+            </div>
+          )}
         </div>
       </div>
 
@@ -1832,6 +1862,17 @@ export default function AIDock({
   const isChat = layout === "chat";
   const messages = useStore((s) => s.messages);
   const sendPrompt = useStore((s) => s.sendPrompt);
+  const learnSkills = useStore((s) => s.learnSkills);
+  const reviewSkillLearningAction = useStore((s) => s.reviewSkillLearningAction);
+  const updateSkillLearningState = useStore((s) => s.updateSkillLearningState);
+  const handleSkillReviewAction = async (messageId: string, state: SkillReviewState, action: "approve" | "reject" | "rollback", id: string) => {
+    const result = await reviewSkillLearningAction(state, action, id);
+    if ((["hostId", "workspaceId", "sessionId", "turnId", "runId"] as const).some((key) => result.origin[key] !== state.origin[key])
+      || result.origin.cwd !== state.origin.cwd
+      || (action !== "rollback" && result.batchId !== state.result?.batchId)) throw new Error("SKILL_RESULT_ORIGIN_MISMATCH");
+    await updateSkillLearningState(messageId, { ...state, status: result.status, action, result, error: result.error });
+    return result;
+  };
   const ensureSessionStartupWorkspace = useStore(
     (s) => s.ensureSessionStartupWorkspace,
   );
@@ -1891,6 +1932,15 @@ export default function AIDock({
   const [shortcutSettings, setShortcutSettingsState] =
     useState(loadShortcutSettings);
   const gameExpertSettings = useStore((s) => s.gameExpertSettings);
+  const composerHintRowVisible = useStore((s) => s.composerHintRowVisible);
+  // 「提及文件 / 组织架构 / 知识库」三个入口默认隐藏，设置 → 常规 里可打开。
+  const composerToolButtonsVisible = useStore(
+    (s) => s.composerToolButtonsVisible,
+  );
+  // 思考深度选择器：默认显示（档位按协议 + 模型族自动判定），可在设置 → 常规
+  // 里整体隐藏，或用覆盖文本手写档位集合。
+  const thinkingLevelsEnabled = useStore((s) => s.thinkingLevelsEnabled);
+  const thinkingLevelOverrides = useStore((s) => s.thinkingLevelOverrides);
   const setComposer = useStore((s) => s.setComposer);
   const setComposerDraft = useStore((s) => s.setComposerDraft);
   const permissionOptions = useStore((s) => s.permissionOptions);
@@ -2035,11 +2085,43 @@ export default function AIDock({
   const streamScrollSnapshotsRef = useRef(
     new Map<string, StreamScrollSnapshot>(),
   );
+  /**
+   * Scroll offsets this component wrote itself: session restore, bottom re-pin
+   * and message-window growth compensation. Such a write always produces a
+   * scroll event, and by the time the browser delivers it lazy markdown may
+   * already have grown the content — so re-deriving `atBottom` from that event
+   * reads "the user scrolled away from the bottom" when in fact the viewport
+   * never moved by a user gesture. Because that flag is sticky (the restore and
+   * the ResizeObserver only re-pin while it is true), one such event used to
+   * latch a bottom-pinned conversation as manually scrolled and leave its
+   * scrollbar stranded in the middle after switching back to it. Recording the
+   * offsets we wrote lets `handleStreamScroll` tell our own writes apart from a
+   * genuine user scroll (wheel, drag, keyboard or our smooth jump helpers).
+   */
+  const programmaticScrollTopsRef = useRef<number[]>([]);
+  const markProgrammaticStreamScroll = useCallback(
+    (stream: HTMLElement | null, before: number) => {
+      if (!stream) return;
+      // A write that did not move the viewport generates no scroll event, so
+      // remembering it could only ever swallow a later genuine user scroll that
+      // happens to land on the same offset.
+      if (Math.abs(stream.scrollTop - before) <= 0.5) return;
+      const marks = programmaticScrollTopsRef.current;
+      marks.push(stream.scrollTop);
+      if (marks.length > 8) marks.shift();
+    },
+    [],
+  );
   const activeStreamScrollKey = useMemo(
     () => streamScrollKey(layout, activeWorkspaceId, activeSessionId),
     [activeSessionId, activeWorkspaceId, layout],
   );
   const activeStreamScrollKeyRef = useRef(activeStreamScrollKey);
+  if (activeStreamScrollKeyRef.current !== activeStreamScrollKey) {
+    // Marks are offsets, and an offset from the previous session must never
+    // swallow the new session's first user scroll.
+    programmaticScrollTopsRef.current.length = 0;
+  }
   activeStreamScrollKeyRef.current = activeStreamScrollKey;
   const pendingStreamScrollRestoreKeyRef = useRef<string | null>(
     activeStreamScrollKey,
@@ -3539,6 +3621,92 @@ export default function AIDock({
           selectedDefaultProvider.provider,
         ))
       : runSelection.modelClass || "default";
+  // 思考深度档位由 `thinkingLevelOptions` 按「协议通道 + 模型族」给出，只列出
+  // 该接口真正支持的等级：claude-code 5 档、codex 6 档、DeepSeek 官方 4 档、
+  // 第三方兼容网关按模型族（deepseek / claude / gpt-5 / gemini / grok / qwen /
+  // glm …）各取其真实档位，未识别模型给通用三档。明确不推理的模型返回空数组。
+  //
+  // 「默认（不指定）」不是一句含糊的「用渠道默认」：`thinkingDefault` 会算出
+  // 它真正等价于哪一档（claude CLI 按模型目录的 `default_effort` 实测值），
+  // 能判定就在该档位上打「模型默认档」标记，判不了就把原因写明（CLI 自定 /
+  // 网关默认不推理 / 端点自定），避免用户对着「默认」猜。
+  const thinkingUi = useMemo<{
+    options: SelectOption[];
+    defaultHint: string;
+  }>(() => {
+    const provider = selectedDefaultProvider?.provider;
+    const model =
+      runSelection.modelOverride ??
+      (provider
+        ? providerDisplayModel(runSelection.modelClass, provider)
+        : runSelection.modelClass);
+    // 直连渠道用真实协议（anthropic / openai-compatible）解析档位，CLI 渠道才
+    // 按适配器解析——这样选择器列出的档位与请求真正走的那条通道一致。
+    const transport =
+      provider?.transport === "direct"
+        ? provider?.kind === "anthropic"
+          ? "anthropic"
+          : "openai-compatible"
+        : "cli";
+    const source = {
+      adapter: selectedAdapter,
+      baseUrl: provider?.baseUrl ?? "",
+      model,
+      transport,
+      declaredLevels: declaredLevelsFor(
+        model,
+        parseThinkingLevelOverrides(thinkingLevelOverrides),
+      ),
+    };
+    const fallback = thinkingDefault(source);
+    const levels = thinkingLevelOptions(source);
+    const labelById = new Map(
+      levels.map((option) => [option.id, t(locale, option.labelKey)]),
+    );
+    // 默认档必须真的在本次可选集合里，否则不标（换渠道/换模型后可能不再支持）。
+    const defaultLevelId =
+      fallback.level && labelById.has(fallback.level) ? fallback.level : null;
+    const options: SelectOption[] = levels.map((option) => {
+      const hint = t(locale, option.hintKey);
+      return {
+        id: option.id,
+        label: t(locale, option.labelKey),
+        hint:
+          option.id === defaultLevelId
+            ? `${t(locale, "dock.thinkingLevelDefaultMark")} · ${hint}`
+            : hint,
+      };
+    });
+    const defaultHint = defaultLevelId
+      ? `${t(locale, "dock.thinkingDefaultModel")} · ${t(
+          locale,
+          "dock.thinkingDefaultActual",
+        )}${labelById.get(defaultLevelId) ?? defaultLevelId}`
+      : t(locale, fallback.hintKey);
+    return { options, defaultHint };
+  }, [
+    locale,
+    selectedAdapter,
+    selectedDefaultProvider,
+    runSelection.modelOverride,
+    runSelection.modelClass,
+    thinkingLevelOverrides,
+  ]);
+  // 换渠道/换模型后上一个档位可能不再合法，此时显示「默认」——与实际下发的一致。
+  const thinkingValue =
+    runSelection.thinkingLevel &&
+    thinkingUi.options.some((option) => option.id === runSelection.thinkingLevel)
+      ? runSelection.thinkingLevel
+      : THINKING_LEVEL_DEFAULT_ID;
+  const handleThinkingChange = useCallback(
+    (id: string) => {
+      setSessionRunSelection({
+        ...runSelection,
+        thinkingLevel: id === THINKING_LEVEL_DEFAULT_ID ? undefined : id,
+      });
+    },
+    [runSelection, setSessionRunSelection],
+  );
   const [keyModalChannel, setKeyModalChannel] = useState<FreeChannel | null>(
     null,
   );
@@ -3836,6 +4004,18 @@ export default function AIDock({
   // Open a local file referenced by an AI-message chip in the right preview pane.
   // Paths resolve against the active workspace folder in the Tauri command.
   const workspaceCwd = composer.workspace;
+  const sessionFileChanges = useMemo(
+    () => collectSessionFileChanges(messages, workspaceCwd || undefined),
+    [messages, workspaceCwd],
+  );
+  const [projectFilePanelOpen, setProjectFilePanelOpen] = useState(false);
+  useEffect(() => {
+    const onVisibility = (event: Event) => {
+      setProjectFilePanelOpen(Boolean((event as CustomEvent<{ open: boolean }>).detail?.open));
+    };
+    window.addEventListener(PROJECT_RIGHT_PANEL_VISIBILITY_EVENT, onVisibility);
+    return () => window.removeEventListener(PROJECT_RIGHT_PANEL_VISIBILITY_EVENT, onVisibility);
+  }, []);
   const fileMentionRootFolders = useMemo(
     () => {
       if (activeRemoteWorkspaceRoot) return [activeRemoteWorkspaceRoot];
@@ -4255,6 +4435,15 @@ export default function AIDock({
         });
         return;
       }
+      if (intent?.openContainingFolder) {
+        // Jump to the folder itself rather than selecting the file inside it.
+        // A bare filename has no parent of its own, so fall back to the
+        // workspace root; when neither exists there is nothing to open.
+        const parent = parentDirectoryPath(ref.path) || workspaceCwd;
+        if (!parent) return;
+        void openLocalPath(parent, { cwd: workspaceCwd || undefined });
+        return;
+      }
       if (
         requestProjectRightPanelFilePreview({
           ref,
@@ -4271,8 +4460,11 @@ export default function AIDock({
 
   // Image paths typed or pasted into the composer are just plain text
   // inside the <textarea>, so they can't be clicked the way chips in a sent
-  // message can. Scan the draft for image refs and surface only those as a
-  // clickable strip below the input before the message is sent.
+  // message can. Scan the draft for image refs and surface them as a
+  // thumbnail-only strip below the input: one horizontal, scrollable row —
+  // a pasted screenshot path is ~90 chars, so rendering the path text next to
+  // each thumbnail stacked the strip into one image per row and filled the
+  // card. The tile still opens the preview drawer; its x removes the path.
   const draftFileRefs = useMemo<FileRef[]>(() => {
     const text = draft.trim();
     if (!text) return [];
@@ -4298,15 +4490,6 @@ export default function AIDock({
     }
     return null;
   }, [messages]);
-  // The leading `⏱ …` line of the latest assistant turn, hoisted out of the
-  // bubble so it can sit at the very bottom of the stream. It tracks the turn's
-  // live clock because the streaming path keeps rewriting that line in the
-  // message text while the turn is running.
-  const lastAssistantTiming = useMemo(() => {
-    if (!lastAssistantId) return "";
-    const message = messages.find((m) => m.id === lastAssistantId);
-    return message ? timingLineFromText(message.text) : "";
-  }, [lastAssistantId, messages]);
   // The tail of the list is what's visible at the bottom on session switch, so
   // those messages render their (expensive) markdown eagerly to keep the initial
   // view correct and scroll-to-bottom precise. Everything above upgrades lazily
@@ -4325,15 +4508,33 @@ export default function AIDock({
   }, [messages]);
   const renderFullMessageList =
     forceEagerCapture || normalizedSearch.length > 0;
+  // Display-only chronological ordering. The store keeps messages merged by
+  // turn (an in-flight reply lands right after its own prompt, even if a later
+  // user message was appended first), so the raw array can be out of
+  // `createdAt` order. Sort a copy here; the store array and the LLM-facing
+  // history are untouched. Sort is skipped when the array is already monotonic
+  // so steady-state rendering stays O(n). Interjected ("插话") messages are the
+  // one exception: they keep their store position (just above the reply they
+  // interrupted) instead of being re-sorted by their send-time createdAt.
+  const displayMessages = useMemo(() => orderDisplayMessages(messages), [messages]);
+  const taskProgress = useMemo(() => collectChatTaskProgress(messages.filter(
+    (message) => !queuedChatMessageIds.includes(message.id),
+  )), [messages, queuedChatMessageIds]);
+  const jobDetails = useStore((s) => s.jobDetails);
+  const currentJobs = useMemo(() => jobDetails.filter((job) =>
+    job.manifest.workspaceId === (activeWorkspaceId ?? null)
+    && job.manifest.sessionId === (activeSessionId ?? null)
+    && job.manifest.startedAt >= taskProgress.startedAt,
+  ), [jobDetails, activeWorkspaceId, activeSessionId, taskProgress.startedAt]);
   const scrollSnapshotForWindow =
     streamScrollSnapshotsRef.current.get(activeStreamScrollKey);
   const anchorMessageIndex = scrollSnapshotForWindow?.anchorMessageId
-    ? messages.findIndex(
+    ? displayMessages.findIndex(
         (message) => message.id === scrollSnapshotForWindow.anchorMessageId,
       )
     : -1;
   const anchorMessageWindowSize =
-    anchorMessageIndex >= 0 ? messages.length - anchorMessageIndex : 0;
+    anchorMessageIndex >= 0 ? displayMessages.length - anchorMessageIndex : 0;
   const savedMessageWindowSize =
     messageWindowSizesRef.current.get(activeStreamScrollKey) ??
     INITIAL_MESSAGE_WINDOW;
@@ -4342,7 +4543,7 @@ export default function AIDock({
       ? messageWindow.size
       : savedMessageWindowSize;
   const effectiveMessageWindowSize = Math.min(
-    messages.length,
+    displayMessages.length,
     Math.max(
       INITIAL_MESSAGE_WINDOW,
       storedMessageWindowSize,
@@ -4350,18 +4551,18 @@ export default function AIDock({
     ),
   );
   const visibleMessageCount = renderFullMessageList
-    ? messages.length
+    ? displayMessages.length
     : effectiveMessageWindowSize;
   const hiddenMessageCount = Math.max(
     0,
-    messages.length - visibleMessageCount,
+    displayMessages.length - visibleMessageCount,
   );
   const visibleMessages = useMemo(
     () =>
       hiddenMessageCount > 0
-        ? messages.slice(hiddenMessageCount)
-        : messages,
-    [hiddenMessageCount, messages],
+        ? displayMessages.slice(hiddenMessageCount)
+        : displayMessages,
+    [hiddenMessageCount, displayMessages],
   );
   const queuedChatMessageIdSet = useMemo(
     () => new Set(queuedChatMessageIds),
@@ -4402,6 +4603,8 @@ export default function AIDock({
   const [chatInputHeight, setChatInputHeight] = useState<number>(
     () => loadPaneWidth(CHAT_INPUT_HEIGHT_KEY) ?? CHAT_INPUT_HEIGHT,
   );
+  const [renderedChatInputHeight, setRenderedChatInputHeight] =
+    useState(chatInputHeight);
   const dockRef = useRef<HTMLDivElement>(null);
   const orgPanelRef = useRef<HTMLDivElement>(null);
   const inputSectionRef = useRef<HTMLElement>(null);
@@ -4729,8 +4932,12 @@ export default function AIDock({
       });
     }
     const stream = streamRef.current;
-    if (stream) scrollStreamToBottom(stream);
-  }, []);
+    if (stream) {
+      const before = stream.scrollTop;
+      scrollStreamToBottom(stream);
+      markProgrammaticStreamScroll(stream, before);
+    }
+  }, [markProgrammaticStreamScroll]);
 
   // Timeline "jump to edge" buttons. Unlike pinActiveStreamToBottom (used on
   // send, instant scroll) these are user-triggered smooth scrolls, so they
@@ -4808,13 +5015,27 @@ export default function AIDock({
           ? current
           : { key: activeStreamScrollKey, size: next };
       });
+      const ownerKey = activeStreamScrollKey;
       window.requestAnimationFrame(() => {
+        // The scroll node is shared by every session, so a frame scheduled here
+        // can run after the user switched conversations — with the other
+        // session's content already in the DOM. `previousScrollHeight` then
+        // belongs to the session that asked for the growth, and applying the
+        // difference to whatever is mounted now both moves the wrong session's
+        // scrollbar and records that bogus position as the other session's
+        // remembered scroll state (which flips it away from "at bottom" and
+        // disables every later re-pin). Bail unless the node AND the owning
+        // session key are still the ones this growth was computed for.
         const nextStream = streamRef.current;
-        if (!nextStream || previousScrollHeight == null) return;
+        if (!nextStream || nextStream !== stream || previousScrollHeight == null)
+          return;
+        if (activeStreamScrollKeyRef.current !== ownerKey) return;
         const delta = nextStream.scrollHeight - previousScrollHeight;
         if (Number.isFinite(delta) && delta > 0) {
+          const before = nextStream.scrollTop;
           nextStream.scrollTop += delta;
-          rememberStreamScrollSnapshot();
+          markProgrammaticStreamScroll(nextStream, before);
+          rememberStreamScrollSnapshot(ownerKey);
         }
       });
     },
@@ -4868,7 +5089,9 @@ export default function AIDock({
       // remembered scroll position: snap to the bottom instead so the user
       // lands on whatever just finished/needs input, not a stale spot.
       if (consumeForceBottomScrollForSession(activeSessionId)) {
+        const before = stream.scrollTop;
         scrollStreamToBottom(stream);
+        markProgrammaticStreamScroll(stream, before);
         stickToBottomRef.current = true;
         streamScrollSnapshotsRef.current.set(key, {
           atBottom: true,
@@ -4882,10 +5105,82 @@ export default function AIDock({
       }
       const snapshot = streamScrollSnapshotsRef.current.get(key);
       stickToBottomRef.current = snapshot?.atBottom ?? true;
-      return restoreStreamScrollSnapshot(stream, messageRefs.current, snapshot);
+      const before = stream.scrollTop;
+      const restored = restoreStreamScrollSnapshot(
+        stream,
+        messageRefs.current,
+        snapshot,
+      );
+      markProgrammaticStreamScroll(stream, before);
+      return restored;
     },
-    [activeSessionId],
+    [activeSessionId, markProgrammaticStreamScroll],
   );
+
+  /**
+   * A session that was left pinned to the bottom is restored against the DOM as
+   * it exists in that commit — where the message window is still clamped and
+   * off-screen markdown is still a plain-text placeholder. Both grow right
+   * afterwards, so the "bottom" reached at restore time can sit far above the
+   * settled bottom. Re-pin for a bounded number of frames while the session is
+   * still bottom-pinned; the ResizeObserver covers anything later.
+   */
+  const bottomAlignRef = useRef<{
+    key: string;
+    stream: HTMLElement;
+    attempts: number;
+    frame: number | null;
+    timer: number | null;
+  } | null>(null);
+
+  const cancelBottomAlignment = useCallback(() => {
+    const pending = bottomAlignRef.current;
+    bottomAlignRef.current = null;
+    if (!pending) return;
+    if (pending.frame !== null) window.cancelAnimationFrame(pending.frame);
+    if (pending.timer !== null) window.clearTimeout(pending.timer);
+  }, []);
+
+  const scheduleBottomAlignment = useCallback(
+    (key: string) => {
+      cancelBottomAlignment();
+      const stream = streamRef.current;
+      if (!stream) return;
+      const state = {
+        key,
+        stream,
+        attempts: 0,
+        frame: null as number | null,
+        timer: null as number | null,
+      };
+      bottomAlignRef.current = state;
+      const align = () => {
+        state.frame = null;
+        state.timer = null;
+        if (bottomAlignRef.current !== state) return;
+        // Never re-pin a session the user already left.
+        if (activeStreamScrollKeyRef.current !== key) return;
+        if (streamRef.current !== stream) return;
+        if (!streamScrollSnapshotsRef.current.get(key)?.atBottom) return;
+        const before = stream.scrollTop;
+        scrollStreamToBottom(stream);
+        markProgrammaticStreamScroll(stream, before);
+        rememberStreamScrollSnapshot(key);
+        state.attempts += 1;
+        if (state.attempts < STREAM_BOTTOM_REALIGN_ATTEMPTS) {
+          state.timer = window.setTimeout(align, STREAM_BOTTOM_REALIGN_DELAY_MS);
+        }
+      };
+      state.frame = window.requestAnimationFrame(align);
+    },
+    [
+      cancelBottomAlignment,
+      markProgrammaticStreamScroll,
+      rememberStreamScrollSnapshot,
+    ],
+  );
+
+  useEffect(() => cancelBottomAlignment, [cancelBottomAlignment]);
 
   const updateActiveTopicFromScroll = useCallback(() => {
     const stream = streamRef.current;
@@ -4926,6 +5221,33 @@ export default function AIDock({
   // scroll pins this session to the visible message anchor; bottom stays sticky
   // and follows new streamed content.
   const handleStreamScroll = useCallback(() => {
+    const stream = streamRef.current;
+    const marks = programmaticScrollTopsRef.current;
+    const markIndex = stream
+      ? marks.findIndex((top) => Math.abs(top - stream.scrollTop) <= 1)
+      : -1;
+    if (markIndex !== -1) {
+      // We scrolled, not the user: refresh the recorded geometry but keep the
+      // session's pinned/unpinned intent exactly as it was.
+      marks.splice(markIndex, 1);
+      if (stream) {
+        const key = activeStreamScrollKeyRef.current;
+        const previous = streamScrollSnapshotsRef.current.get(key);
+        // No snapshot yet means this session never recorded an intent; a write
+        // we made for it (restore/pin/compensation) is bottom-following, so
+        // default to pinned — never to the previous session's flag.
+        const atBottom = previous?.atBottom ?? true;
+        streamScrollSnapshotsRef.current.set(key, {
+          ...readStreamScrollSnapshot(stream, messageRefs.current),
+          atBottom,
+        });
+        stickToBottomRef.current = atBottom;
+      }
+      updateActiveTopicFromScroll();
+      return;
+    }
+    // A real gesture overrides any write we had pending.
+    marks.length = 0;
     rememberStreamScrollSnapshot();
     updateActiveTopicFromScroll();
   }, [rememberStreamScrollSnapshot, updateActiveTopicFromScroll]);
@@ -4938,39 +5260,82 @@ export default function AIDock({
     draftRef.current = draft;
   }, [draft]);
 
-  // Empty-session centered composer auto-grow: the card is a fixed min-h-[14rem]
-  // box, so long drafts would only scroll inside the textarea. Measure the
-  // textarea's natural content height and grow the card up to 2.5x the base
-  // height, then let it scroll internally.
-  // Height reserved by the toolbar + paddings inside the card, so the base
-  // 14rem card leaves this much visible text area before growing.
-  const CENTER_INPUT_CHROME = 96;
-  const CENTER_TEXTAREA_BASE = CENTER_INPUT_BASE_HEIGHT - CENTER_INPUT_CHROME;
-  const CENTER_TEXTAREA_MAX = CENTER_INPUT_MAX_HEIGHT - CENTER_INPUT_CHROME;
+  // Both chat layouts grow with the draft. Measure the actual chrome so file
+  // chips and wrapping toolbars cannot take space away from the last text line.
+  const CENTER_TEXTAREA_BASE = CENTER_INPUT_BASE_HEIGHT - 96;
   const [centerInputTextareaHeight, setCenterInputTextareaHeight] = useState(
     CENTER_TEXTAREA_BASE,
   );
-  useLayoutEffect(() => {
-    if (!centerInput) {
-      setCenterInputTextareaHeight(CENTER_TEXTAREA_BASE);
-      return;
-    }
+  const fitChatInput = useCallback(() => {
+    if (!isChat) return;
     const el = inputRef.current;
-    if (!el) return;
-    // Reset to measure the natural content height, then clamp to [base, max].
-    const prev = el.style.height;
-    el.style.height = "auto";
-    const content = el.scrollHeight;
-    el.style.height = prev;
-    setCenterInputTextareaHeight(
-      Math.min(Math.max(content, CENTER_TEXTAREA_BASE), CENTER_TEXTAREA_MAX),
+    const section = inputSectionRef.current;
+    if (!el || !section) return;
+    const chrome = Math.max(
+      0,
+      section.getBoundingClientRect().height - el.getBoundingClientRect().height,
     );
-  }, [
-    centerInput,
-    draft,
-    CENTER_TEXTAREA_BASE,
-    CENTER_TEXTAREA_MAX,
-  ]);
+    const prevHeight = el.style.height;
+    const prevMinHeight = el.style.minHeight;
+    const prevMaxHeight = el.style.maxHeight;
+    const prevFlex = el.style.flex;
+    el.style.overflowY = "hidden";
+    el.style.height = "0px";
+    el.style.minHeight = "0";
+    el.style.maxHeight = "none";
+    el.style.flex = "0 0 auto";
+    const content = el.scrollHeight;
+    el.style.height = prevHeight;
+    el.style.minHeight = prevMinHeight;
+    el.style.maxHeight = prevMaxHeight;
+    el.style.flex = prevFlex;
+    const dockHeight = dockRef.current?.getBoundingClientRect().height;
+    const viewportMax = Math.max(
+      MIN_CHAT_INPUT_HEIGHT,
+      (dockHeight || window.innerHeight) - MIN_CHAT_RETURN_HEIGHT,
+    );
+    const maximum = Math.min(
+      viewportMax,
+      Math.max(CENTER_INPUT_MAX_HEIGHT, centerInput ? 0 : chatInputHeight),
+    );
+    const available = Math.max(0, maximum - chrome);
+    if (centerInput) {
+      setCenterInputTextareaHeight(
+        Math.min(Math.max(content, CENTER_TEXTAREA_BASE), available),
+      );
+    } else {
+      setRenderedChatInputHeight(
+        Math.min(Math.max(content + chrome, chatInputHeight), maximum),
+      );
+    }
+    el.style.overflowY = content > available + 1 ? "auto" : "hidden";
+    if (el.style.overflowY === "hidden") el.scrollTop = 0;
+  }, [isChat, centerInput, chatInputHeight, CENTER_TEXTAREA_BASE]);
+
+  useLayoutEffect(fitChatInput, [draft, fitChatInput]);
+
+  useLayoutEffect(() => {
+    if (!isChat) return;
+    const section = inputSectionRef.current;
+    const card = inputDropRef.current;
+    const observer = typeof ResizeObserver === "undefined"
+      ? null
+      : new ResizeObserver(fitChatInput);
+    // Section/dock changes catch wrapping, side panels and viewport changes;
+    // card children catch asynchronous previews and toolbar height changes.
+    if (section) observer?.observe(section);
+    if (dockRef.current) observer?.observe(dockRef.current);
+    if (card) {
+      for (const child of Array.from(card.children)) observer?.observe(child);
+    }
+    window.addEventListener("resize", fitChatInput);
+    document.fonts?.addEventListener("loadingdone", fitChatInput);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", fitChatInput);
+      document.fonts?.removeEventListener("loadingdone", fitChatInput);
+    };
+  }, [fitChatInput, draftFileRefs.length, composerTipText]);
 
   const rememberSelection = useCallback(
     (target: HTMLTextAreaElement | null = inputRef.current) => {
@@ -5419,6 +5784,59 @@ export default function AIDock({
     [insertComposerText],
   );
 
+  // Deleting a thumbnail in the composer strip must delete the underlying path
+  // token from the draft, not just hide the tile: the path is what actually gets
+  // sent. Pasted paths arrive backtick-wrapped (formatFilePathInsertion), a
+  // manually typed or dropped one may be bare, and a `file:///` draft carries a
+  // form parseFileRef normalized away — so try the wrapper, the raw path, then
+  // the basename (only when it is unambiguous).
+  const removeComposerFileRef = useCallback(
+    (ref: FileRef) => {
+      if (isReadOnly) return;
+
+      const current = draftRef.current;
+      const candidates = [`\`${ref.path}\``, ref.path];
+      if (ref.basename && ref.basename !== ref.path) candidates.push(ref.basename);
+
+      let index = -1;
+      let length = 0;
+      for (const candidate of candidates) {
+        if (!candidate) continue;
+        const at = current.indexOf(candidate);
+        if (at === -1) continue;
+        if (candidate === ref.basename && current.indexOf(candidate, at + 1) !== -1) {
+          continue; // Ambiguous basename: never guess which occurrence to drop.
+        }
+        index = at;
+        length = candidate.length;
+        break;
+      }
+      if (index === -1) return;
+
+      let start = index;
+      let end = index + length;
+      // Swallow the newline the path list left behind so removing the last
+      // preview does not leave a blank line in the draft.
+      if (current[end] === "\n") end += 1;
+      else if (start > 0 && current[start - 1] === "\n") start -= 1;
+
+      const next = current.slice(0, start) + current.slice(end);
+      const caret = clampSelection(start, next.length);
+
+      draftRef.current = next;
+      selectionRef.current = { start: caret, end: caret };
+      setComposerDraft(next);
+
+      window.requestAnimationFrame(() => {
+        const el = inputRef.current;
+        if (!(el instanceof HTMLTextAreaElement)) return;
+        el.focus();
+        el.setSelectionRange(caret, caret);
+      });
+    },
+    [isReadOnly, setComposerDraft],
+  );
+
   const startFileMention = useCallback(() => {
     if (isReadOnly) return;
     fileMentionInsertModeRef.current = "mention";
@@ -5792,11 +6210,13 @@ export default function AIDock({
         const stream = streamRef.current;
         const top = searchScrollTopRef.current;
         if (!stream || top === null) return;
+        const before = stream.scrollTop;
         stream.scrollTop = top;
+        markProgrammaticStreamScroll(stream, before);
         searchScrollTopRef.current = null;
       });
     }
-  }, [normalizedSearch]);
+  }, [markProgrammaticStreamScroll, normalizedSearch]);
 
   // Session/workspace switches restore that conversation's own scroll state:
   // bottom remains sticky, while a manual non-bottom position is restored by
@@ -5811,36 +6231,28 @@ export default function AIDock({
       return;
     if (restoreStreamScrollSnapshotForKey(activeStreamScrollKey)) {
       pendingStreamScrollRestoreKeyRef.current = null;
-      // 首帧之后惰性富渲染 / 消息窗口增长仍可能继续改变容器高度。恢复不能
-      // 依赖 ResizeObserver 的异步修正（它可能错过或滞后于内容高度变化），
-      // 所以下一帧再对齐一次，保证底部钉住的会话始终停在真正的最底部。
-      const key = activeStreamScrollKey;
-      let timer: number | null = null;
-      const alignBottom = () => {
-        if (activeStreamScrollKeyRef.current !== key) return;
-        const stream = streamRef.current;
-        if (!stream) return;
-        const snapshot = streamScrollSnapshotsRef.current.get(key);
-        if (snapshot?.atBottom) {
-          scrollStreamToBottom(stream);
-          rememberStreamScrollSnapshot(key);
-        }
-      };
-      const frame = window.requestAnimationFrame(() => {
-        alignBottom();
-        timer = window.setTimeout(alignBottom, 20);
-      });
-      return () => {
-        window.cancelAnimationFrame(frame);
-        if (timer !== null) window.clearTimeout(timer);
-      };
+      // 首帧恢复只面对那一帧的 DOM：消息窗口还是收缩的、离屏 Markdown 还是
+      // 纯文本占位，两者随后都会长高，所以恢复时的“底部”可能远高于真正的底部。
+      // 这里安排一个跨帧的重新对齐（见 scheduleBottomAlignment），由它负责
+      // 补齐这段增长，而不是只赌一次 ResizeObserver。
+      scheduleBottomAlignment(activeStreamScrollKey);
     }
+    return () => {
+      // 同一个会话内的重跑（消息窗口增长 / 新消息）必须保留正在进行的底部
+      // 对齐；只有真正换了会话才取消它。会话切换时 activeStreamScrollKeyRef
+      // 已经在渲染阶段更新为新 key，所以这里能区分两种情况。
+      if (activeStreamScrollKeyRef.current !== activeStreamScrollKey) {
+        cancelBottomAlignment();
+      }
+    };
   }, [
     activeStreamScrollKey,
     hiddenMessageCount,
     messages.length,
     rememberStreamScrollSnapshot,
     restoreStreamScrollSnapshotForKey,
+    scheduleBottomAlignment,
+    cancelBottomAlignment,
   ]);
 
   useLayoutEffect(() => {
@@ -5856,7 +6268,9 @@ export default function AIDock({
     const stream = streamRef.current;
     if (!stream) return;
 
+    const before = stream.scrollTop;
     scrollStreamToBottom(stream);
+    markProgrammaticStreamScroll(stream, before);
     stickToBottomRef.current = true;
     streamScrollSnapshotsRef.current.set(activeStreamScrollKeyRef.current, {
       atBottom: true,
@@ -5867,7 +6281,7 @@ export default function AIDock({
       anchorOffsetTop: 0,
     });
     forceNextMessageBottomRef.current = null;
-  }, [activeStreamScrollKey, messages.length]);
+  }, [activeStreamScrollKey, markProgrammaticStreamScroll, messages.length]);
 
   // Keep the latest message in view unless return search is active or the user
   // has scrolled away from the bottom. `stickToBottomRef` is updated by the
@@ -5887,12 +6301,19 @@ export default function AIDock({
     const syncScrollAfterLayout = () => {
       if (normalizedSearchRef.current) return;
       if (searchScrollTopRef.current !== null) return;
+      // Re-read the node and the key at fire time: this callback is async, so
+      // the session it was created for may already be gone.
+      if (streamRef.current !== el) return;
       const key = activeStreamScrollKeyRef.current;
       const snapshot = streamScrollSnapshotsRef.current.get(key);
       if (snapshot?.atBottom ?? stickToBottomRef.current) {
+        const before = el.scrollTop;
         scrollStreamToBottom(el);
+        markProgrammaticStreamScroll(el, before);
       } else if (snapshot) {
+        const before = el.scrollTop;
         restoreStreamScrollSnapshot(el, messageRefs.current, snapshot);
+        markProgrammaticStreamScroll(el, before);
       }
       rememberStreamScrollSnapshot(key);
     };
@@ -5909,7 +6330,10 @@ export default function AIDock({
     const content = streamContentRef.current;
     if (content) ro.observe(content);
     return () => ro.disconnect();
-  }, [rememberStreamScrollSnapshot, messages.length]);
+    // Rebind per session: the observed nodes are replaced whenever the message
+    // count changes, and a same-count switch must not keep the previous
+    // session's observation closure around.
+  }, [activeStreamScrollKey, markProgrammaticStreamScroll, rememberStreamScrollSnapshot, messages.length]);
 
   useEffect(() => {
     if (
@@ -6190,7 +6614,7 @@ export default function AIDock({
     (e: React.MouseEvent) => {
       e.preventDefault();
       const startY = e.clientY;
-      const startHeight = chatInputHeight;
+      const startHeight = renderedChatInputHeight;
       document.body.style.userSelect = "none";
       document.body.style.cursor = "row-resize";
 
@@ -6214,7 +6638,7 @@ export default function AIDock({
       window.addEventListener("mouseup", onUp);
       window.addEventListener("blur", onUp);
     },
-    [chatInputHeight],
+    [renderedChatInputHeight],
   );
 
   // Capture the whole conversation as a long screenshot. Forces every message
@@ -6487,6 +6911,20 @@ export default function AIDock({
       return;
     }
     if (isReadOnly || activeAiEditing) return;
+    const learningCommand = /^\/(learn|refine)(?:\s+([\s\S]*))?$/i.exec(text);
+    if (learningCommand) {
+      const kind = learningCommand[1].toLowerCase() as "learn" | "refine";
+      const lesson = (learningCommand[2] ?? "").trim();
+      if (kind === "learn" && !lesson) {
+        useStore.setState({ blockedSendTip: {
+          kind: "slash-command-unavailable",
+          message: locale === "zh-CN" ? "/learn 需要填写要学习的经验文本。" : "/learn requires the lesson text to learn.",
+        } });
+        return;
+      }
+      if (learnSkills(kind, lesson)) clearDraftIfNeeded();
+      return;
+    }
     const gddModeStart = /^\/gdd-mode-start(?:\s+([\s\S]*))?$/i.exec(text);
     if (gddModeStart) {
       const wasGddMode = composer.gddMode;
@@ -7462,7 +7900,7 @@ export default function AIDock({
     }
   }, [messages, locale, chatTitle]);
   const headerActionButtonClass =
-    "flex h-7 shrink-0 items-center gap-1 rounded-md border border-border bg-panel-2 px-2 text-xs text-fg-dim transition-colors hover:border-accent hover:text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent disabled:cursor-not-allowed disabled:opacity-40";
+    "ugs-control flex h-8 shrink-0 items-center gap-1.5 rounded-md bg-transparent px-2.5 text-[13px] text-fg-dim transition-colors hover:bg-border-soft hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:cursor-not-allowed disabled:opacity-40";
   const openTeamDetailsFromMain = useCallback((nodeId: string) => {
     window.dispatchEvent(
       new CustomEvent(OPEN_GAME_TEAM_DETAILS_EVENT, { detail: { nodeId } }),
@@ -7470,6 +7908,15 @@ export default function AIDock({
   }, []);
   const conversationActions = isChat && (
     <>
+      <button type="button" data-ugs-file-panel-toggle
+        onClick={requestProjectRightPanelToggle}
+        title={locale === "zh-CN" ? "文件面板" : "File panel"}
+        aria-label={locale === "zh-CN" ? "文件面板" : "File panel"}
+        aria-expanded={projectFilePanelOpen} aria-controls="ugs-project-file-panel"
+        className={headerActionButtonClass + " hidden lg:flex"}>
+        <Folder size={14} />
+        <span>{locale === "zh-CN" ? "文件" : "Files"}</span>
+      </button>
       <button
         type="button"
         onClick={() => void handleCopyConversation()}
@@ -7521,7 +7968,7 @@ export default function AIDock({
     </button>
   );
   const composerToolButtonClass =
-    "flex h-7 shrink-0 items-center justify-center rounded-md border border-transparent bg-transparent px-2 text-xs text-fg-dim transition-colors hover:bg-border-soft/55 hover:text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent disabled:cursor-not-allowed disabled:opacity-40";
+    "ugs-control flex h-8 shrink-0 items-center justify-center rounded-md border border-transparent bg-transparent px-2 text-[13px] text-fg-dim transition-colors hover:bg-border-soft hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:cursor-not-allowed disabled:opacity-40";
   const streamNavigation = isChat && timelineMarkers.length > 0 && (
     <div
       className="ugs-stream-nav absolute bottom-4 right-2 top-4 z-20 w-8"
@@ -8055,6 +8502,13 @@ export default function AIDock({
                       : "text-accent-2";
                   const preserveRoleCase = !!assistantLabel;
                   const captureUtility = isCaptureUtilityMessage(m);
+                  // Per-turn `⏱ …` timing line. The bubble renderer strips it
+                  // from the body (renderMessageText), so surface it as a
+                  // centered pill after each assistant turn's content — every
+                  // turn keeps its own clock, not just the latest one. Falls
+                  // back to createdAt/completedAt when the text prefix is gone.
+                  const turnTiming =
+                    !isUser && !isSystem ? turnTimingFromMessage(m) : "";
                   const assistantActions =
                     isChat &&
                     !isUser &&
@@ -8268,7 +8722,7 @@ export default function AIDock({
                             (isChatUser
                               ? "ai-stream-user-bubble max-w-[86%] rounded-md px-3 py-2 text-left"
                               : isChat
-                                ? "ai-stream-text w-[min(100%,calc(100%_-_2rem))]"
+                                ? "ai-stream-text w-full"
                                 : "ai-stream-text")
                           }
                         >
@@ -8286,13 +8740,7 @@ export default function AIDock({
                         // opening a long history doesn't block on parsing every one.
                         // During search, inline <mark> highlights are applied via
                         // searchState without losing the rich rendering.
-                        <div
-                          className={
-                            isChat
-                              ? "w-[min(100%,calc(100%_-_2rem))]"
-                              : "w-full"
-                          }
-                        >
+                        <div className="min-w-0 w-full">
                           <LazyMessageContent
                             text={renderMessageText(m.text)}
                             fallback={cleanMessageText(m.text)}
@@ -8309,6 +8757,22 @@ export default function AIDock({
                             cwd={workspaceCwd || undefined}
                             searchState={searchState}
                           />
+                          {m.skillLearning && (() => {
+                            const state = m.skillLearning;
+                            return <SkillLearningCard state={state} locale={locale}
+                              onApprove={(id) => handleSkillReviewAction(m.id, state, "approve", id)}
+                              onReject={(id) => handleSkillReviewAction(m.id, state, "reject", id)}
+                              onRetry={state.resume ? () => retryPersistedSkillLearning(state) : undefined}
+                              onRollback={(id) => handleSkillReviewAction(m.id, state, "rollback", id)} />;
+                          })()}
+                          {!isSystem && !m.localOnly && !(aiBusy && m.id === lastAssistantId) && (() => {
+                            const changes = m.fileChanges ?? collectTurnFileChanges([m], null, workspaceCwd || undefined);
+                            return <>
+                              {changes && <EditedFilesCard changes={changes} locale={locale}
+                                cwd={workspaceCwd || undefined} onOpenFile={onOpenFile} />}
+                              <MessageArtifacts text={m.text} cwd={workspaceCwd || undefined} onOpenFile={onOpenFile} />
+                            </>;
+                          })()}
                         </div>
                       )}
                       {assistantActions && actionText && (
@@ -8346,16 +8810,16 @@ export default function AIDock({
                           }}
                         />
                       )}
+                      {turnTiming && (
+                        <div className="flex justify-center pt-1">
+                          <span className="rounded-full border border-border bg-panel-2 px-3 py-1 font-mono text-[11px] leading-4 text-fg-dim tabular-nums">
+                            {turnTiming}
+                          </span>
+                        </div>
+                      )}
                     </li>
                   );
                 })}
-                {lastAssistantTiming && (
-                  <li className="flex justify-center pt-1">
-                    <span className="rounded-full border border-border bg-panel-2 px-3 py-1 font-mono text-[11px] leading-4 text-fg-dim tabular-nums">
-                      {lastAssistantTiming}
-                    </span>
-                  </li>
-                )}
               </ul>
             )}
           </div>
@@ -8382,6 +8846,7 @@ export default function AIDock({
           left = + (add file), permission, workspace; right = runtime + send. */}
       <section
         ref={inputSectionRef}
+        data-ugs-composer
         className={
           "relative flex shrink-0 flex-col bg-transparent p-3 " +
           (centerInput ? "mx-auto w-full max-w-6xl px-4 sm:px-6" : "")
@@ -8396,7 +8861,7 @@ export default function AIDock({
                     "translateX(calc(var(--ugs-chat-visible-right-inset) / -2))",
                 }
               : {
-                  height: chatInputHeight,
+                  height: renderedChatInputHeight,
                   marginRight: "var(--ugs-chat-visible-right-inset)",
                 }
             : { width: renderedInputWidth }
@@ -8689,12 +9154,20 @@ export default function AIDock({
           </div>
         )}
 
+        {isChat && <ChatTaskProgress key={`${activeWorkspaceId}:${activeSessionId}:${taskProgress.startedAt}`}
+          progress={taskProgress} jobs={currentJobs} active={activeAiEditing || activeChatting}
+          locale={locale} cwd={workspaceCwd} onOpenFile={onOpenFile} />}
+
+        {isChat && <SessionChangesSummary key={activeSessionId}
+          changes={sessionFileChanges} locale={locale} onOpenSessionFiles={requestProjectRightPanelSessionFiles} />}
+
         {/* Hint/permission row — floats above the input card (over the return
             stream), as its own line rather than inside the card. Left: composer
             input hints with the user's real shortcuts. Right: flat segmented
             permission control (ordered low→high privilege, left→right) plus
             send/newline shortcut hints. */}
-        <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-[11px] leading-none text-fg-faint">
+        {composerHintRowVisible && (
+        <div data-testid="composer-hint-row" className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-[11px] leading-none text-fg-faint">
           <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
             <span className="inline-flex items-center gap-1">
               <span className="font-mono text-fg-dim">/</span>
@@ -8726,8 +9199,8 @@ export default function AIDock({
               className={
                 "flex shrink-0 items-center gap-0.5 rounded-md border p-0.5 transition-colors " +
                 (permissionVisual(composer.permission).tone === "danger"
-                  ? "border-status-error/60 bg-status-error/10"
-                  : "border-border bg-panel-2")
+                  ? "border-status-warning/30 bg-transparent"
+                  : "border-border-soft bg-transparent")
               }
             >
               {[...permissionOptions]
@@ -8736,9 +9209,7 @@ export default function AIDock({
                   const localized = localizeSelectOption(opt, locale);
                   const { Icon, tone, color } = permissionVisual(opt.id);
                   const active = composer.permission === opt.id;
-                  // The most permissive ("danger") segment, when active, fills
-                  // solid like the mockup's yolo state; safer segments just tint
-                  // their label with the tone color on a neutral chip.
+                  // Risk is a persistent label + shield, not a solid error button.
                   const activeDanger = active && tone === "danger";
                   return (
                     <button
@@ -8752,12 +9223,12 @@ export default function AIDock({
                       }`}
                       onClick={() => setComposer({ permission: opt.id })}
                       className={
-                        "flex items-center gap-1 rounded px-1.5 py-1 text-[11px] font-medium leading-none transition-colors disabled:cursor-not-allowed disabled:opacity-50 " +
+                        "ugs-control flex min-h-7 items-center gap-1.5 rounded px-2 py-1 text-xs font-medium leading-none transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:cursor-not-allowed disabled:opacity-50 " +
                         (activeDanger
-                          ? "bg-status-error text-status-error-contrast"
+                          ? "bg-status-warning/10 text-status-warning"
                           : active
-                            ? "bg-bg"
-                            : "text-fg-faint hover:text-fg-dim")
+                            ? "bg-panel-2"
+                            : "text-fg-dim hover:bg-border-soft hover:text-fg")
                       }
                       style={active && !activeDanger ? { color } : undefined}
                     >
@@ -8799,13 +9270,18 @@ export default function AIDock({
           </div>
         </div>
 
+        )}
+        {/* `z-30`：卡片带 backdrop-filter（global.css 的 .ugs-ai-input-card），
+            本身就是一个层叠上下文，里面下拉菜单的 z-index 压不过 DOM 靠后的
+            兄弟面板（右栏「会话文件」）。给卡片一个正的 z-index，菜单才能画在
+            面板之上而不被切断。 */}
         <div
           ref={inputDropRef}
           onDragOver={handleComposerDragOver}
           onDragLeave={handleComposerDragLeave}
           onDrop={handleComposerDrop}
           className={
-            "ugs-ai-input-card relative flex min-h-0 flex-1 flex-col rounded-lg border transition-colors focus-within:border-accent " +
+            "ugs-ai-input-card relative z-30 flex min-h-0 flex-1 flex-col rounded-lg border transition-colors focus-within:border-accent " +
             (centerInput ? "min-h-[14rem] " : "") +
             (dropActive
               ? "ugs-ai-input--drop border-accent "
@@ -9071,13 +9547,11 @@ export default function AIDock({
             style={
               centerInput
                 ? {
-                    // flex-1 lets the textarea absorb the card's min-h-[14rem]
-                    // slack so the toolbar stays flush with the bottom edge (no
-                    // empty gap). minHeight tracks the measured content so short
-                    // drafts still fill the base height and long ones grow the
-                    // card up to the 2.5x cap, then scroll internally.
+                    // Keep flex growth free to absorb the card's min-h-[14rem]
+                    // slack and anchor the toolbar at its bottom edge. The
+                    // measured minimum caps content growth; maxHeight here
+                    // would strand unused base height below the toolbar.
                     minHeight: centerInputTextareaHeight,
-                    maxHeight: CENTER_INPUT_MAX_HEIGHT - 96,
                   }
                 : undefined
             }
@@ -9086,7 +9560,7 @@ export default function AIDock({
           {draftFileRefs.length > 0 && (
             <div
               data-testid="composer-file-refs"
-              className="flex flex-wrap items-center gap-1 px-2 pb-1"
+              className="flex flex-row flex-nowrap items-center gap-2 overflow-x-auto overflow-y-hidden overscroll-x-contain px-2 pb-1"
             >
               <FileChipBudgetProvider>
                 {draftFileRefs.map((ref) => (
@@ -9095,6 +9569,8 @@ export default function AIDock({
                     refData={ref}
                     onOpenFile={onOpenFile}
                     cwd={workspaceCwd}
+                    thumbnailOnly
+                    onRemove={() => removeComposerFileRef(ref)}
                   />
                 ))}
               </FileChipBudgetProvider>
@@ -9120,7 +9596,7 @@ export default function AIDock({
               the parent's rounded bottom corners. */}
           <div
             className={
-              "ugs-ai-input-toolbar flex flex-wrap items-center gap-2 rounded-b-lg px-2 py-2"
+              "ugs-ai-input-toolbar flex shrink-0 flex-wrap items-center gap-2 rounded-b-lg px-2 py-2"
             }
           >
             {!generationMode && !simpleChatMode && activeSessionIsWorkflow && (
@@ -9211,65 +9687,72 @@ export default function AIDock({
               <span className="font-mono text-sm font-semibold">#</span>
               <span>{t(locale, "dock.hintGameSkill")}</span>
             </button>
-            <button
-              type="button"
-              onMouseDown={(e) => e.preventDefault()}
-              onClick={startFileMention}
-              disabled={isReadOnly}
-              title={t(locale, "dock.hintMention")}
-              aria-label={t(locale, "dock.hintMention")}
-              className={cn(composerToolButtonClass, "gap-1 font-medium")}
-            >
-              <span className="font-mono text-sm font-semibold">@</span>
-              <span>{t(locale, "dock.hintMentionShort")}</span>
-            </button>
-            {isChat && (
-              <button
-                type="button"
-                data-org-panel-trigger
-                onMouseDown={(e) => e.preventDefault()}
-                onClick={() => setOrgPanelOpen((open) => !open)}
-                aria-pressed={orgPanelOpen}
-                title={t(locale, "dock.tabOrganization")}
-                aria-label={t(locale, "dock.tabOrganization")}
-                className={cn(
-                  composerToolButtonClass,
-                  "gap-1 font-medium",
-                  orgPanelOpen && "bg-border-soft/55 text-fg",
+            {/* 三个「进阶入口」按钮默认隐藏（见 store.composerToolButtonsVisible），
+                避免常驻挤占底部工具条；用户在 设置 → 常规 里打开后才渲染。 */}
+            {composerToolButtonsVisible && (
+              <>
+                <button
+                  type="button"
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={startFileMention}
+                  disabled={isReadOnly}
+                  title={t(locale, "dock.hintMention")}
+                  aria-label={t(locale, "dock.hintMention")}
+                  className={cn(composerToolButtonClass, "gap-1 font-medium")}
+                >
+                  <span className="font-mono text-sm font-semibold">@</span>
+                  <span>{t(locale, "dock.hintMentionShort")}</span>
+                </button>
+                {isChat && (
+                  <button
+                    type="button"
+                    data-org-panel-trigger
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => setOrgPanelOpen((open) => !open)}
+                    aria-pressed={orgPanelOpen}
+                    title={t(locale, "dock.tabOrganization")}
+                    aria-label={t(locale, "dock.tabOrganization")}
+                    className={cn(
+                      composerToolButtonClass,
+                      "gap-1 font-medium",
+                      orgPanelOpen && "bg-border-soft/55 text-fg",
+                    )}
+                  >
+                    <span className="font-mono text-sm font-semibold">$</span>
+                    <span>{t(locale, "dock.tabOrganization")}</span>
+                  </button>
                 )}
-              >
-                <span className="font-mono text-sm font-semibold">$</span>
-                <span>{t(locale, "dock.tabOrganization")}</span>
-              </button>
+                <button
+                  type="button"
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() =>
+                    setComposer({
+                      knowledgeBaseMode: !composer.knowledgeBaseMode,
+                    })
+                  }
+                  disabled={isReadOnly}
+                  aria-pressed={composer.knowledgeBaseMode}
+                  title={t(
+                    locale,
+                    composer.knowledgeBaseMode
+                      ? "dock.knowledgeBaseOnTitle"
+                      : "dock.knowledgeBaseOffTitle",
+                  )}
+                  aria-label={t(locale, "dock.knowledgeBaseLabel")}
+                  className={cn(
+                    composerToolButtonClass,
+                    "gap-1 font-medium",
+                    composer.knowledgeBaseMode &&
+                      "border-accent/45 bg-accent/10 text-accent",
+                  )}
+                >
+                  <BookOpen size={14} strokeWidth={2.1} />
+                  <span>{t(locale, "dock.knowledgeBaseShort")}</span>
+                </button>
+              </>
             )}
-            <button
-              type="button"
-              onMouseDown={(e) => e.preventDefault()}
-              onClick={() =>
-                setComposer({
-                  knowledgeBaseMode: !composer.knowledgeBaseMode,
-                })
-              }
-              disabled={isReadOnly}
-              aria-pressed={composer.knowledgeBaseMode}
-              title={t(
-                locale,
-                composer.knowledgeBaseMode
-                  ? "dock.knowledgeBaseOnTitle"
-                  : "dock.knowledgeBaseOffTitle",
-              )}
-              aria-label={t(locale, "dock.knowledgeBaseLabel")}
-              className={cn(
-                composerToolButtonClass,
-                "gap-1 font-medium",
-                composer.knowledgeBaseMode &&
-                  "border-accent/45 bg-accent/10 text-accent",
-              )}
-            >
-              <BookOpen size={14} strokeWidth={2.1} />
-              <span>{t(locale, "dock.knowledgeBaseShort")}</span>
-            </button>
 
+            <ComposerOptions label={locale === "zh-CN" ? "会话选项" : "Session options"}>
             {activeRemoteWorkspaceRoot ? (
               <>
                 <Select
@@ -9347,8 +9830,9 @@ export default function AIDock({
                 />
               </>
             )}
+            </ComposerOptions>
 
-            <div className="ml-auto flex items-center gap-2">
+            <div className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-2">
               <Select
                 title={t(locale, "dock.channelTitle")}
                 options={channelOptions}
@@ -9375,6 +9859,30 @@ export default function AIDock({
                   className="min-w-0 max-w-[14rem]"
                   icon={!generationMode && loadingChannelModels ? "↻" : "◇"}
                   variant="ghost"
+                />
+              )}
+              {!generationMode &&
+                thinkingLevelsEnabled &&
+                thinkingUi.options.length > 0 && (
+                <Select
+                  title={t(locale, "dock.thinkingTitle")}
+                  options={[
+                    {
+                      id: THINKING_LEVEL_DEFAULT_ID,
+                      label: t(locale, "dock.thinkingDefault"),
+                      hint: thinkingUi.defaultHint,
+                    },
+                    ...thinkingUi.options,
+                  ]}
+                  value={thinkingValue}
+                  onChange={handleThinkingChange}
+                  disabled={isReadOnly}
+                  className="min-w-0 max-w-[9rem]"
+                  icon="◐"
+                  variant="ghost"
+                  // 触发按钮只显示档位名；每个档位的说明留在下拉里，
+                  // 否则长说明会把窄触发条撑爆。
+                  showSelectedHint={false}
                 />
               )}
               <button
@@ -9424,10 +9932,10 @@ export default function AIDock({
                         : sendShortcutHint
                 }
                 className={
-                  "flex h-7 w-7 shrink-0 items-center justify-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-40 " +
+                  "ugs-composer-send flex h-8 w-8 shrink-0 items-center justify-center rounded-md transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-panel disabled:cursor-not-allowed disabled:opacity-40 " +
                   (chatRunActive && !chatFollowUp
-                    ? "border border-border bg-panel-2 text-fg-dim hover:border-accent hover:text-fg"
-                    : "bg-fg-dim text-bg hover:bg-fg")
+                    ? "border border-border bg-panel-2 text-fg-dim hover:bg-border-soft hover:text-fg"
+                    : "bg-accent text-[var(--ugs-accent-contrast)] hover:brightness-110")
                 }
               >
                 {chatFollowUp ? (
@@ -9643,7 +10151,7 @@ export default function AIDock({
 
             <div className="mt-4 space-y-3">
               {localSetupMessage && (
-                <p className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] leading-relaxed text-amber-200">
+                <p className="rounded-md border border-status-warning/30 bg-status-warning/10 px-3 py-2 text-[11px] leading-relaxed text-status-warning">
                   {localSetupMessage}
                 </p>
               )}

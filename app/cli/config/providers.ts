@@ -21,6 +21,9 @@ import type {
   NodeGatewayOverride,
 } from '../../src/core/ir';
 import { adapterProtocol } from '../io/which-cli';
+import { SkillReviewUnavailableError } from '../io/skill-review-capability';
+import { normalizeSkillLearningConfig } from '../../src/lib/skillLearningConfig';
+import type { SkillLearningConfig } from '../../src/runtime/skills/types';
 
 export type GatewayTransport = 'anthropic' | 'openai-compatible' | 'cli';
 
@@ -157,12 +160,15 @@ interface FucConfigFile {
       models?: Record<string, string>;
     }
   >;
+  /** Independent non-secret learning policy; omission inherits and null clears overrides. */
+  skillLearning?: Partial<SkillLearningConfig>;
   /** Per-adapter CLI executable paths. */
   adapters?: Record<string, { path?: string }>;
 }
 
 let cachedConfig: FucConfigFile | null = null;
 let cachedConfigLoaded = false;
+let cachedSkillLearningLayers: unknown[] = [];
 
 /**
  * Load + merge `~/.ugs/config.json` then `./.ugs/config.json` (project wins).
@@ -189,11 +195,13 @@ export function loadFucConfig(cwd: string = process.cwd()): FucConfigFile {
     if (!existsSync(path)) continue;
     try {
       const parsed = JSON.parse(readFileSync(path, 'utf8')) as FucConfigFile;
+      if (Object.prototype.hasOwnProperty.call(parsed, 'skillLearning')) cachedSkillLearningLayers.push(parsed.skillLearning);
       merged = {
         ...merged,
         ...parsed,
         defaults: { ...merged.defaults, ...parsed.defaults },
         providers: { ...merged.providers, ...parsed.providers },
+        skillLearning: normalizeSkillLearningConfig(parsed.skillLearning, normalizeSkillLearningConfig(merged.skillLearning)),
         adapters: { ...merged.adapters, ...parsed.adapters },
       };
     } catch {
@@ -204,10 +212,62 @@ export function loadFucConfig(cwd: string = process.cwd()): FucConfigFile {
   return merged;
 }
 
+/** Reject invalid reviewer directives before shared normalization can discard them. */
+function validateNodeSkillLearningOverrides(value: unknown): void {
+  if (value === undefined) return;
+  const reject = (): never => { throw new SkillReviewUnavailableError('config', 'Invalid independent reviewer configuration.'); };
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return reject();
+  const raw = value as Record<string, unknown>;
+  if (Object.prototype.hasOwnProperty.call(raw, 'reviewTransport') && raw.reviewTransport != null &&
+    raw.reviewTransport !== 'anthropic' && raw.reviewTransport !== 'openai-compatible') return reject();
+  if (!Object.prototype.hasOwnProperty.call(raw, 'reviewSelection') || raw.reviewSelection == null) return;
+  const selected = raw.reviewSelection;
+  if (typeof selected !== 'object' || Array.isArray(selected)) return reject();
+  const route = selected as Record<string, unknown>;
+  if (Object.keys(route).some((key) => !['adapter', 'modelClass', 'providerId', 'channelId', 'model'].includes(key))) return reject();
+  for (const key of ['adapter', 'modelClass']) if (typeof route[key] !== 'string' || !(route[key] as string).trim()) return reject();
+  // eslint-disable-next-line no-control-regex -- Reject control characters in reviewer routing tokens.
+  for (const item of Object.values(route)) if (typeof item !== 'string' || !item.trim() || item.length > 256 || /[\u0000-\u001f\u007f]/.test(item)) return reject();
+}
+
+export interface NodeSkillReviewSelectionFlags {
+  reviewAdapter?: string;
+  reviewProvider?: string;
+  reviewChannel?: string;
+  reviewModel?: string;
+  reviewTransport?: string;
+}
+
+/** Product config loading only; credentials remain env-only and are never persisted. */
+export function loadNodeSkillLearningConfig(cwd?: string, overrides?: unknown, flags: NodeSkillReviewSelectionFlags = {}): SkillLearningConfig {
+  const config = loadFucConfig(cwd);
+  for (const layer of cachedSkillLearningLayers) validateNodeSkillLearningOverrides(layer);
+  validateNodeSkillLearningOverrides(overrides);
+  const base = normalizeSkillLearningConfig(overrides, normalizeSkillLearningConfig(config.skillLearning));
+  const selectionFlags = [flags.reviewAdapter, flags.reviewProvider, flags.reviewChannel, flags.reviewModel].some((value) => value !== undefined);
+  const selection = base.reviewSelection;
+  if (selectionFlags && !selection && (!flags.reviewAdapter || !flags.reviewProvider || !flags.reviewModel)) {
+    throw new SkillReviewUnavailableError('config', 'A new reviewer selection requires explicit adapter, provider and model.');
+  }
+  const next = {
+    ...(flags.reviewTransport !== undefined ? { reviewTransport: flags.reviewTransport } : {}),
+    ...(selectionFlags ? { reviewSelection: { ...selection,
+      adapter: flags.reviewAdapter ?? selection!.adapter,
+      modelClass: selection?.modelClass ?? flags.reviewModel,
+      ...(flags.reviewProvider !== undefined ? { providerId: flags.reviewProvider } : {}),
+      ...(flags.reviewChannel !== undefined ? { channelId: flags.reviewChannel } : {}),
+      ...(flags.reviewModel !== undefined ? { model: flags.reviewModel } : {}),
+    } } : {}),
+  };
+  validateNodeSkillLearningOverrides(next);
+  return normalizeSkillLearningConfig(next, base);
+}
+
 /** Reset the memoised config (testing seam). */
 export function resetFucConfigCache(): void {
   cachedConfig = null;
   cachedConfigLoaded = false;
+  cachedSkillLearningLayers = [];
 }
 
 /** Read an API key from env for an adapter (never from the config file). */
@@ -308,6 +368,76 @@ export function resolveDirectRoute(
     mode: 'direct',
     apiKey,
     baseUrl: provider?.baseUrl?.trim() || undefined,
+  };
+}
+
+/** Preserve concrete provider model IDs literally; reject malformed tokens. */
+export function validateNodeSkillReviewModel(value: unknown): string {
+  if (typeof value !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._/:@+-]{0,255}$/.test(value) ||
+    value === 'default' || CLI_TIER_ALIASES.has(value)) {
+    throw new SkillReviewUnavailableError('http', 'A valid concrete reviewer model identifier is required.');
+  }
+  return value;
+}
+
+/** Validate literal reviewer endpoints without repairing credentials or paths. */
+export function validateNodeSkillReviewBaseUrl(value: unknown): { baseUrl: string; local: boolean } {
+  const reject = (): never => { throw new SkillReviewUnavailableError('http', 'Reviewer URL must be safe HTTP(S) without credentials, query, fragment or path normalization.'); };
+  // eslint-disable-next-line no-control-regex -- Reject control characters before URL parsing can normalize them.
+  if (typeof value !== 'string' || value.length > 2048 || !/^https?:\/\//.test(value) || /[\s\\\u0000-\u001f\u007f?#]/.test(value)) return reject();
+  let url: URL;
+  try { url = new URL(value); } catch { return reject(); }
+  if (!url.hostname || url.username || url.password) return reject();
+  const path = value.replace(/^https?:\/\/[^/]+/, '');
+  let decoded: string;
+  try { decoded = decodeURIComponent(path); } catch { return reject(); }
+  if (decoded.includes('\\') || /(?:^|\/)\.{1,2}(?:\/|$)/.test(decoded)) return reject();
+  const local = /^https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?(?:\/|$)/.test(value);
+  if (url.protocol !== 'https:' && !local) return reject();
+  return { baseUrl: value, local };
+}
+
+/**
+ * Dedicated reviewer resolution. A single-channel provider must be named exactly;
+ * no adapter defaults, CLI spawning, model normalization or gateway fallback.
+ */
+export function resolveNodeSkillReviewRoute(
+  selection: GatewaySelection,
+  cwd?: string,
+  reviewTransport?: 'anthropic' | 'openai-compatible',
+): ResolvedRoute {
+  const unavailable = (reason: string): never => { throw new SkillReviewUnavailableError(selection.adapter, reason); };
+  if (selection.systemDefault) unavailable('System-default execution is not a completion-only HTTP route.');
+  if (selection.channelId !== undefined) unavailable('CLI provider config has one unnamed channel; channelId is unsupported.');
+  const providers = loadFucConfig(cwd).providers;
+  const providerId = selection.providerId;
+  if (!providerId || !providers || !Object.prototype.hasOwnProperty.call(providers, providerId)) {
+    return unavailable('An existing explicit reviewer providerId is required.');
+  }
+  const provider = providers[providerId];
+  if (!provider || typeof provider !== 'object' || Array.isArray(provider) ||
+    (provider.transport !== 'anthropic' && provider.transport !== 'openai-compatible' && provider.transport !== 'cli')) {
+    return unavailable('The reviewer must match an existing HTTP or explicitly overridden CLI provider.');
+  }
+  if (provider.transport === 'cli' && (!reviewTransport || !provider.baseUrl)) {
+    return unavailable('CLI execution is not route proof; an explicit HTTP protocol and endpoint are required.');
+  }
+  const transport = reviewTransport ?? provider.transport;
+  if (transport !== 'anthropic' && transport !== 'openai-compatible') {
+    return unavailable('Only an explicit HTTP reviewer transport is supported.');
+  }
+  const concreteSelection = selection.modelClass !== 'default' && !CLI_TIER_ALIASES.has(selection.modelClass)
+    ? selection.modelClass : undefined;
+  const model = validateNodeSkillReviewModel(selection.modelOverride !== undefined ? selection.modelOverride :
+    provider.models && Object.prototype.hasOwnProperty.call(provider.models, selection.modelClass)
+      ? provider.models[selection.modelClass] : concreteSelection ?? provider.model);
+  const apiKey = (transport === 'anthropic'
+    ? process.env.ANTHROPIC_API_KEY ?? process.env.ANTHROPIC_AUTH_TOKEN : process.env.OPENAI_API_KEY)?.trim() || undefined;
+  const { baseUrl, local } = validateNodeSkillReviewBaseUrl(provider.baseUrl ??
+    (transport === 'anthropic' ? 'https://api.anthropic.com' : 'https://api.openai.com'));
+  if (!apiKey && !local) return unavailable('A reviewer HTTP credential or explicit loopback endpoint is required.');
+  return { selection: { ...selection }, adapter: selection.adapter, modelClass: selection.modelClass,
+    model, transport, mode: 'direct', baseUrl, apiKey,
   };
 }
 

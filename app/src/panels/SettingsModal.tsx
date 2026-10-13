@@ -394,8 +394,16 @@ import {
   SwitchControl,
   TextField,
 } from '@/panels/settings/controls';
+import {
+  THINKING_LEVEL_DEFAULT_ID,
+  declaredLevelsFor,
+  parseThinkingLevelOverrides,
+  thinkingDefault,
+  thinkingLevelOptions,
+} from '@/lib/thinkingLevels';
 import CommandsSettings from '@/panels/settings/CommandsSettings';
 import MemorySettings from '@/panels/settings/MemorySettings';
+import SkillLearningPanel from '@/panels/settings/SkillLearningPanel';
 import KnowledgeBaseSettings from '@/panels/settings/KnowledgeBaseSettings';
 import VisionModelSettings from '@/panels/settings/VisionModelSettings';
 import {
@@ -779,7 +787,7 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
         <div className="min-h-0 flex flex-1 flex-col bg-border-soft sm:flex-row">
           <nav
             aria-label={t(locale, 'settings.title')}
-            className="w-full shrink-0 overflow-y-auto border-b border-border-soft bg-bg-alt p-3 sm:w-56 sm:border-b-0 sm:border-r"
+            className={cn("w-full shrink-0 overflow-y-auto border-b border-border-soft bg-bg-alt p-3 sm:w-56 sm:border-b-0 sm:border-r", tab === 'skills' && 'max-h-48 sm:max-h-none')}
           >
             <div
               role="tablist"
@@ -814,7 +822,7 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
                       />
                       {showBadge && (
                         <span
-                          className="absolute -right-1 -top-1 h-1.5 w-1.5 rounded-full bg-[#ef4444]"
+                          className="absolute -right-1 -top-1 h-1.5 w-1.5 rounded-full bg-status-error"
                           aria-hidden="true"
                         />
                       )}
@@ -983,6 +991,9 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
                 </ErrorBoundary>
               ) : tab === 'mcp' || tab === 'lsp' || tab === 'skills' ? (
                 <ErrorBoundary label={t(locale, `settings.tabs.${tab}`)}>
+                  {tab === 'skills' && <div className="mb-6">
+                    <SkillLearningPanel scope="global" locale={locale} remote={remoteSettingsProfile} />
+                  </div>}
                   <ProjectToolsSettings locale={locale} embedTab={tab} />
                 </ErrorBoundary>
               ) : tab === 'shortcuts' ? (
@@ -1164,6 +1175,25 @@ function GeneralSettings({
   setLocale: (locale: Locale) => void;
   setPromptAutoTranslate: (enabled: boolean) => void;
 }) {
+  // 输入框底部那三个「进阶入口」按钮的显隐开关。默认隐藏；这里直接读 store，
+  // 让 AIDock 立刻重渲染，不用把开关一路透传成 props。
+  const composerToolButtonsVisible = useStore(
+    (s) => s.composerToolButtonsVisible,
+  );
+  const setComposerToolButtonsVisible = useStore(
+    (s) => s.setComposerToolButtonsVisible,
+  );
+  // 思考深度选择器：显示开关 + 手写档位覆盖（私有网关档位词汇不统一时的逃生门）。
+  const thinkingLevelsEnabled = useStore((s) => s.thinkingLevelsEnabled);
+  const setThinkingLevelsEnabled = useStore((s) => s.setThinkingLevelsEnabled);
+  const composerHintRowVisible = useStore((s) => s.composerHintRowVisible);
+  const setComposerHintRowVisible = useStore((s) => s.setComposerHintRowVisible);
+  const assetCenterEnabled = useStore((s) => s.assetCenterEnabled);
+  const setAssetCenterEnabled = useStore((s) => s.setAssetCenterEnabled);
+  const thinkingLevelOverrides = useStore((s) => s.thinkingLevelOverrides);
+  const setThinkingLevelOverrides = useStore(
+    (s) => s.setThinkingLevelOverrides,
+  );
   // Launch shell that wraps AI CLI invocations (independent of the model CLI).
   const [runShell, setRunShellState] = useState<RunShellConfig>(() =>
     getRunShell(),
@@ -1345,6 +1375,60 @@ function GeneralSettings({
       </SettingRow>
 
       <SettingRow
+        title={t(locale, 'settings.composerHintRowLabel')}
+        description={t(locale, 'settings.composerHintRowDescription')}
+      >
+        <SwitchControl
+          checked={composerHintRowVisible}
+          onChange={setComposerHintRowVisible}
+        />
+      </SettingRow>
+
+      <SettingRow
+        title={t(locale, 'settings.composerToolButtonsLabel')}
+        description={t(locale, 'settings.composerToolButtonsDescription')}
+      >
+        <SwitchControl
+          checked={composerToolButtonsVisible}
+          onChange={setComposerToolButtonsVisible}
+        />
+      </SettingRow>
+
+      <SettingRow
+        title={t(locale, 'settings.thinkingLevelsLabel')}
+        description={t(locale, 'settings.thinkingLevelsDescription')}
+      >
+        <SwitchControl
+          checked={thinkingLevelsEnabled}
+          onChange={setThinkingLevelsEnabled}
+        />
+      </SettingRow>
+
+      <SettingRow
+        title={t(locale, 'settings.assetCenterLabel')}
+        description={t(locale, 'settings.assetCenterDescription')}
+      >
+        <SwitchControl
+          checked={assetCenterEnabled}
+          onChange={setAssetCenterEnabled}
+        />
+      </SettingRow>
+
+      <SettingRow
+        title={t(locale, 'settings.thinkingLevelOverridesLabel')}
+        description={t(locale, 'settings.thinkingLevelOverridesDescription')}
+      >
+        <textarea
+          value={thinkingLevelOverrides}
+          onChange={(event) => setThinkingLevelOverrides(event.target.value)}
+          placeholder={t(locale, 'settings.thinkingLevelOverridesPlaceholder')}
+          rows={3}
+          spellCheck={false}
+          className="w-full max-w-[34rem] rounded-md border border-border bg-bg px-3 py-2 font-mono text-xs text-fg outline-none transition-colors focus:border-accent"
+        />
+      </SettingRow>
+
+      <SettingRow
         title={t(locale, 'settings.translationProviderLabel')}
         description={t(locale, 'settings.translationProviderDescription')}
       >
@@ -1477,7 +1561,7 @@ function GeneralSettings({
             {t(locale, 'settings.shellHint')}
           </p>
           {shellError && (
-            <p className="text-xs leading-relaxed text-[#f78b8b]">{shellError}</p>
+            <p className="text-xs leading-relaxed text-status-error">{shellError}</p>
           )}
         </div>
       </SettingRow>
@@ -1586,7 +1670,7 @@ function GeneralSettings({
             </p>
           )}
           {manualCleanupError && (
-            <p className="text-xs leading-relaxed text-[#f78b8b]">{manualCleanupError}</p>
+            <p className="text-xs leading-relaxed text-status-error">{manualCleanupError}</p>
           )}
         </div>
       </div>
@@ -1606,6 +1690,23 @@ function GeneralSettings({
             checked={autosaveConfig.enabled}
             onChange={(v) => patchAutosaveConfig({ enabled: v })}
           />
+        </SettingRow>
+        <SettingRow
+          title={t(locale, 'settings.autosave.nameLabel')}
+          description={t(locale, 'settings.autosave.nameHint')}
+        >
+          <div className="w-full min-w-[14rem]">
+            <input
+              type="text"
+              value={autosaveConfig.name}
+              onChange={(event) => patchAutosaveConfig({ name: event.target.value })}
+              placeholder={t(locale, 'settings.autosave.namePlaceholder')}
+              maxLength={64}
+              autoComplete="off"
+              spellCheck={false}
+              className="w-full rounded border border-border bg-bg px-2 py-1.5 text-xs text-fg outline-none transition-colors placeholder:text-fg-faint focus:border-accent"
+            />
+          </div>
         </SettingRow>
         {autosaveConfig.enabled && (
           <>
@@ -1678,7 +1779,7 @@ function GeneralSettings({
             </p>
           )}
           {autosaveError && (
-            <p className="whitespace-pre-wrap text-xs leading-relaxed text-[#f78b8b]">
+            <p className="whitespace-pre-wrap text-xs leading-relaxed text-status-error">
               {autosaveError}
             </p>
           )}
@@ -1814,7 +1915,7 @@ function CliUpdatePanel({ locale }: { locale: Locale }) {
                     {t(locale, 'settings.cliUpdate.latestLabel')} {latest}
                   </p>
                   {status.error && (
-                    <p className="mt-0.5 truncate text-[10px] text-[#f78b8b]" title={status.error}>
+                    <p className="mt-0.5 truncate text-[10px] text-status-error" title={status.error}>
                       {status.error}
                     </p>
                   )}
@@ -2227,7 +2328,7 @@ function PersonalizationModelCard({
             type="button"
             onClick={onClear}
             disabled={!draft && !savedInstructions}
-            className="rounded-md border border-border bg-panel px-3 py-1.5 text-xs text-fg-dim transition-colors hover:border-rose-400 hover:text-rose-200 disabled:cursor-not-allowed disabled:opacity-50"
+            className="rounded-md border border-border bg-panel px-3 py-1.5 text-xs text-fg-dim transition-colors hover:border-status-error hover:text-status-error disabled:cursor-not-allowed disabled:opacity-50"
           >
             {t(locale, 'settings.personalizationClear')}
           </button>
@@ -2307,9 +2408,9 @@ const PROVIDER_ADAPTER_SECTIONS: ReadonlyArray<{
   adapter: RuntimeAdapterId;
   dotClassName: string;
 }> = [
-  { adapter: 'claude-code', dotClassName: 'bg-amber-400' },
+  { adapter: 'claude-code', dotClassName: 'bg-status-warning' },
   { adapter: 'codex', dotClassName: 'bg-fg-faint' },
-  { adapter: 'gemini', dotClassName: 'bg-sky-400' },
+  { adapter: 'gemini', dotClassName: 'bg-status-info' },
   { adapter: 'kimi', dotClassName: 'bg-fuchsia-400' },
   { adapter: 'deepseek-harness', dotClassName: 'bg-indigo-400' },
   { adapter: 'zcode', dotClassName: 'bg-cyan-400' },
@@ -2804,6 +2905,73 @@ function GlobalRunControls({
     setManifestModeState(enabled);
   };
 
+  // 默认思考深度：复用 AIDock 输入框右下角同一套判定（协议通道 + 模型族 + 用户覆盖），
+  // 写回 GatewaySelection.thinkingLevel。档位失效时显示「默认（不指定）」，与 AIDock 一致。
+  const thinkingLevelOverrides = useStore((s) => s.thinkingLevelOverrides);
+  const thinkingUi = useMemo(() => {
+    const provider = selectedDefaultProvider?.provider;
+    const model = runSelection.modelOverride ?? runSelection.modelClass;
+    const transport =
+      provider?.transport === 'direct'
+        ? provider?.kind === 'anthropic'
+          ? 'anthropic'
+          : 'openai-compatible'
+        : 'cli';
+    const source = {
+      adapter: selectedAdapter,
+      baseUrl: provider?.baseUrl ?? '',
+      model,
+      transport,
+      declaredLevels: declaredLevelsFor(
+        model,
+        parseThinkingLevelOverrides(thinkingLevelOverrides),
+      ),
+    };
+    const fallback = thinkingDefault(source);
+    const levels = thinkingLevelOptions(source);
+    const labelById = new Map(
+      levels.map((option) => [option.id, t(locale, option.labelKey)]),
+    );
+    const defaultLevelId =
+      fallback.level && labelById.has(fallback.level) ? fallback.level : null;
+    const options = levels.map((option) => {
+      const hint = t(locale, option.hintKey);
+      return {
+        id: option.id,
+        label: t(locale, option.labelKey),
+        hint:
+          option.id === defaultLevelId
+            ? `${t(locale, 'dock.thinkingLevelDefaultMark')} · ${hint}`
+            : hint,
+      };
+    });
+    const defaultHint = defaultLevelId
+      ? `${t(locale, 'dock.thinkingDefaultModel')} · ${t(
+          locale,
+          'dock.thinkingDefaultActual',
+        )}${labelById.get(defaultLevelId) ?? defaultLevelId}`
+      : t(locale, fallback.hintKey);
+    return { options, defaultHint };
+  }, [
+    locale,
+    selectedAdapter,
+    selectedDefaultProvider,
+    runSelection.modelOverride,
+    runSelection.modelClass,
+    thinkingLevelOverrides,
+  ]);
+  const thinkingValue =
+    runSelection.thinkingLevel &&
+    thinkingUi.options.some((option) => option.id === runSelection.thinkingLevel)
+      ? runSelection.thinkingLevel
+      : THINKING_LEVEL_DEFAULT_ID;
+  const onThinkingChange = (id: string) => {
+    applyDefaultRunSelection({
+      ...runSelection,
+      thinkingLevel: id === THINKING_LEVEL_DEFAULT_ID ? undefined : id,
+    });
+  };
+
   return (
     <div className="rounded-lg border border-border bg-bg-alt p-4">
       <div className="mb-3 flex items-center gap-2">
@@ -2817,7 +2985,7 @@ function GlobalRunControls({
           </p>
         </div>
       </div>
-      <div className="grid w-full min-w-0 gap-3 md:grid-cols-2">
+      <div className="grid w-full min-w-0 gap-3 md:grid-cols-3">
         <label className="block min-w-0 space-y-1.5">
           <span className="text-[11px] font-semibold text-fg-dim">
             {t(locale, 'dock.channelTitle')}
@@ -2845,6 +3013,29 @@ function GlobalRunControls({
               />
             }
           />
+        </label>
+        <label className="block min-w-0 space-y-1.5">
+          <span className="text-[11px] font-semibold text-fg-dim">
+            {t(locale, 'dock.thinkingTitle')}
+          </span>
+          {thinkingUi.options.length > 0 ? (
+            <SelectControl
+              value={thinkingValue}
+              options={[
+                {
+                  id: THINKING_LEVEL_DEFAULT_ID,
+                  label: t(locale, 'dock.thinkingDefault'),
+                  hint: thinkingUi.defaultHint,
+                },
+                ...thinkingUi.options,
+              ]}
+              onChange={onThinkingChange}
+            />
+          ) : (
+            <div className="rounded-md border border-border bg-bg px-3 py-2 text-xs text-fg-faint">
+              {t(locale, 'dock.thinkingDefaultCli')}
+            </div>
+          )}
         </label>
       </div>
       <div className="mt-4 flex flex-col gap-3 border-t border-border-soft pt-4 sm:flex-row sm:items-center sm:justify-between">
@@ -3149,7 +3340,7 @@ function ModelsSettings({
               type="button"
               onClick={handleImport}
               disabled={importing}
-              className="inline-flex items-center gap-1.5 rounded border border-emerald-500/40 bg-emerald-500/10 px-2.5 py-1 text-xs text-emerald-300 transition-colors hover:bg-emerald-500/20 disabled:opacity-60"
+              className="inline-flex items-center gap-1.5 rounded border border-status-success/40 bg-status-success/10 px-2.5 py-1 text-xs text-status-success transition-colors hover:bg-status-success/20 disabled:opacity-60"
             >
               <DownloadCloud size={13} strokeWidth={2.2} />
               {importing
@@ -3164,7 +3355,7 @@ function ModelsSettings({
         <p
           className={cn(
             'text-[11px] leading-relaxed',
-            status.tone === 'ok' ? 'text-emerald-300' : 'text-rose-300',
+            status.tone === 'ok' ? 'text-status-success' : 'text-status-error',
           )}
         >
           {status.msg}
@@ -3558,7 +3749,7 @@ function DefaultChannelRow({
               autoFocus
               className={cn(
                 'h-7 min-w-0 max-w-[14rem] rounded-md border border-border bg-panel px-2 text-sm font-medium text-fg outline-none transition-colors focus:border-accent',
-                nameError && 'border-rose-500/60',
+                nameError && 'border-status-error/60',
               )}
             />
           ) : (
@@ -3587,7 +3778,7 @@ function DefaultChannelRow({
           )}
         </div>
         {nameError && (
-          <p className="basis-full text-[11px] leading-relaxed text-rose-300">
+          <p className="basis-full text-[11px] leading-relaxed text-status-error">
             {nameError}
           </p>
         )}
@@ -3644,7 +3835,7 @@ function DefaultChannelRow({
               title={t(locale, 'settings.models.delete')}
               aria-label={t(locale, 'settings.models.delete')}
               onClick={onDelete}
-              className="flex h-7 w-7 items-center justify-center rounded-md border border-border bg-panel text-fg-faint transition-colors hover:border-rose-500/50 hover:text-rose-400"
+              className="flex h-7 w-7 items-center justify-center rounded-md border border-border bg-panel text-fg-faint transition-colors hover:border-status-error/50 hover:text-status-error"
             >
               <Trash2 size={13} strokeWidth={2} />
             </button>
@@ -3674,11 +3865,11 @@ function DefaultChannelRow({
             spellCheck={false}
             className={cn(
               'w-full rounded-md border border-border bg-panel px-2.5 py-1.5 font-mono text-sm text-fg outline-none transition-colors focus:border-accent',
-              baseUrlError && 'border-rose-500/60',
+              baseUrlError && 'border-status-error/60',
             )}
           />
           {baseUrlError && (
-            <p className="text-[11px] leading-relaxed text-rose-300">
+            <p className="text-[11px] leading-relaxed text-status-error">
               {baseUrlError}
             </p>
           )}
@@ -3724,7 +3915,7 @@ function DefaultChannelRow({
                     saveImmediately({ apiKey: '' });
                   }}
                   title={t(locale, 'settings.models.clear')}
-                  className="flex h-6 w-6 items-center justify-center rounded text-fg-faint transition-colors hover:text-rose-300"
+                  className="flex h-6 w-6 items-center justify-center rounded text-fg-faint transition-colors hover:text-status-error"
                 >
                   <Trash2 size={13} strokeWidth={2} />
                 </button>
@@ -3766,7 +3957,7 @@ function DefaultChannelRow({
             <span className="font-medium text-fg-dim">
               {locale === 'zh-CN' ? '价格' : 'Price'}
             </span>
-            <span className="text-rose-300/90">
+            <span className="text-status-error/90">
               {locale === 'zh-CN' ? '价格获取失败' : 'Price unavailable'}
             </span>
             <button
@@ -3800,12 +3991,12 @@ function DefaultChannelRow({
           </div>
         ) : null}
         {duplicateError && (
-          <p className="text-[11px] leading-relaxed text-rose-300 lg:col-span-2">
+          <p className="text-[11px] leading-relaxed text-status-error lg:col-span-2">
             {duplicateError}
           </p>
         )}
         {saveError && (
-          <p className="text-[11px] leading-relaxed text-rose-300 lg:col-span-2">
+          <p className="text-[11px] leading-relaxed text-status-error lg:col-span-2">
             {saveError}
           </p>
         )}
@@ -3881,13 +4072,13 @@ function StatusBadge({ state, label }: { state: BadgeState; label: string }) {
   const styles =
     state === 'direct'
       ? {
-          pill: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300',
-          dot: 'bg-emerald-400',
+          pill: 'border-status-success/40 bg-status-success/10 text-status-success',
+          dot: 'bg-status-success',
         }
       : state === 'unavailable'
         ? {
-            pill: 'border-rose-500/40 bg-rose-500/10 text-rose-300',
-            dot: 'bg-rose-400',
+            pill: 'border-status-error/40 bg-status-error/10 text-status-error',
+            dot: 'bg-status-error',
           }
         : {
             pill: 'border-border bg-panel text-fg-faint',
@@ -3990,7 +4181,7 @@ function GenerationChannelStatusMessage({
     <p
       className={cn(
         'text-[11px] leading-relaxed',
-        status.tone === 'ok' ? 'text-emerald-300' : 'text-rose-300',
+        status.tone === 'ok' ? 'text-status-success' : 'text-status-error',
       )}
     >
       {status.msg}
@@ -4494,7 +4685,7 @@ function ProviderEditor({
           </div>
 
           {errors.duplicate && (
-            <p className="mt-3 text-[11px] leading-relaxed text-rose-300">
+            <p className="mt-3 text-[11px] leading-relaxed text-status-error">
               {errors.duplicate}
             </p>
           )}
@@ -4509,7 +4700,7 @@ function ProviderEditor({
 
         <div className="shrink-0 border-t border-border-soft bg-bg-alt px-5 py-3">
           {saveError && (
-            <p className="mb-2 text-[11px] leading-relaxed text-rose-300">
+            <p className="mb-2 text-[11px] leading-relaxed text-status-error">
               {saveError}
             </p>
           )}
@@ -4518,7 +4709,7 @@ function ProviderEditor({
               <button
                 type="button"
                 onClick={onDelete}
-                className="inline-flex items-center gap-1.5 rounded border border-rose-500/40 bg-rose-500/10 px-3 py-1.5 text-xs text-rose-300 transition-colors hover:bg-rose-500/20"
+                className="inline-flex items-center gap-1.5 rounded border border-status-error/40 bg-status-error/10 px-3 py-1.5 text-xs text-status-error transition-colors hover:bg-status-error/20"
               >
                 <Trash2 size={13} strokeWidth={2.2} />
                 {t(locale, 'settings.models.delete')}
@@ -4875,7 +5066,7 @@ function CustomGenerationProviderDialog({
               </select>
             </div>
             {modelRefresh.error && (
-              <p className="text-[11px] leading-relaxed text-amber-300">
+              <p className="text-[11px] leading-relaxed text-status-warning">
                 {modelRefresh.error}
               </p>
             )}
@@ -5289,8 +5480,8 @@ function imageProviderCategoryLabel(
 
 function imageProviderCategoryBadgeClass(category: ImageProviderCategory): string {
   return category === 'free-credit'
-    ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
-    : 'border-sky-500/30 bg-sky-500/10 text-sky-300';
+    ? 'border-status-success/30 bg-status-success/10 text-status-success'
+    : 'border-status-info/30 bg-status-info/10 text-status-info';
 }
 
 function imageProviderStatusLabel(
@@ -5617,7 +5808,7 @@ function ImageProviderSettingsRow({
             onClick={onDelete}
             title={t(locale, 'settings.models.delete')}
             aria-label={t(locale, 'settings.models.delete')}
-            className="inline-flex h-7 w-7 items-center justify-center rounded border border-rose-500/40 bg-rose-500/10 text-rose-300 transition-colors hover:bg-rose-500/20"
+            className="inline-flex h-7 w-7 items-center justify-center rounded border border-status-error/40 bg-status-error/10 text-status-error transition-colors hover:bg-status-error/20"
           >
             <Trash2 size={13} strokeWidth={2.2} />
           </button>
@@ -5679,7 +5870,7 @@ function ImageProviderSettingsRow({
                     type="button"
                     onClick={() => patchProvider({ key: '' })}
                     title={t(locale, 'settings.models.clear')}
-                    className="flex h-6 w-6 items-center justify-center rounded text-fg-faint transition-colors hover:text-rose-300"
+                    className="flex h-6 w-6 items-center justify-center rounded text-fg-faint transition-colors hover:text-status-error"
                   >
                     <Trash2 size={13} strokeWidth={2} />
                   </button>
@@ -5758,12 +5949,12 @@ function ImageProviderSettingsRow({
               </button>
             </div>
             {comfyInstall.state === 'started' && comfyInstall.message && (
-              <p className="rounded border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1.5 text-[11px] leading-relaxed text-emerald-200">
+              <p className="rounded border border-status-success/30 bg-status-success/10 px-2.5 py-1.5 text-[11px] leading-relaxed text-status-success">
                 {comfyInstall.message}
               </p>
             )}
             {comfyInstall.state === 'error' && comfyInstall.message && (
-              <p className="rounded border border-rose-500/30 bg-rose-500/10 px-2.5 py-1.5 text-[11px] leading-relaxed text-rose-200">
+              <p className="rounded border border-status-error/30 bg-status-error/10 px-2.5 py-1.5 text-[11px] leading-relaxed text-status-error">
                 {comfyInstall.message}
               </p>
             )}
@@ -6122,8 +6313,8 @@ function musicProviderCategoryLabel(
 
 function musicProviderCategoryBadgeClass(category: MusicProviderCategory): string {
   return category === 'free'
-    ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
-    : 'border-sky-500/30 bg-sky-500/10 text-sky-300';
+    ? 'border-status-success/30 bg-status-success/10 text-status-success'
+    : 'border-status-info/30 bg-status-info/10 text-status-info';
 }
 
 function musicProviderStatusLabel(
@@ -6374,7 +6565,7 @@ function MusicProviderSettingsRow({
             onClick={onDelete}
             title={t(locale, 'settings.models.delete')}
             aria-label={t(locale, 'settings.models.delete')}
-            className="inline-flex h-7 w-7 items-center justify-center rounded border border-rose-500/40 bg-rose-500/10 text-rose-300 transition-colors hover:bg-rose-500/20"
+            className="inline-flex h-7 w-7 items-center justify-center rounded border border-status-error/40 bg-status-error/10 text-status-error transition-colors hover:bg-status-error/20"
           >
             <Trash2 size={13} strokeWidth={2.2} />
           </button>
@@ -6435,7 +6626,7 @@ function MusicProviderSettingsRow({
                     type="button"
                     onClick={() => patchProvider({ key: '' })}
                     title={t(locale, 'settings.models.clear')}
-                    className="flex h-6 w-6 items-center justify-center rounded text-fg-faint transition-colors hover:text-rose-300"
+                    className="flex h-6 w-6 items-center justify-center rounded text-fg-faint transition-colors hover:text-status-error"
                   >
                     <Trash2 size={13} strokeWidth={2} />
                   </button>
@@ -7436,8 +7627,8 @@ function videoProviderCategoryLabel(
 
 function videoProviderCategoryBadgeClass(category: VideoProviderCategory): string {
   return category === 'free'
-    ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
-    : 'border-sky-500/30 bg-sky-500/10 text-sky-300';
+    ? 'border-status-success/30 bg-status-success/10 text-status-success'
+    : 'border-status-info/30 bg-status-info/10 text-status-info';
 }
 
 function videoProviderStatusLabel(
@@ -7688,7 +7879,7 @@ function VideoProviderSettingsRow({
             onClick={onDelete}
             title={t(locale, 'settings.models.delete')}
             aria-label={t(locale, 'settings.models.delete')}
-            className="inline-flex h-7 w-7 items-center justify-center rounded border border-rose-500/40 bg-rose-500/10 text-rose-300 transition-colors hover:bg-rose-500/20"
+            className="inline-flex h-7 w-7 items-center justify-center rounded border border-status-error/40 bg-status-error/10 text-status-error transition-colors hover:bg-status-error/20"
           >
             <Trash2 size={13} strokeWidth={2.2} />
           </button>
@@ -7751,7 +7942,7 @@ function VideoProviderSettingsRow({
                     type="button"
                     onClick={() => patchProvider({ key: '' })}
                     title={t(locale, 'settings.models.clear')}
-                    className="flex h-6 w-6 items-center justify-center rounded text-fg-faint transition-colors hover:text-rose-300"
+                    className="flex h-6 w-6 items-center justify-center rounded text-fg-faint transition-colors hover:text-status-error"
                   >
                     <Trash2 size={13} strokeWidth={2} />
                   </button>
@@ -8153,8 +8344,8 @@ function speechProviderCategoryLabel(
 
 function speechProviderCategoryBadgeClass(category: SpeechProviderCategory): string {
   return category === 'free'
-    ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
-    : 'border-sky-500/30 bg-sky-500/10 text-sky-300';
+    ? 'border-status-success/30 bg-status-success/10 text-status-success'
+    : 'border-status-info/30 bg-status-info/10 text-status-info';
 }
 
 function speechProviderStatusLabel(
@@ -8432,7 +8623,7 @@ function SpeechProviderSettingsRow({
             onClick={onDelete}
             title={t(locale, 'settings.models.delete')}
             aria-label={t(locale, 'settings.models.delete')}
-            className="inline-flex h-7 w-7 items-center justify-center rounded border border-rose-500/40 bg-rose-500/10 text-rose-300 transition-colors hover:bg-rose-500/20"
+            className="inline-flex h-7 w-7 items-center justify-center rounded border border-status-error/40 bg-status-error/10 text-status-error transition-colors hover:bg-status-error/20"
           >
             <Trash2 size={13} strokeWidth={2.2} />
           </button>
@@ -8496,7 +8687,7 @@ function SpeechProviderSettingsRow({
                     type="button"
                     onClick={() => patchProvider({ key: '' })}
                     title={t(locale, 'settings.models.clear')}
-                    className="flex h-6 w-6 items-center justify-center rounded text-fg-faint transition-colors hover:text-rose-300"
+                    className="flex h-6 w-6 items-center justify-center rounded text-fg-faint transition-colors hover:text-status-error"
                   >
                     <Trash2 size={13} strokeWidth={2} />
                   </button>
@@ -8888,8 +9079,8 @@ function SwitchLine({
 
 function uiDesignChannelBadgeClass(category: UiDesignChannelCategory): string {
   return category === 'free-open'
-    ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
-    : 'border-sky-500/30 bg-sky-500/10 text-sky-300';
+    ? 'border-status-success/30 bg-status-success/10 text-status-success'
+    : 'border-status-info/30 bg-status-info/10 text-status-info';
 }
 
 function uiDesignChannelStatus(
@@ -8907,24 +9098,24 @@ function uiDesignChannelStatus(
           : locale === 'zh-CN'
             ? '可用'
             : 'Ready',
-      className: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300',
+      className: 'border-status-success/40 bg-status-success/10 text-status-success',
     };
   }
   if (channel.needsKey && !settings.channelKeys[channel.id]?.trim()) {
     return {
       label: locale === 'zh-CN' ? '待填 Key' : 'Needs key',
-      className: 'border-rose-500/40 bg-rose-500/10 text-rose-300',
+      className: 'border-status-error/40 bg-status-error/10 text-status-error',
     };
   }
   if (channel.requiresCommand && !uiDesignChannelCommand(channel.id, settings)) {
     return {
       label: locale === 'zh-CN' ? '待配置路径' : 'Needs path',
-      className: 'border-amber-500/40 bg-amber-500/10 text-amber-300',
+      className: 'border-status-warning/40 bg-status-warning/10 text-status-warning',
     };
   }
   return {
     label: locale === 'zh-CN' ? '待配置' : 'Needs setup',
-    className: 'border-amber-500/40 bg-amber-500/10 text-amber-300',
+    className: 'border-status-warning/40 bg-status-warning/10 text-status-warning',
   };
 }
 
@@ -9300,7 +9491,7 @@ function UiDesignChannelCard({
                     type="button"
                     onClick={() => patchChannel({ key: '' })}
                     title={t(locale, 'settings.models.clear')}
-                    className="flex h-6 w-6 items-center justify-center rounded text-fg-faint transition-colors hover:text-rose-300"
+                    className="flex h-6 w-6 items-center justify-center rounded text-fg-faint transition-colors hover:text-status-error"
                   >
                     <Trash2 size={13} strokeWidth={2} />
                   </button>
@@ -9777,7 +9968,7 @@ function MeshLibraryCard({
               onClick={onDelete}
               title={locale === 'zh-CN' ? '删除' : 'Delete'}
               aria-label={locale === 'zh-CN' ? '删除' : 'Delete'}
-              className="flex h-7 w-7 items-center justify-center rounded border border-rose-500/40 bg-rose-500/10 text-rose-300 hover:bg-rose-500/20"
+              className="flex h-7 w-7 items-center justify-center rounded border border-status-error/40 bg-status-error/10 text-status-error hover:bg-status-error/20"
             >
               <Trash2 size={13} />
             </button>
@@ -9790,11 +9981,11 @@ function MeshLibraryCard({
           {searchKindLabel}
         </span>
         {usability === 'usable' ? (
-          <span className="rounded border border-emerald-500/40 bg-emerald-500/10 px-1.5 py-0.5 text-[10px] text-emerald-300">
+          <span className="rounded border border-status-success/40 bg-status-success/10 px-1.5 py-0.5 text-[10px] text-status-success">
             {locale === 'zh-CN' ? '真正可用' : 'Fully usable'}
           </span>
         ) : usability === 'needs-key' ? (
-          <span className="rounded border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-300">
+          <span className="rounded border border-status-warning/40 bg-status-warning/10 px-1.5 py-0.5 text-[10px] text-status-warning">
             {locale === 'zh-CN' ? '待配置 Key' : 'Needs key'}
           </span>
         ) : (
@@ -9803,11 +9994,11 @@ function MeshLibraryCard({
           </span>
         )}
         {library.supportsDownload ? (
-          <span className="rounded border border-emerald-500/40 bg-emerald-500/10 px-1.5 py-0.5 text-[10px] text-emerald-300">
+          <span className="rounded border border-status-success/40 bg-status-success/10 px-1.5 py-0.5 text-[10px] text-status-success">
             {locale === 'zh-CN' ? '可直接下载' : 'Direct download'}
           </span>
         ) : (
-          <span className="rounded border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-300">
+          <span className="rounded border border-status-warning/40 bg-status-warning/10 px-1.5 py-0.5 text-[10px] text-status-warning">
             {locale === 'zh-CN' ? '账号内下载' : 'In-account download'}
           </span>
         )}
@@ -9816,8 +10007,8 @@ function MeshLibraryCard({
             className={cn(
               'rounded border px-1.5 py-0.5 text-[10px]',
               ready
-                ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
-                : 'border-amber-500/40 bg-amber-500/10 text-amber-300',
+                ? 'border-status-success/40 bg-status-success/10 text-status-success'
+                : 'border-status-warning/40 bg-status-warning/10 text-status-warning',
             )}
           >
             {ready
@@ -10097,8 +10288,8 @@ function MeshLibraryEnabledTab({
       ) : null}
 
       {pendingLibraries.length > 0 ? (
-        <section className="grid gap-2 rounded-md border border-amber-500/30 bg-amber-500/5 p-3">
-          <div className="text-[11px] font-semibold text-amber-300">
+        <section className="grid gap-2 rounded-md border border-status-warning/30 bg-status-warning/5 p-3">
+          <div className="text-[11px] font-semibold text-status-warning">
             {locale === 'zh-CN'
               ? '已开启但还不能用（需补全 API Key 或只能深链浏览）'
               : 'Enabled but not fully usable yet'}
@@ -10580,8 +10771,8 @@ function threeDProviderCategoryLabel(
 
 function threeDProviderCategoryBadgeClass(category: ThreeDProviderCategory): string {
   return category === 'free'
-    ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
-    : 'border-sky-500/30 bg-sky-500/10 text-sky-300';
+    ? 'border-status-success/30 bg-status-success/10 text-status-success'
+    : 'border-status-info/30 bg-status-info/10 text-status-info';
 }
 
 function threeDProviderStatusLabel(
@@ -10763,7 +10954,7 @@ function ThreeDProviderSettingsRow({
             onClick={onDelete}
             title={t(locale, 'settings.models.delete')}
             aria-label={t(locale, 'settings.models.delete')}
-            className="inline-flex h-7 w-7 items-center justify-center rounded border border-rose-500/40 bg-rose-500/10 text-rose-300 transition-colors hover:bg-rose-500/20"
+            className="inline-flex h-7 w-7 items-center justify-center rounded border border-status-error/40 bg-status-error/10 text-status-error transition-colors hover:bg-status-error/20"
           >
             <Trash2 size={13} strokeWidth={2.2} />
           </button>
@@ -10823,7 +11014,7 @@ function ThreeDProviderSettingsRow({
                     type="button"
                     onClick={() => patchProvider({ key: '' })}
                     title={t(locale, 'settings.models.clear')}
-                    className="flex h-6 w-6 items-center justify-center rounded text-fg-faint transition-colors hover:text-rose-300"
+                    className="flex h-6 w-6 items-center justify-center rounded text-fg-faint transition-colors hover:text-status-error"
                   >
                     <Trash2 size={13} strokeWidth={2} />
                   </button>
@@ -11086,9 +11277,9 @@ function riggingProviderCategoryLabel(
 }
 
 function riggingProviderCategoryBadgeClass(category: ThreeDRiggingProviderCategory): string {
-  if (category === 'local') return 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300';
-  if (category === 'manual') return 'border-amber-500/30 bg-amber-500/10 text-amber-300';
-  return 'border-sky-500/30 bg-sky-500/10 text-sky-300';
+  if (category === 'local') return 'border-status-success/30 bg-status-success/10 text-status-success';
+  if (category === 'manual') return 'border-status-warning/30 bg-status-warning/10 text-status-warning';
+  return 'border-status-info/30 bg-status-info/10 text-status-info';
 }
 
 function riggingProviderStatusLabel(
@@ -11274,7 +11465,7 @@ function RiggingProviderSettingsRow({
                     type="button"
                     onClick={() => patchProvider({ key: '' })}
                     title={t(locale, 'settings.models.clear')}
-                    className="flex h-6 w-6 items-center justify-center rounded text-fg-faint transition-colors hover:text-rose-300"
+                    className="flex h-6 w-6 items-center justify-center rounded text-fg-faint transition-colors hover:text-status-error"
                   >
                     <Trash2 size={13} strokeWidth={2} />
                   </button>
@@ -11282,7 +11473,7 @@ function RiggingProviderSettingsRow({
               </div>
             </div>
             {inherited && !keyValue && (
-              <p className="text-[10px] leading-relaxed text-emerald-300/90">
+              <p className="text-[10px] leading-relaxed text-status-success/90">
                 {t(locale, 'settings.rigging.inheritedHint').replace(
                   '{source}',
                   inheritedSourceLabel,
@@ -11540,8 +11731,8 @@ function CapturePerfSettingsPanel({ locale }: { locale: Locale }) {
           className={cn(
             'rounded-md border px-3 py-2 text-[11px] leading-relaxed',
             status.tone === 'ok'
-              ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200'
-              : 'border-red-500/30 bg-red-500/10 text-red-200',
+              ? 'border-status-success/30 bg-status-success/10 text-status-success'
+              : 'border-status-error/30 bg-status-error/10 text-status-error',
           )}
         >
           {status.msg}
@@ -11598,7 +11789,7 @@ function CapturePerfSkillCard({
                 : definition.version}
             </span>
             {installed ? (
-              <span className="inline-flex items-center gap-1 rounded border border-emerald-500/40 bg-emerald-500/10 px-1.5 py-0.5 text-[10px] text-emerald-300">
+              <span className="inline-flex items-center gap-1 rounded border border-status-success/40 bg-status-success/10 px-1.5 py-0.5 text-[10px] text-status-success">
                 <Check size={11} />
                 {locale === 'zh-CN' ? '已安装' : 'Installed'}
               </span>
@@ -11643,7 +11834,7 @@ function CapturePerfSkillCard({
               type="button"
               onClick={onUninstall}
               disabled={installing || !desktop}
-              className="inline-flex items-center gap-1.5 rounded-md border border-border bg-panel px-2.5 py-1.5 text-xs text-fg-dim hover:border-red-400 hover:text-red-200 disabled:opacity-50"
+              className="inline-flex items-center gap-1.5 rounded-md border border-border bg-panel px-2.5 py-1.5 text-xs text-fg-dim hover:border-status-error hover:text-status-error disabled:opacity-50"
               title={installedTarget?.label}
             >
               {installing ? (
@@ -11879,7 +12070,7 @@ function ShortcutsSettings({
 
       <div className="space-y-1">
         {error && (
-          <p className="text-xs font-medium text-rose-300">{error}</p>
+          <p className="text-xs font-medium text-status-error">{error}</p>
         )}
         <p className="text-xs leading-relaxed text-fg-faint">
           {t(locale, 'settings.shortcutsRecordingHelp')}
@@ -12033,7 +12224,7 @@ function FreeChannelsSettings({ locale }: { locale: Locale }) {
         <p
           className={cn(
             'text-[11px] leading-relaxed',
-            status.tone === 'ok' ? 'text-emerald-300' : 'text-rose-300',
+            status.tone === 'ok' ? 'text-status-success' : 'text-status-error',
           )}
         >
           {status.msg}
@@ -12086,59 +12277,59 @@ function localChannelStatusBadge(
   if (checking) {
     return {
       label: t(locale, 'settings.freeChannels.localChecking'),
-      cls: 'border-sky-500/40 text-sky-300',
+      cls: 'border-status-info/40 text-status-info',
     };
   }
   if (!configured || status?.state === 'missing_model') {
     return {
       label: t(locale, 'settings.freeChannels.localMissingModel'),
-      cls: 'border-amber-500/40 text-amber-300',
+      cls: 'border-status-warning/40 text-status-warning',
       title: status?.message ?? undefined,
     };
   }
   if (!status) {
     return {
       label: t(locale, 'settings.freeChannels.localConfigured'),
-      cls: 'border-sky-500/40 text-sky-300',
+      cls: 'border-status-info/40 text-status-info',
     };
   }
   if (status.ready) {
     return {
       label: t(locale, 'settings.freeChannels.localReady'),
-      cls: 'border-emerald-500/40 text-emerald-300',
+      cls: 'border-status-success/40 text-status-success',
     };
   }
   if (status.state === 'service_unavailable') {
     return {
       label: t(locale, 'settings.freeChannels.localServiceDown'),
-      cls: 'border-amber-500/40 text-amber-300',
+      cls: 'border-status-warning/40 text-status-warning',
       title: status.message ?? undefined,
     };
   }
   if (status.state === 'model_missing') {
     return {
       label: t(locale, 'settings.freeChannels.localModelMissing'),
-      cls: 'border-amber-500/40 text-amber-300',
+      cls: 'border-status-warning/40 text-status-warning',
       title: status.message ?? undefined,
     };
   }
   if (status.state === 'desktop_unavailable') {
     return {
       label: t(locale, 'settings.freeChannels.localDesktopOnly'),
-      cls: 'border-sky-500/40 text-sky-300',
+      cls: 'border-status-info/40 text-status-info',
       title: status.message ?? undefined,
     };
   }
   if (status.state === 'unsupported') {
     return {
       label: t(locale, 'settings.freeChannels.localUnsupported'),
-      cls: 'border-sky-500/40 text-sky-300',
+      cls: 'border-status-info/40 text-status-info',
       title: status.message ?? undefined,
     };
   }
   return {
     label: t(locale, 'settings.freeChannels.localServiceError'),
-    cls: 'border-rose-500/40 text-rose-300',
+    cls: 'border-status-error/40 text-status-error',
     title: status.message ?? undefined,
   };
 }
@@ -12315,11 +12506,11 @@ function FreeChannelRow({
     : ready
       ? {
           label: t(locale, 'settings.freeChannels.ready'),
-          cls: 'border-emerald-500/40 text-emerald-300',
+          cls: 'border-status-success/40 text-status-success',
         }
       : {
           label: t(locale, 'settings.freeChannels.needsKey'),
-          cls: 'border-amber-500/40 text-amber-300',
+          cls: 'border-status-warning/40 text-status-warning',
         };
 
   const KeyIcon = showKey ? EyeOff : Eye;
@@ -12439,7 +12630,7 @@ function FreeChannelRow({
                       scheduleKeySave('');
                     }}
                     title={t(locale, 'settings.freeChannels.clear')}
-                    className="flex h-6 w-6 items-center justify-center rounded text-fg-faint transition-colors hover:text-rose-300"
+                    className="flex h-6 w-6 items-center justify-center rounded text-fg-faint transition-colors hover:text-status-error"
                   >
                     <Trash2 size={13} strokeWidth={2} />
                   </button>
@@ -12941,7 +13132,7 @@ export function GameExpertSettingsPanel({
                       title={t(locale, 'settings.gameExperts.delete')}
                       aria-label={t(locale, 'settings.gameExperts.delete')}
                       onClick={() => setDeleteTarget(expert)}
-                      className="flex h-7 w-7 items-center justify-center rounded border border-border bg-bg text-fg-faint transition-colors hover:border-[#f78b8b] hover:text-[#f78b8b]"
+                      className="flex h-7 w-7 items-center justify-center rounded border border-border bg-bg text-fg-faint transition-colors hover:border-status-error hover:text-status-error"
                     >
                       <Trash2 size={13} strokeWidth={2.2} />
                     </button>
@@ -13181,7 +13372,7 @@ function GameExpertEditor({
             </div>
           </div>
 
-          {error && <p className="mt-3 text-xs text-[#f78b8b]">{error}</p>}
+          {error && <p className="mt-3 text-xs text-status-error">{error}</p>}
         </div>
 
         <div className="shrink-0 border-t border-border-soft bg-bg-alt px-5 py-3">
@@ -13256,7 +13447,7 @@ function GameExpertDeleteDialog({
           <button
             type="button"
             onClick={onConfirm}
-            className="rounded border border-[#f78b8b]/60 bg-[#f78b8b]/15 px-3 py-1.5 text-xs font-medium text-[#f78b8b] transition-colors hover:bg-[#f78b8b]/20"
+            className="rounded border border-status-error/60 bg-status-error/15 px-3 py-1.5 text-xs font-medium text-status-error transition-colors hover:bg-status-error/20"
           >
             {t(locale, 'common.delete')}
           </button>
@@ -13586,7 +13777,7 @@ function AppearanceSettings({ locale }: { locale: Locale }) {
       </header>
 
       {hasUnsupportedStyle && (
-        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-xs leading-relaxed text-amber-200">
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-status-warning/30 bg-status-warning/10 px-4 py-3 text-xs leading-relaxed text-status-warning">
           <p>{t(locale, 'settings.appearanceUnsupportedStyle')}</p>
           <button
             type="button"
@@ -13801,7 +13992,7 @@ function AboutSettings({ locale }: { locale: Locale }) {
         {status && !checking && (
           <div className="mt-4 border-t border-border-soft pt-3 text-xs">
             {status.error ? (
-              <span className="text-[#f78b8b]">{t(locale, 'settings.aboutCheckFailed')}</span>
+              <span className="text-status-error">{t(locale, 'settings.aboutCheckFailed')}</span>
             ) : status.updateAvailable && status.manifest ? (
               <div className="flex flex-wrap items-center gap-3">
                 <span className="text-accent-2">{t(locale, 'settings.aboutUpdateFound')} v{status.latest}</span>

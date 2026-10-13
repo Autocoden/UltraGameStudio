@@ -17,9 +17,12 @@
  * Run: `npm run cli:build`.
  */
 import { build } from 'esbuild';
+import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { mkdirSync, rmSync, readFileSync } from 'node:fs';
+
+const require = createRequire(import.meta.url);
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..');
@@ -60,7 +63,12 @@ await build({
   banner: {
     js: "import { createRequire as __ugsCreateRequire } from 'node:module'; const require = __ugsCreateRequire(import.meta.url);",
   },
-  alias: { '@': join(root, 'src') },
+  // `yaml` is imported by backend/src/workspace-skill-service.mjs, which the
+  // CLI bundles directly. backend is a sibling of app, so Node's upward
+  // node_modules walk from backend/ never reaches app/node_modules — on
+  // clean checkouts (Linux/macOS CI) the bare specifier fails to resolve.
+  // Pin it to this package's own copy to keep the bundle deterministic.
+  alias: { '@': join(root, 'src'), yaml: require.resolve('yaml') },
   define: {
     __UGS_CLI_VERSION__: JSON.stringify(pkg.version),
     __APP_VERSION__: JSON.stringify(pkg.version),

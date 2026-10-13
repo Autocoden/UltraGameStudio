@@ -1,5 +1,6 @@
 import { segmentMessage } from './segmenter';
 import { extractToolSentinels, hasToolSentinel } from './toolEvent';
+import { formatClock, formatDuration } from '@/runtime/format';
 
 const ROUTE_LINE_RE =
   /^⚙ (?:(?:路由：(?<route>.*?)(?: · 模型：(?<model>.*))?)|(?:模型：(?<modelOnly>.*)))$/m;
@@ -40,6 +41,38 @@ export function renderMessageText(text: string): string {
 export function timingLineFromText(text: string): string {
   const match = text.match(/^⏱[^\n]*/);
   return match ? match[0] : '';
+}
+
+/**
+ * Resolve a turn's `⏱ HH:MM:SS → HH:MM:SS · 耗时 …` label for a message.
+ *
+ * The leading text line is authoritative (it is what the turn actually wrote),
+ * but not every assistant bubble carries one: follow-up bubbles appended to the
+ * same turn, and turns whose text was rewritten while streaming, lose the
+ * prefix. Fall back to the structured `createdAt` / `completedAt` pair so every
+ * completed assistant turn still shows its own clock instead of only the last
+ * one. Returns '' when the message cannot produce a real timing.
+ */
+export function turnTimingFromMessage(message: {
+  text: string;
+  createdAt?: number;
+  completedAt?: number;
+}): string {
+  const fromText = timingLineFromText(message.text);
+  if (fromText) return fromText;
+  const { createdAt, completedAt } = message;
+  if (
+    typeof createdAt !== 'number' ||
+    !Number.isFinite(createdAt) ||
+    typeof completedAt !== 'number' ||
+    !Number.isFinite(completedAt) ||
+    completedAt <= createdAt
+  ) {
+    return '';
+  }
+  return `⏱ ${formatClock(createdAt)} → ${formatClock(completedAt)} · 耗时 ${formatDuration(
+    completedAt - createdAt,
+  )}`;
 }
 
 /**

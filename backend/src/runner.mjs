@@ -12,6 +12,7 @@ import {
 } from './usage.mjs';
 import {
   REMOTE_JOB_CANCELABLE_STATUSES,
+  REMOTE_SKILL_HOST_ID,
 } from '../../packages/protocol/index.js';
 import { userSettingsRoot } from './user-settings.mjs';
 import { buildAgentEnv } from './agent-env.mjs';
@@ -144,8 +145,67 @@ function toolArgs(item) {
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
-export function remoteMessagesFromJsonEvent(event) {
+export function redactSkillText(text, limit = 4096, secrets = []) {
+  let safe = String(text ?? '')
+    .replace(/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----/g, '[REDACTED]')
+    .replace(/(\\[rn])((?:Authorization|Cookie|Set-Cookie)\s*:)[\s\S]*?(?=\\[rn]|["\r\n]|$)/gi, '$1$2 [REDACTED]')
+    .replace(/\b(?:Authorization|Cookie|Set-Cookie)\s*:\s*[^\r\n]+/gi, (match) => match.split(':')[0] + ': [REDACTED]')
+    .replace(/(["'](?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|passwd|secret|authorization|cookie|credential)["']\s*:\s*)["'][^"'\r\n]*["']/gi, '$1"[REDACTED]"')
+    .replace(/(\\"(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|passwd|secret|authorization|cookie|credential)\\"\s*:\s*)\\"[\s\S]*?\\"/gi, '$1\\"[REDACTED]\\"')
+    .replace(/\bBearer\s+[A-Za-z0-9._~+\/-]+=*/gi, 'Bearer [REDACTED]')
+    .replace(/\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|passwd|secret|authorization|cookie)\s*["']?\s*[:=]\s*["']?[^\s"',;}]+/gi, (match) => match.split(/[:=]/)[0] + '=[REDACTED]')
+    .replace(/\b(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]{12,})\b/g, '[REDACTED]');
+  for (const secret of secrets) if (typeof secret === 'string' && secret.length >= 4) safe = safe.split(secret).join('[REDACTED]');
+  return safe.slice(0, limit);
+}
+
+function freezeMessage(message, secrets = []) {
+  const safe = JSON.parse(JSON.stringify(message, (key, value) => /(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|passwd|secret|authorization|cookie|credential)/i.test(key) ? '[REDACTED]' : typeof value === 'string' ? redactSkillText(value, key === 'result' ? 8192 : 4096, secrets) : value));
+  function freeze(value) { if (value && typeof value === 'object') { Object.values(value).forEach(freeze); Object.freeze(value); } return value; }
+  return freeze(safe);
+}
+function nativeMessage(fields, context) {
+  const id = fields.toolCallId;
+  return freezeMessage({ role: 'tool', kind: 'tool', provenance: 'native-tool', runId: context.runId ?? '', ...fields, toolId: id, nativeToolId: id });
+}
+function codexNativeItem(event) {
+  const kind = eventKind(event);
+  if (!['item.started', 'item/started', 'item.completed', 'item/completed'].includes(kind)) return null;
+  return objectValue(event.item) || objectValue(objectValue(event.params)?.item);
+}
+export function remoteMessagesFromJsonEvent(event, context = {}) {
+  context.nativeTools ??= new Map();
   const messages = [];
+  const nativeItem = codexNativeItem(event);
+  if (nativeItem && nativeItem.type !== 'agent_message') {
+    const phase = /started$/.test(eventKind(event)) ? 'start' : 'end';
+    const toolCallId = stringValue(nativeItem.id);
+    const exitCode = typeof nativeItem.exit_code === 'number' ? nativeItem.exit_code : nativeItem.exit_code === null ? null : undefined;
+    const explicitError = ['failed', 'error'].includes(nativeItem.status);
+    const status = phase === 'start' ? 'unknown' : typeof exitCode === 'number' ? (exitCode === 0 ? 'success' : 'error') : explicitError ? 'error' : 'unknown';
+    const subject = toolSubject(nativeItem);
+    const result = stringValue(nativeItem.aggregated_output) || stringValue(nativeItem.output) || stringValue(nativeItem.result);
+    messages.push(nativeMessage({ source: 'codex', toolCallId, toolName: stringValue(nativeItem.type), parentId: stringValue(nativeItem.parent_id) || undefined, phase, status, text: subject ? `${nativeItem.type}: ${subject}` : nativeItem.type, args: toolArgs(nativeItem), ...(phase === 'end' ? { result, exitCode, toolExitCode: exitCode } : {}) }, context));
+    return messages;
+  }
+  const claudeContent = objectValue(event.message)?.content ?? event.content;
+  if (Array.isArray(claudeContent)) for (const block of claudeContent) {
+    if (block?.type === 'tool_use') {
+      const toolCallId = stringValue(block.id);
+      const toolName = stringValue(block.name);
+      const parentId = stringValue(event.parent_tool_use_id) || stringValue(block.parent_id) || undefined;
+      context.nativeTools.set(toolCallId, { toolName, parentId });
+      messages.push(nativeMessage({ source: 'claude', toolCallId, toolName, parentId, phase: 'start', status: 'unknown', args: toolArgs(objectValue(block.input) ?? {}), text: `${toolName}: ${toolSubject(objectValue(block.input) ?? {})}` }, context));
+    } else if (block?.type === 'tool_result') {
+      const toolCallId = stringValue(block.tool_use_id);
+      const started = context.nativeTools.get(toolCallId);
+      const toolName = started?.toolName ?? stringValue(block.tool_name) ?? 'tool';
+      const result = textFromContent(block.content);
+      const status = block.is_error === true ? 'error' : block.is_error === false ? 'success' : 'unknown';
+      messages.push(nativeMessage({ source: 'claude', toolCallId, toolName, parentId: started?.parentId ?? (stringValue(event.parent_tool_use_id) || undefined), phase: 'end', status, result, text: toolName }, context));
+      context.nativeTools.delete(toolCallId);
+    }
+  }
   const item = completedItem(event);
   if (item) {
     const itemType = stringValue(item.type);
@@ -219,7 +279,7 @@ function remoteMessagesFromChunk(state, chunk, flush = false) {
     } catch {
       continue;
     }
-    out.push(...remoteMessagesFromJsonEvent(event));
+    out.push(...remoteMessagesFromJsonEvent(event, state));
   }
   return out;
 }
@@ -252,6 +312,7 @@ export class JobRunner extends EventEmitter {
     this.active = new Set();
     this.queue = [];
     this.cancelled = new Set();
+    this.skillSourceWrites = new Map();
     /** @type {Map<string, import('node:child_process').ChildProcess>} */
     this.procs = new Map();
     this._recoverInterruptedJobs();
@@ -309,6 +370,17 @@ export class JobRunner extends EventEmitter {
     }
     const userId =
       project?.userId ?? (String(input.userId ?? 'default').trim() || 'default');
+    let skillOrigin;
+    if (input.skillSource !== undefined) {
+      const source = input.skillSource;
+      if (!project || !source || typeof source !== 'object' || Array.isArray(source) ||
+        Object.keys(source).some((key) => !['sessionId', 'turnId'].includes(key)) ||
+        ['sessionId', 'turnId'].some((key) => typeof source[key] !== 'string' || !source[key].trim() || source[key].length > 200)) {
+        throw new Error('invalid skill source: a bound project and session/turn IDs are required');
+      }
+      skillOrigin = Object.freeze({ hostId: REMOTE_SKILL_HOST_ID, workspaceId: project.id,
+        sessionId: source.sessionId, turnId: source.turnId, runId: id });
+    }
     const repoUrl = project?.repoUrl ?? input.repoUrl ?? null;
     const branch = input.branch ?? project?.branch ?? null;
     const pushBranch = input.pushBranch ?? project?.pushBranch ?? null;
@@ -319,6 +391,7 @@ export class JobRunner extends EventEmitter {
       updatedAt: now,
       userId,
       projectId: project?.id ?? input.projectId ?? null,
+      ...(skillOrigin ? { skillOrigin } : {}),
       repoUrl,
       branch,
       adapter: input.adapter ?? project?.adapter ?? 'claude',
@@ -338,13 +411,14 @@ export class JobRunner extends EventEmitter {
     };
     if (project?.gitToken) job._gitToken = project.gitToken;
     this.store.upsertJob(job);
+    if (skillOrigin) this.skillSourceWrites.set(id, this.store._writeChain);
     this.queue.push(id);
     queueMicrotask(() => this._drain());
     return job;
   }
 
   _log(job, entry) {
-    const line = { at: Date.now(), ...entry };
+    const line = { at: Date.now(), ...entry, ...(entry.text === undefined ? {} : { text: redactSkillText(entry.text, 100_000, [job._apiKey, job._accountApiKey, job._gitToken]) }) };
     job.logs.push(line);
     if (job.logs.length > 5000) job.logs.splice(0, job.logs.length - 5000);
     job.updatedAt = line.at;
@@ -353,7 +427,7 @@ export class JobRunner extends EventEmitter {
   }
 
   _message(job, entry) {
-    const message = { at: Date.now(), ...entry };
+    const message = freezeMessage({ at: Date.now(), ...entry }, [job._apiKey, job._accountApiKey, job._gitToken]);
     job.messages ??= [];
     job.messages.push(message);
     if (job.messages.length > 5000) job.messages.splice(0, job.messages.length - 5000);
@@ -426,12 +500,18 @@ export class JobRunner extends EventEmitter {
           this.active.delete(id);
           this.procs.delete(id);
           this.cancelled.delete(id);
+          this.skillSourceWrites.delete(id);
           this._drain();
         });
     }
   }
 
   async _execute(job) {
+    if (job.skillOrigin) {
+      // Bind execution authority only after the exact queued source write.
+      await (this.skillSourceWrites.get(job.id) ?? this.store._writeChain);
+      if (this._isCancelled(job)) { this._failCanceled(job); return; }
+    }
     const project = job.projectId
       ? this.store.getProject?.(job.projectId, job.userId ?? 'default')
       : null;
@@ -654,7 +734,7 @@ export class JobRunner extends EventEmitter {
     return new Promise((resolve) => {
       let child;
       let usage = emptyUsage();
-      const modelStreamState = { jsonBuffer: '' };
+      const modelStreamState = { jsonBuffer: '', runId: job.id, nativeTools: new Map() };
       const absorbUsage = (chunk) => {
         const parsed = usageFromText(chunk);
         if (parsed) usage = addUsage(usage, parsed);

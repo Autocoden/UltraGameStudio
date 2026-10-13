@@ -10,6 +10,7 @@ import TaskBoardView from '@/panels/TaskBoardView';
 import { ASSET_SESSION_JUMP_EVENT } from '@/panels/DownloadsModal';
 import ScheduledTaskRunner from '@/components/ScheduledTaskRunner';
 import BackgroundJobRunner from '@/components/BackgroundJobRunner';
+import SkillLearningRecovery from '@/components/SkillLearningRecovery';
 import StatusBar from '@/components/StatusBar';
 import { cn } from '@/lib/cn';
 import { primeCliRuntime } from '@/lib/cliConfig';
@@ -55,10 +56,17 @@ function subscribeStartupStorageMigration(
  */
 export default function App() {
   const initHistory = useStore((s) => s.initHistory);
+  const assetCenterEnabled = useStore((s) => s.assetCenterEnabled);
   const startupMigration = useStartupStorageMigration();
   useActiveChannelProfile();
   const [activeView, setActiveView] = useState<AppView>('terminal');
   const [settingsOpen, setSettingsOpen] = useState(false);
+
+  useEffect(() => {
+    if (!assetCenterEnabled) {
+      setActiveView((view) => view === 'assets' ? 'terminal' : view);
+    }
+  }, [assetCenterEnabled]);
 
   // "跳到资产所在会话" from the asset view lands in the smart terminal.
   useEffect(() => {
@@ -93,6 +101,7 @@ export default function App() {
     <div className="flex h-screen w-screen flex-col overflow-hidden bg-bg text-fg">
       <ScheduledTaskRunner />
       <BackgroundJobRunner />
+      <SkillLearningRecovery />
       <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
         <AppRail
           activeView={activeView}
@@ -130,14 +139,16 @@ export default function App() {
               </div>
             </section>
             {/* 资产视图 */}
-            <section
-              className={cn(
-                'min-w-0 flex-1',
-                activeView === 'assets' ? 'block overflow-hidden' : 'hidden',
-              )}
-            >
-              <AssetsView />
-            </section>
+            {assetCenterEnabled && (
+              <section
+                className={cn(
+                  'min-w-0 flex-1',
+                  activeView === 'assets' ? 'block overflow-hidden' : 'hidden',
+                )}
+              >
+                <AssetsView />
+              </section>
+            )}
           </div>
         </div>
       </div>

@@ -74,9 +74,14 @@ describe('MessageContent integration', () => {
 
     expect(html.match(/ai-file-chip-thumb/g)).toHaveLength(maxVisibleFileRefs);
     expect(html.match(/ai-file-chip-limit/g)).toHaveLength(1);
-    expect(html.match(/<br\/>/g)?.length ?? 0).toBeLessThanOrEqual(
-      maxVisibleFileRefs + 2,
-    );
+    // 折叠只降级装饰，不降级可点击性：交付物常常正是被折叠的那一批，所以每个
+    // 引用都要保留完整路径文本，并渲染成可点击链接而不是被丢掉的死文本。
+    for (let i = 0; i < maxVisibleFileRefs + 4; i += 1) {
+      // 第 13 个位置让位给"已折叠后续文件引用"按钮，不渲染自己的路径。
+      if (i === maxVisibleFileRefs) continue;
+      expect(html).toContain(`pasted-${i}.png`);
+    }
+    expect(html.match(/ai-file-chip--folded/g)).toHaveLength(3);
     expect(html).toMatch(/已折叠后续文件引用|More file references folded/);
   });
 
@@ -127,11 +132,15 @@ describe('MessageContent integration', () => {
         );
       });
 
-      expect(container.querySelectorAll('.ai-file-chip')).toHaveLength(
-        MESSAGE_FILE_CHIP_LIMIT,
-      );
+      const decorated = () =>
+        container.querySelectorAll('.ai-file-chip:not(.ai-file-chip--folded)');
+      const folded = () => container.querySelectorAll('.ai-file-chip--folded');
+
+      expect(decorated()).toHaveLength(MESSAGE_FILE_CHIP_LIMIT);
       expect(container.querySelector('.ai-file-chip-limit')).not.toBeNull();
-      expect(container.textContent).not.toContain(
+      // 折叠项依然可点、文本依然可见，只是省掉了缩略图与存在性探测。
+      expect(folded().length).toBeGreaterThan(0);
+      expect(container.textContent).toContain(
         `file-${MESSAGE_FILE_CHIP_LIMIT + 2}.ts`,
       );
 
@@ -140,9 +149,8 @@ describe('MessageContent integration', () => {
       });
 
       expect(container.querySelector('.ai-file-chip-limit')).toBeNull();
-      expect(container.querySelectorAll('.ai-file-chip')).toHaveLength(
-        MESSAGE_FILE_CHIP_LIMIT + 3,
-      );
+      expect(folded()).toHaveLength(0);
+      expect(decorated()).toHaveLength(MESSAGE_FILE_CHIP_LIMIT + 3);
       expect(container.textContent).toContain(
         `file-${MESSAGE_FILE_CHIP_LIMIT + 2}.ts`,
       );
@@ -564,8 +572,12 @@ describe('MessageContent integration', () => {
     expect(html).toMatch(/6q10dLQSzn0_notes\.docx/);
   });
 
-  it('shows a reveal-in-folder menu for interactive file chips', async () => {
-    const calls: Array<{ path: string; reveal?: boolean }> = [];
+  it('shows reveal and open-containing-folder actions for interactive file chips', async () => {
+    const calls: Array<{
+      path: string;
+      reveal?: boolean;
+      containing?: boolean;
+    }> = [];
     const container = document.createElement('div');
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -577,7 +589,11 @@ describe('MessageContent integration', () => {
             text: 'Open `src/store/useStore.ts:42`.',
             streaming: false,
             onOpenFile: (ref, intent) => {
-              calls.push({ path: ref.path, reveal: intent?.reveal });
+              calls.push({
+                path: ref.path,
+                reveal: intent?.reveal,
+                containing: intent?.openContainingFolder,
+              });
             },
           }),
         );
@@ -585,34 +601,48 @@ describe('MessageContent integration', () => {
 
       const chip = container.querySelector<HTMLButtonElement>('.ai-file-chip');
       expect(chip).not.toBeNull();
-      await act(async () => {
-        chip!.dispatchEvent(
-          new MouseEvent('contextmenu', {
-            bubbles: true,
-            cancelable: true,
-            clientX: 16,
-            clientY: 18,
-          }),
+      const openMenu = async () => {
+        await act(async () => {
+          chip!.dispatchEvent(
+            new MouseEvent('contextmenu', {
+              bubbles: true,
+              cancelable: true,
+              clientX: 16,
+              clientY: 18,
+            }),
+          );
+        });
+        return container.querySelectorAll<HTMLButtonElement>(
+          '.ai-file-chip-menu [role="menuitem"]',
         );
-      });
+      };
 
-      const menuItems = container.querySelectorAll<HTMLButtonElement>(
-        '.ai-file-chip-menu [role="menuitem"]',
-      );
-      // Menu order: copy path, preview in app, reveal in folder
-      const revealItem = menuItems[2];
-      expect(revealItem?.textContent).toContain('在文件夹中显示');
+      let menuItems = await openMenu();
+      // Menu order: copy path, preview in app, open containing folder, reveal in folder
+      const containingItem = menuItems[2];
+      expect(containingItem?.textContent).toContain('打开所在目录');
       await act(async () => {
-        revealItem!.dispatchEvent(
+        containingItem!.dispatchEvent(
           new MouseEvent('pointerdown', { bubbles: true, cancelable: true }),
         );
       });
       expect(container.querySelector('.ai-file-chip-menu')).not.toBeNull();
       await act(async () => {
+        containingItem!.click();
+      });
+      expect(container.querySelector('.ai-file-chip-menu')).toBeNull();
+
+      menuItems = await openMenu();
+      const revealItem = menuItems[3];
+      expect(revealItem?.textContent).toContain('在文件夹中显示');
+      await act(async () => {
         revealItem!.click();
       });
 
-      expect(calls).toEqual([{ path: 'src/store/useStore.ts', reveal: true }]);
+      expect(calls).toEqual([
+        { path: 'src/store/useStore.ts', containing: true },
+        { path: 'src/store/useStore.ts', reveal: true },
+      ]);
       expect(container.querySelector('.ai-file-chip-menu')).toBeNull();
     } finally {
       await act(async () => {
@@ -655,7 +685,9 @@ describe('MessageContent integration', () => {
         streaming: false,
       }),
     );
-    expect(html.match(/ai-tool-card/g)).toHaveLength(2);
+    const rendered = document.createElement('div');
+    rendered.innerHTML = html;
+    expect(rendered.querySelectorAll('.ai-tool-card')).toHaveLength(2);
     expect(html).toMatch(/先替一张表/);
     expect(html).not.toMatch(/🔧/);
     expect(html).not.toMatch(/ai-file-chip/);

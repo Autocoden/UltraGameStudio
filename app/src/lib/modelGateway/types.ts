@@ -2,10 +2,12 @@ import type {
   GatewaySelection,
   ModelClass,
   NodeGatewayOverride,
-} from "@/core/ir";
-import type { ProviderRuntimeStatus } from "@/lib/apiConfig";
-import type { RuntimeAdapterId } from "@/lib/adapters";
-import type { UsageMeterContext } from "@/lib/usageMeter";
+} from '@/core/ir';
+import type { ProviderRuntimeStatus } from '@/lib/apiConfig';
+import type { RuntimeAdapterId } from '@/lib/adapters';
+import type { UsageMeterContext } from '@/lib/usageMeter';
+import type { SkillNativeToolEvent } from '@/runtime/skills/types';
+import type { NativeCliSkillToolsOptions } from '@/lib/tauri';
 
 export type { GatewaySelection, ModelClass, NodeGatewayOverride };
 
@@ -112,6 +114,10 @@ export interface GatewayTextRequest {
   runId?: string;
   usageContext?: UsageMeterContext;
   onDelta?: (chunk: string) => void;
+  /** Native CLI evidence, kept separate from streamed display text. */
+  onToolEvent?: (event: SkillNativeToolEvent) => void;
+  /** Foreground-only authority forwarded to ordinary CLI fallback. */
+  skillTools?: NativeCliSkillToolsOptions;
   onUsage?: (usage: {
     inputTokens?: number;
     outputTokens?: number;

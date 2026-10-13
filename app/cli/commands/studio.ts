@@ -6,6 +6,7 @@
  * runtime, and persists the full run protocol under `.ugs-run/<run-id>/`.
  */
 import { spawn } from 'node:child_process';
+import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync, type Dirent } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -47,6 +48,10 @@ import { CliError, errMsg } from '../utils/fs';
 import { c, type GlobalOptions } from '../utils/format';
 import { buildRunSummary } from './studioSummary';
 import { runObjectiveChecks, type ObjectiveChecksReport } from './objectiveChecks';
+import { createNodeSkillWorkflow, type NodeSkillWorkflowOptions, type NodeSkillWorkflowOutcome } from '../io/skill-workflow';
+import { loadNodeSkillLearningConfig, type NodeSkillReviewSelectionFlags } from '../config/providers';
+import { redactSkillText } from '../../src/runtime/skills/evidence';
+import type { SkillLearningJob, SkillOrigin } from '../../src/runtime/skills/types';
 
 /**
  * Build timestamp baked in by cli/build.mjs (ISO seconds). `undefined` when the
@@ -141,7 +146,7 @@ function newestMtimeOfTsFiles(dir: string, depth: number): number {
   return newest;
 }
 
-export interface StudioOptions extends GlobalOptions {
+export interface StudioOptions extends GlobalOptions, NodeSkillReviewSelectionFlags {
   adapter?: string;
   model?: string;
   provider?: string;
@@ -163,6 +168,8 @@ export interface StudioOptions extends GlobalOptions {
   plannerOnly?: boolean;
   /** Testing seam. The real CLI leaves this undefined. */
   gateway?: RunGateway;
+  /** Host-injected safe route/service policy. No CLI-agent fallback or credential discovery. */
+  skillWorkflow?: Pick<NodeSkillWorkflowOptions, 'config' | 'route' | 'model' | 'request' | 'explicitSkillIds'>;
 }
 
 export interface StudioJsonResult {
@@ -196,6 +203,8 @@ export interface StudioJsonResult {
   nextSteps?: RunNextStep[];
   outputs: Record<string, string>;
   nodeResults: Record<string, NodeRunResult>;
+  loadedSkills?: SkillLearningJob['loadedSkills'];
+  skillLearning?: NodeSkillWorkflowOutcome;
 }
 
 interface StudioBudgetSnapshot {
@@ -247,8 +256,46 @@ export async function runStudio(
   const startedAt = Date.now();
   const controller = new AbortController();
   const onSigint = installSigintHandler(controller);
+  const skillOrigin: SkillOrigin = {
+    hostId: 'node-cli', workspaceId: createHash('sha256').update(process.platform === 'win32' ? cwd.toLowerCase() : cwd).digest('hex'),
+    sessionId: `studio:${createHash('sha256').update(runId).digest('hex')}`, turnId: randomUUID(), runId: randomUUID(), cwd,
+  };
+  let skillWorkflow: ReturnType<typeof createNodeSkillWorkflow> | undefined;
+  let skillOutcome: NodeSkillWorkflowOutcome | undefined;
+  let loadedSkills: SkillLearningJob['loadedSkills'] = [];
+  let skillSuffix = '';
+  const finalizeSkills = async (finalAnswer: string, terminal: 'completed' | 'cancelled' | 'failed') => {
+    if (!skillOutcome) {
+      try { skillOutcome = await skillWorkflow!.finish({ finalAnswer, terminal }); }
+      catch (error) { skillOutcome = { status: 'unavailable', origin: skillOrigin, reason: redactSkillText(`SKILL_REVIEW_UNAVAILABLE: ${String(error)}`) }; }
+    }
+    writeJson(join(runDir, 'skill-review.json'), skillOutcome);
+    appendEvent(runDir, { ts: Date.now(), phase: 'complete', kind: 'skill_review', outcome: skillOutcome });
+    if (skillOutcome.status === 'unavailable' && !opts.quiet) process.stderr.write(c.warn(`${skillOutcome.reason}\n`));
+    return skillOutcome;
+  };
+  const gatewayForSignal = (signal: AbortSignal) => {
+    const base = opts.gateway ?? buildNodeGateway({ cwd, signal, runId: skillOrigin.runId,
+      skillTools: skillWorkflow?.foregroundTools(), onSkillToolsUnavailable: (reason) => {
+        appendEvent(runDir, { ts: Date.now(), kind: 'skill_tools_unavailable', origin: skillOrigin, reason: redactSkillText(reason) });
+        if (!opts.quiet) process.stderr.write(c.warn(`${redactSkillText(reason)}\n`));
+      } });
+    return withSkillExecutionContext(base, skillSuffix, skillWorkflow);
+  };
 
   try {
+    try {
+      const skillConfig = loadNodeSkillLearningConfig(cwd, opts.skillWorkflow?.config, opts);
+      skillWorkflow = createNodeSkillWorkflow({ ...opts.skillWorkflow, config: skillConfig, origin: skillOrigin, cwd,
+        adapter: opts.adapter ?? 'claude-code', prompt: task, signal: controller.signal });
+      const context = await skillWorkflow.loadContext();
+      loadedSkills = context.loadedSkills;
+      skillSuffix = context.prompt.slice(task.length);
+      writeJson(join(runDir, 'skill-context.json'), { origin: skillOrigin, catalogRevision: context.catalogRevision, loadedSkills });
+    } catch (error) {
+      skillOutcome = { status: 'unavailable', origin: skillOrigin, reason: redactSkillText(`SKILL_CONTEXT_UNAVAILABLE: ${String(error)}`) };
+    }
+    const executionBase = gatewayForSignal(controller.signal);
     const resumeSnapshot = opts.resume && !opts.plannerOnly ? readResumeSnapshot(runDir) : null;
     if (!opts.quiet) {
       process.stderr.write(c.dim(`studio run: ${runId}\n`));
@@ -317,7 +364,7 @@ export async function runStudio(
           maxRetries: parseNumber(opts.maxRetries),
           timeoutSeconds: parseNumber(opts.timeout),
           nonInteractive: opts.interactive ? false : opts.nonInteractive ?? true,
-          gateway: opts.gateway,
+          gateway: executionBase,
           signal: controller.signal,
           onEvent: plannerEvents,
         });
@@ -409,6 +456,8 @@ export async function runStudio(
         plannerResult ?? emptyRunResult(),
         startedAt,
       );
+      json.loadedSkills = loadedSkills;
+      json.skillLearning = await finalizeSkills('', 'completed');
       writeJson(join(runDir, 'result.json'), json);
       emitResult(json, opts);
       return 0;
@@ -445,7 +494,7 @@ export async function runStudio(
     }
 
     let spentCalls = 0;
-    const baseGateway = opts.gateway ?? buildNodeGateway({ cwd, signal: controller.signal });
+    const baseGateway = executionBase;
     // Reserve a slice of the budget so the acceptance gate + report can still run
     // (a graceful closing pass) if the work phase exhausts its share. Sized to
     // the gate's voter count plus the report, clamped to leave real work budget.
@@ -508,6 +557,7 @@ export async function runStudio(
         harnessGraph,
         budget,
         prevResult: runResult,
+        gatewayForSignal,
         onSpent: (spent) => {
           spentCalls = spent;
           updateStore(store, { agentCalls: spentCalls });
@@ -530,6 +580,8 @@ export async function runStudio(
       : null;
     const verification = await maybeRunVerificationCommand(opts, cwd, runDir);
     if (verification) {
+      skillWorkflow?.onHostVerification({ toolCallId: `verify-command:${skillOrigin.runId}`, command: verification.command,
+        exitCode: verification.exitCode, output: `${verification.stdout}\n${verification.stderr}` });
       artifacts = withVerificationArtifacts(artifacts, verification);
     }
     // Objective checks the planner emitted: read-only file assertions always
@@ -559,6 +611,8 @@ export async function runStudio(
       modelVerdictPass,
       groundTruthPass,
     );
+    json.loadedSkills = loadedSkills;
+    json.skillLearning = await finalizeSkills(artifacts.report, json.success ? 'completed' : controller.signal.aborted ? 'cancelled' : 'failed');
     writeJson(join(runDir, 'result.json'), json);
     writeJson(join(runDir, 'run-summary.json'), buildRunSummary(json));
     if (opts.output) writeJson(resolve(process.cwd(), opts.output), json);
@@ -573,6 +627,7 @@ export async function runStudio(
     emitResult(json, opts);
     return json.success ? 0 : 1;
   } catch (err) {
+    await finalizeSkills('', controller.signal.aborted ? 'cancelled' : 'failed');
     const msg = errMsg(err);
     updateStore(store, {
       phase: 'error',
@@ -586,6 +641,20 @@ export async function runStudio(
   } finally {
     process.removeListener('SIGINT', onSigint);
   }
+}
+
+/** Transport wrapper only; shared loadSkillContext owns selection and full reads. */
+function withSkillExecutionContext(base: RunGateway, suffix: string, workflow: ReturnType<typeof createNodeSkillWorkflow> | undefined): RunGateway {
+  return {
+    ...base,
+    completeText: (request) => base.completeText({ ...request, prompt: request.prompt + suffix }),
+    spawnCliAgent: (prompt, adapter, request) => base.spawnCliAgent(prompt + suffix, adapter, {
+      ...request, onToolEvent: (event) => {
+        try { request.onToolEvent?.(event); } catch { /* Auxiliary runtime observer only. */ }
+        workflow?.onNativeToolEvent(event);
+      },
+    }),
+  };
 }
 
 function makeRunLogger(
@@ -727,6 +796,7 @@ interface ClosingPassArgs {
   harnessGraph: IRGraph;
   budget: StudioBudgetState;
   prevResult: RunResult;
+  gatewayForSignal?: (signal: AbortSignal) => RunGateway;
   onSpent: (spent: number) => void;
 }
 
@@ -760,7 +830,7 @@ async function runClosingPass(args: ClosingPassArgs): Promise<RunResult> {
   }
 
   const controller = new AbortController();
-  const closingBase = opts.gateway ?? buildNodeGateway({ cwd, signal: controller.signal });
+  const closingBase = args.gatewayForSignal?.(controller.signal) ?? opts.gateway ?? buildNodeGateway({ cwd, signal: controller.signal });
   const gateway = budgetGateway(closingBase, budget, onSpent, () => {
     appendEvent(runDir, {
       ts: Date.now(),

@@ -1,4 +1,5 @@
 import type { GatewayTextRequest } from '../types';
+import { thinkingPlanForRequest } from '../thinkingPlan';
 import {
   mergeUsageReports,
   usageReportFromOpenAI,
@@ -54,11 +55,16 @@ function openAICompatibleBody(
   model: string,
   includeUsage: boolean,
 ) {
+  // 思考深度：OpenAI 兼容体用标准 `reasoning_effort`（DeepSeek 族关闭思考时
+  // 用 `thinking: {type: disabled}`，由族表的 offBody 给出）。档位拼写与开关
+  // 字段全部来自 `thinkingLevels`，这里只做合并。
+  const plan = thinkingPlanForRequest(request);
   return {
     model,
     stream: true,
     ...(includeUsage ? { stream_options: { include_usage: true } } : {}),
     max_tokens: request.maxTokens ?? 4096,
+    ...(plan?.openaiBody ?? {}),
     messages: [
       { role: 'system', content: request.system },
       { role: 'user', content: openAICompatibleUserContent(request) },

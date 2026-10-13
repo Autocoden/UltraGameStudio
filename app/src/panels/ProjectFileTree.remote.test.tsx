@@ -11,6 +11,7 @@ import { resetSecureStorageForTests } from '@/lib/secureStorage';
 import { defaultComposer } from '@/store/sampleSessions';
 import { useStore } from '@/store/useStore';
 import ProjectFileTree from './ProjectFileTree';
+import { requestProjectRightPanelToggle } from './projectRightPanelEvents';
 
 const tauriMocks = vi.hoisted(() => ({
   listWorkspaceDirectory: vi.fn(async (rootPath: string, relativePath: string) => ({
@@ -52,6 +53,7 @@ async function renderProjectFileTree(): Promise<{
   await act(async () => {
     root.render(<ProjectFileTree />);
   });
+  await act(async () => requestProjectRightPanelToggle());
 
   return {
     container,

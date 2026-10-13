@@ -18,6 +18,8 @@ import {
 import { isRunnable, topoOrderExec } from '../core/topo';
 import { runFailureMeta } from './failure';
 import { newSessionId } from './gateway';
+import { SkillEvidenceCollector } from './skills/evidence';
+import type { SkillNativeToolEvent } from './skills/types';
 import { computeNodeHashes, validCachedNodeIds } from './node-hash';
 import { runSingleNode } from './run-node';
 import type { NodeRunResult, RunCallbacks, RunContext, RunResult } from './types';
@@ -316,156 +318,185 @@ export async function executeWorkflowDag(
   options: ExecuteWorkflowOptions = {},
 ): Promise<RunResult> {
   const runStartedAt = Date.now();
-  const adapter = context.selection.adapter;
-  const stillRunning = () => !callbacks.isCancelled();
-
-  const order = getRunnableNodes(workflow);
-  const resumeFromNodeId =
-    options.resumeFromNodeId &&
-    order.some((node) => node.id === options.resumeFromNodeId)
-      ? options.resumeFromNodeId
-      : null;
-
-  // Content-addressed resume (cf. DeepSeek-Code-Whale's per-call resume cache):
-  // a seeded output is only trustworthy if the node's spec AND all of its
-  // upstream specs are byte-identical to the run that produced it. We compute
-  // this run's Merkle node hashes once and intersect with the seed hashes; any
-  // node whose hash changed (it or an ancestor was edited) is NOT reusable, so
-  // it and its downstream re-run with fresh inputs. With no seed hashes we fall
-  // back to the legacy "reuse every seeded output by id" behaviour.
-  const nodeHashes = computeNodeHashes(workflow);
-  const seedOutputs = options.seedOutputs ?? {};
-  const reusable = options.seedNodeHashes
-    ? validCachedNodeIds(nodeHashes, options.seedNodeHashes)
-    : null; // null ⇒ legacy: trust every seeded id
-  const isReusable = (nodeId: string): boolean =>
-    reusable ? reusable.has(nodeId) : true;
-
-  const results = new Map<string, string>(
-    Object.entries(seedOutputs).filter(([nodeId]) => isReusable(nodeId)),
-  );
-  const deps = buildDependencyGraph(order, workflow);
-  const seedRunState = options.seedRunState ?? {};
-
-  // Share a warm claude session across linear agent chains so successors
-  // continue the predecessor's context instead of cold-starting (Fix 1). The
-  // chain's EXEC dependency keeps its nodes strictly sequential, so the shared
-  // session id is never used concurrently.
-  context.agentChains = context.manifestMode
-    ? undefined
-    : detectAgentChains(order, workflow, context);
-
-  const resumeIdx = resumeFromNodeId
-    ? order.findIndex((n) => n.id === resumeFromNodeId)
-    : -1;
-  const done = new Set<string>();
-  order.forEach((node, i) => {
-    if (results.has(node.id)) {
-      // Output present AND hash-valid (results was already filtered above).
-      done.add(node.id);
-    } else if (seedRunState[node.id] === 'success' && isReusable(node.id)) {
-      done.add(node.id);
-    } else if (resumeIdx >= 0 && i < resumeIdx && isReusable(node.id)) {
-      done.add(node.id);
+  const collectors = new Map<string, SkillEvidenceCollector>();
+  const previousSink = context.onToolEvent;
+  const origin = context.skillOrigin ? { ...context.skillOrigin } : undefined;
+  let evidenceOpen = true;
+  const nativeSink = (event: SkillNativeToolEvent) => {
+    if (!evidenceOpen) return;
+    if (origin && event.phase === 'end' && ['native-tool', 'host-check'].includes(event.provenance)) {
+      let collector = collectors.get(event.runId);
+      if (!collector) {
+        collector = new SkillEvidenceCollector({ ...origin, runId: event.runId });
+        collectors.set(event.runId, collector);
+        if (collectors.size > 32) collectors.delete(collectors.keys().next().value!);
+      }
+      collector.collect([event]);
     }
-  });
-  if (resumeFromNodeId) done.delete(resumeFromNodeId);
+    previousSink?.(event);
+  };
+  context.onToolEvent = nativeSink;
+  try {
+    const adapter = context.selection.adapter;
+    const stillRunning = () => !callbacks.isCancelled();
 
-  const nodeResults: Record<string, NodeRunResult> = {};
-  // Expose the live accumulator so nested composite-body schedulers record their
-  // body nodes' terminal results into the same aggregate RunResult.
-  context.nodeResults = nodeResults;
-  let errored = false;
-  let failedNodeId: string | null = null;
-  let runError: Record<string, unknown> | null = null;
+    const order = getRunnableNodes(workflow);
+    const resumeFromNodeId =
+      options.resumeFromNodeId &&
+      order.some((node) => node.id === options.resumeFromNodeId)
+        ? options.resumeFromNodeId
+        : null;
 
-  const processNode = async (node: IRNode): Promise<boolean> => {
-    const outcome = await runSingleNode(
-      context,
-      callbacks,
-      node,
-      workflow,
-      results,
-      nodeResults,
+    // Content-addressed resume (cf. DeepSeek-Code-Whale's per-call resume cache):
+    // a seeded output is only trustworthy if the node's spec AND all of its
+    // upstream specs are byte-identical to the run that produced it. We compute
+    // this run's Merkle node hashes once and intersect with the seed hashes; any
+    // node whose hash changed (it or an ancestor was edited) is NOT reusable, so
+    // it and its downstream re-run with fresh inputs. With no seed hashes we fall
+    // back to the legacy "reuse every seeded output by id" behaviour.
+    const nodeHashes = computeNodeHashes(workflow);
+    const seedOutputs = options.seedOutputs ?? {};
+    const reusable = options.seedNodeHashes
+      ? validCachedNodeIds(nodeHashes, options.seedNodeHashes)
+      : null; // null ⇒ legacy: trust every seeded id
+    const isReusable = (nodeId: string): boolean =>
+      reusable ? reusable.has(nodeId) : true;
+
+    const results = new Map<string, string>(
+      Object.entries(seedOutputs).filter(([nodeId]) => isReusable(nodeId)),
     );
-    if (outcome.kind === 'ok') return true;
-    if (outcome.kind === 'cancelled') return false;
-    // Terminal failure — only the first becomes the run's error / resume point.
-    if (!errored) {
-      errored = true;
-      failedNodeId = node.id;
-      runError = runFailureMeta(node, adapter, outcome.failure);
-    }
-    return false;
-  };
+    const deps = buildDependencyGraph(order, workflow);
+    const seedRunState = options.seedRunState ?? {};
 
-  const concurrency = context.gateway.effectiveConcurrency(
-    context.concurrency,
-    context.selection,
-  );
-  const claimed = new Set<string>(done);
+    // Share a warm claude session across linear agent chains so successors
+    // continue the predecessor's context instead of cold-starting (Fix 1). The
+    // chain's EXEC dependency keeps its nodes strictly sequential, so the shared
+    // session id is never used concurrently.
+    context.agentChains = context.manifestMode
+      ? undefined
+      : detectAgentChains(order, workflow, context);
 
-  await new Promise<void>((resolve) => {
-    let active = 0;
-    let finished = false;
-    const finish = () => {
-      if (!finished) {
-        finished = true;
-        resolve();
+    const resumeIdx = resumeFromNodeId
+      ? order.findIndex((n) => n.id === resumeFromNodeId)
+      : -1;
+    const done = new Set<string>();
+    order.forEach((node, i) => {
+      if (results.has(node.id)) {
+        // Output present AND hash-valid (results was already filtered above).
+        done.add(node.id);
+      } else if (seedRunState[node.id] === 'success' && isReusable(node.id)) {
+        done.add(node.id);
+      } else if (resumeIdx >= 0 && i < resumeIdx && isReusable(node.id)) {
+        done.add(node.id);
       }
+    });
+    if (resumeFromNodeId) done.delete(resumeFromNodeId);
+
+    const nodeResults: Record<string, NodeRunResult> = {};
+    // Expose the live accumulator so nested composite-body schedulers record their
+    // body nodes' terminal results into the same aggregate RunResult.
+    context.nodeResults = nodeResults;
+    let errored = false;
+    let failedNodeId: string | null = null;
+    let runError: Record<string, unknown> | null = null;
+
+    const processNode = async (node: IRNode): Promise<boolean> => {
+      const outcome = await runSingleNode(
+        context,
+        callbacks,
+        node,
+        workflow,
+        results,
+        nodeResults,
+      );
+      if (outcome.kind === 'ok') return true;
+      if (outcome.kind === 'cancelled') return false;
+      // Terminal failure — only the first becomes the run's error / resume point.
+      if (!errored) {
+        errored = true;
+        failedNodeId = node.id;
+        runError = runFailureMeta(node, adapter, outcome.failure);
+      }
+      return false;
     };
 
-    const pickReady = (): IRNode | null => {
-      for (const node of order) {
-        if (claimed.has(node.id)) continue;
-        let ready = true;
-        for (const dep of deps.get(node.id)!) {
-          if (!done.has(dep)) {
-            ready = false;
-            break;
-          }
+    const concurrency = context.gateway.effectiveConcurrency(
+      context.concurrency,
+      context.selection,
+    );
+    const claimed = new Set<string>(done);
+
+    await new Promise<void>((resolve) => {
+      let active = 0;
+      let finished = false;
+      const finish = () => {
+        if (!finished) {
+          finished = true;
+          resolve();
         }
-        if (ready) return node;
-      }
-      if (active === 0) {
-        for (const node of order) if (!claimed.has(node.id)) return node;
-      }
-      return null;
+      };
+
+      const pickReady = (): IRNode | null => {
+        for (const node of order) {
+          if (claimed.has(node.id)) continue;
+          let ready = true;
+          for (const dep of deps.get(node.id)!) {
+            if (!done.has(dep)) {
+              ready = false;
+              break;
+            }
+          }
+          if (ready) return node;
+        }
+        if (active === 0) {
+          for (const node of order) if (!claimed.has(node.id)) return node;
+        }
+        return null;
+      };
+
+      const pump = (): void => {
+        if (finished) return;
+        if (!stillRunning()) {
+          if (active === 0) finish();
+          return;
+        }
+        while (active < concurrency && !errored && stillRunning()) {
+          const next = pickReady();
+          if (!next) break;
+          claimed.add(next.id);
+          active += 1;
+          void processNode(next).then((ok) => {
+            active -= 1;
+            if (ok) done.add(next.id);
+            pump();
+          });
+        }
+        if (active === 0 && (errored || !stillRunning() || !pickReady())) {
+          finish();
+        }
+      };
+
+      pump();
+    });
+
+    const outputs = Object.fromEntries(results);
+    const skillEvidence = [...collectors.values()].flatMap((collector) => collector.snapshot()).slice(-256);
+    return {
+      skillEvidence,
+      evidence: skillEvidence.map((item) => ({ id: item.evidenceId, kind: 'command', title: item.toolName ?? 'Tool',
+        status: item.status, summary: item.summary, snippet: item.result, exitCode: item.exitCode,
+        timestampMs: item.occurredAt, source: item.provenance,
+        meta: { origin: item.origin, toolCallId: item.toolCallId, parentId: item.parentId } })),
+      success: !errored && stillRunning(),
+      durationMs: Date.now() - runStartedAt,
+      nodeResults,
+      outputs,
+      failedNodeId: failedNodeId ?? undefined,
+      error: runError,
+      nodeHashes,
     };
-
-    const pump = (): void => {
-      if (finished) return;
-      if (!stillRunning()) {
-        if (active === 0) finish();
-        return;
-      }
-      while (active < concurrency && !errored && stillRunning()) {
-        const next = pickReady();
-        if (!next) break;
-        claimed.add(next.id);
-        active += 1;
-        void processNode(next).then((ok) => {
-          active -= 1;
-          if (ok) done.add(next.id);
-          pump();
-        });
-      }
-      if (active === 0 && (errored || !stillRunning() || !pickReady())) {
-        finish();
-      }
-    };
-
-    pump();
-  });
-
-  const outputs = Object.fromEntries(results);
-  return {
-    success: !errored && stillRunning(),
-    durationMs: Date.now() - runStartedAt,
-    nodeResults,
-    outputs,
-    failedNodeId: failedNodeId ?? undefined,
-    error: runError,
-    nodeHashes,
-  };
+  } finally {
+    evidenceOpen = false;
+    if (context.onToolEvent === nativeSink) context.onToolEvent = previousSink;
+  }
 }

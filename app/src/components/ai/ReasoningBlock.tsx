@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Brain, ChevronRight } from 'lucide-react';
 import Markdown from './Markdown';
+import type { OpenFileFn } from './FileChip';
 import { type SearchHighlightState } from './lib/searchHighlight';
 import { useStore } from '@/store/useStore';
 import { t } from '@/lib/i18n';
@@ -18,11 +19,18 @@ export default function ReasoningBlock({
   done,
   streaming,
   searchState = null,
+  expanded,
+  onOpenFile,
+  cwd,
 }: {
   text: string;
   done: boolean;
   streaming: boolean;
   searchState?: SearchHighlightState | null;
+  /** The execution-process disclosure owns expansion when this is supplied. */
+  expanded?: boolean;
+  onOpenFile?: OpenFileFn;
+  cwd?: string;
 }) {
   const [open, setOpen] = useState(true);
   const locale = useStore((s) => s.locale);
@@ -77,7 +85,12 @@ export default function ReasoningBlock({
 
   return (
     <div className="ai-reasoning my-2 overflow-hidden rounded-lg border border-border-soft">
-      <button
+      {expanded != null ? (
+        <div className="ai-reasoning__toggle flex items-center gap-2 px-2.5 py-1.5 text-xs">
+          <Brain size={13} className="ai-reasoning__icon shrink-0" />
+          <span className={!done ? 'ai-reasoning__live' : ''}>{header}</span>
+        </div>
+      ) : <button
         type="button"
         onClick={toggle}
         aria-expanded={open}
@@ -89,15 +102,15 @@ export default function ReasoningBlock({
         />
         <Brain size={13} className="ai-reasoning__icon shrink-0" />
         <span className={!done ? 'ai-reasoning__live' : ''}>{header}</span>
-      </button>
+      </button>}
       <div
         className="ai-reasoning__body grid transition-[grid-template-rows] duration-200 ease-out"
-        style={{ gridTemplateRows: open ? '1fr' : '0fr' }}
+        style={{ gridTemplateRows: (expanded ?? open) ? '1fr' : '0fr' }}
       >
         <div className="min-h-0 overflow-hidden">
           <div className="ai-reasoning__inner break-words border-t border-border-soft px-3 py-2 text-[12px] leading-relaxed">
             {text ? (
-              <Markdown text={text} streaming={streaming} searchState={searchState} />
+              <Markdown text={text} streaming={streaming} searchState={searchState} onOpenFile={onOpenFile} cwd={cwd} />
             ) : streaming ? (
               '…'
             ) : (

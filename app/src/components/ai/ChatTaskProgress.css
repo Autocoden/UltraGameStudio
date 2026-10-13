@@ -1,0 +1,17 @@
+.ugs-task-running-dots circle {
+  fill: currentColor;
+  opacity: 0.2;
+  animation: ugs-task-dot-roll 0.8s linear infinite;
+}
+
+@keyframes ugs-task-dot-roll {
+  0% { opacity: 1; }
+  100% { opacity: 0.2; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ugs-task-running-dots circle {
+    animation: none;
+    opacity: 0.8;
+  }
+}

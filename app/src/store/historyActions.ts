@@ -31,11 +31,11 @@ import {
   loadSessionTree,
   beginHistoryNavigation,
   isLatestHistoryNavigation,
-  chatWorkflow,
   restoreWorkflowRunSnapshot,
   runProgressFromSnapshot,
   emptyRunProgress,
   canvasViewportForSession,
+  historicalGatewaySelectionFromMessages,
   composerPatchForSession,
   composerDraftPatchForSessionFromRecord,
   defaultSessionComposer,
@@ -56,6 +56,7 @@ import type { Session, ScheduledTaskConfig, SessionComposerSettings } from './ty
 // --- same-dir helpers ---
 import { historyStore } from './history/store';
 import { HISTORY_SCHEMA_VERSION } from './history/types';
+import { workflowSessionKeyId } from './sessionKey';
 
 // --- lib leaf imports ---
 import {
@@ -63,7 +64,11 @@ import {
   workspaceHistoryWithRecent,
   workspacePathKey,
 } from '@/lib/workspaceHistory';
-import { workflowDefaultGatewaySelection } from '@/lib/modelGateway/resolver';
+import {
+  workflowDefaultGatewaySelection,
+  withoutWorkflowGatewayDefaults,
+} from '@/lib/modelGateway/resolver';
+import { simpleBlueprint } from '@/core/defaultBlueprint';
 import { loadComposer } from '@/lib/composerStorage';
 import { maybeRunCcSwitchAutoImportOnFirstRun } from '@/lib/ccSwitchAutoImport';
 import { isTauri, prepareIsolatedWorkspace } from '@/lib/tauri';
@@ -278,13 +283,18 @@ async function activateWorkspacePath(path: string): Promise<void> {
     ? await historyStore.getSession(workspace.id, active.id)
     : null;
   if (!isLatestHistoryNavigation(navigationVersion)) return;
-  const activeRecordIsSimpleChat =
-    activeRecord?.workflow?.meta?.simple === true;
-  const workflow =
-    activeRecordIsSimpleChat && activeRecord?.workflow
-      ? restoreWorkflowRunSnapshot(activeRecord.workflow, activeRecord.meta)
-      : chatWorkflow(activeRecord?.title, state.locale);
-  const runProgress = activeRecordIsSimpleChat
+  const recordWorkflow = activeRecord?.workflow
+    ? restoreWorkflowRunSnapshot(activeRecord.workflow, activeRecord.meta)
+    : null;
+  const historicalGatewaySelection = historicalGatewaySelectionFromMessages(
+    activeRecord?.messages ?? [],
+  );
+  const workflow = recordWorkflow
+    ? recordWorkflow
+    : withoutWorkflowGatewayDefaults(
+        simpleBlueprint(activeRecord?.title, state.locale),
+      );
+  const runProgress = recordWorkflow
     ? runProgressFromSnapshot(workflow, workflow.meta.run ?? null)
     : emptyRunProgress();
   const canvasViewport = canvasViewportForSession(
@@ -306,6 +316,7 @@ async function activateWorkspacePath(path: string): Promise<void> {
         trimmed,
         workspaceFoldersFromMetadata(workspace.metadata),
       ),
+      historicalGatewaySelection,
     );
     const workspaceHistory = workspaceHistoryWithRecent(
       trimmed,
@@ -333,7 +344,7 @@ async function activateWorkspacePath(path: string): Promise<void> {
       composerBySession: composerPatch.composerBySession,
       workspaceHistory,
       ...runProgress,
-      canvasViewport: activeRecordIsSimpleChat ? canvasViewport : null,
+      canvasViewport: recordWorkflow ? canvasViewport : null,
       mode: 'design',
       ...composerDraftPatchForSessionFromRecord(s, sessionKey, activeRecord?.meta),
     };
@@ -419,14 +430,44 @@ async function initHistoryFromDisk(): Promise<void> {
     const activeRecord = active
       ? await historyStore.getSession(workspace.id, active.id)
       : null;
+
+    // Rehydrate in-memory `composerDrafts` for sessions that still have a
+    // persisted `meta.composerDraft` but were not activated this run. Without
+    // this the sidebar draft badge / draft-first ordering silently degrades to
+    // pure time ordering after a restart, because `draftSessionKeys` only reads
+    // the in-memory map and the per-session disk→memory restore only runs on
+    // session activation. We scan every session in the active workspace once
+    // here: `historyStore.getSession` is cached, so the disk read also prewarms
+    // the record cache for later activations.
+    const draftByKey: Record<string, string> = {};
+    await Promise.all(
+      sessions.map(async (summary) => {
+        if (active && summary.id === active.id) return;
+        const record = await historyStore.getSession(workspace.id, summary.id);
+        const text = record?.meta?.composerDraft;
+        if (typeof text === 'string' && text.trim().length > 0) {
+          draftByKey[
+            workflowSessionKeyId({
+              workspaceId: workspace.id,
+              sessionId: summary.id,
+            })
+          ] = text;
+        }
+      }),
+    );
     const currentState = useStore.getState();
-    const activeRecordIsSimpleChat =
-      activeRecord?.workflow?.meta?.simple === true;
-    const workflow =
-      activeRecordIsSimpleChat && activeRecord?.workflow
-        ? restoreWorkflowRunSnapshot(activeRecord.workflow, activeRecord.meta)
-        : chatWorkflow(activeRecord?.title, currentState.locale);
-    const runProgress = activeRecordIsSimpleChat
+    const recordWorkflow = activeRecord?.workflow
+      ? restoreWorkflowRunSnapshot(activeRecord.workflow, activeRecord.meta)
+      : null;
+    const historicalGatewaySelection = historicalGatewaySelectionFromMessages(
+      activeRecord?.messages ?? [],
+    );
+    const workflow = recordWorkflow
+      ? recordWorkflow
+      : withoutWorkflowGatewayDefaults(
+          simpleBlueprint(activeRecord?.title, currentState.locale),
+        );
+    const runProgress = recordWorkflow
       ? runProgressFromSnapshot(workflow, workflow.meta.run ?? null)
       : emptyRunProgress();
     const canvasViewport = canvasViewportForSession(
@@ -449,7 +490,16 @@ async function initHistoryFromDisk(): Promise<void> {
           workspace: workspace.path || s.composer.workspace,
           workspaceFolders: workspaceFoldersFromMetadata(workspace.metadata),
         },
+        historicalGatewaySelection,
       );
+      const draftPatch = composerDraftPatchForSessionFromRecord(
+        s,
+        sessionKey,
+        activeRecord?.meta,
+      );
+      // Merge bulk-rehydrated drafts for non-active sessions. The active
+      // session's entry from `draftPatch` always wins over the bulk map.
+      const composerDrafts = { ...draftByKey, ...draftPatch.composerDrafts };
       return {
         historyReady: true,
         historyError: null,
@@ -465,13 +515,10 @@ async function initHistoryFromDisk(): Promise<void> {
         composer: composerPatch.composer,
         composerBySession: composerPatch.composerBySession,
         ...runProgress,
-        canvasViewport: activeRecordIsSimpleChat ? canvasViewport : null,
+        canvasViewport: recordWorkflow ? canvasViewport : null,
         mode: 'design',
-        ...composerDraftPatchForSessionFromRecord(
-          s,
-          sessionKey,
-          activeRecord?.meta,
-        ),
+        composerDrafts,
+        composerDraft: draftPatch.composerDraft,
       };
     });
     void maybeRunCcSwitchAutoImportOnFirstRun();
