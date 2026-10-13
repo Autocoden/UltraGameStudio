@@ -3,6 +3,7 @@ import {
   resolveCliGatewayRoute,
 } from "@/lib/modelGateway/modelGateway";
 import type { GatewaySelection, GatewayTextRequest } from "@/lib/modelGateway/types";
+import { __resetTaskExecutionsForTests, getTaskExecution, reserveTaskExecution } from "@/lib/taskExecution";
 import {
   getDefaultGatewaySelection,
   getExplicitActiveGatewaySelection,
@@ -473,6 +474,11 @@ export async function runOpenSpecWorkspaceAction(
   if (!input.card.openSpecChange) {
     throw new Error("此任务尚未绑定 OpenSpec 变更");
   }
+  const execution = reserveTaskExecution(input.boardKey, input.card.id, "openspec");
+  if (!execution) throw new Error("此任务已有动作正在执行");
+  const stopped = () => {
+    if (execution.controller.signal.aborted) throw new Error("已取消");
+  };
 
   sequence += 1;
   const id =
@@ -488,9 +494,6 @@ export async function runOpenSpecWorkspaceAction(
       "[" + new Date().toLocaleTimeString() + "] " + label + "\n",
     startedAt: Date.now(),
   };
-  publish(key, { ...snapshot, activeRun: run });
-
-  const prompt = buildOpenSpecActionPrompt(input);
   const createsPlanningReview =
     input.action === "new" || input.action === "update";
   const reviewCacheKey = "openspec-planning-review-" + id;
@@ -504,6 +507,8 @@ export async function runOpenSpecWorkspaceAction(
     cacheCreationTokens?: number;
   } = {};
   try {
+    publish(key, { ...snapshot, activeRun: run });
+    const prompt = buildOpenSpecActionPrompt(input);
     if (createsPlanningReview) {
       try {
         await ensureWorkspaceChangesBaseline(input.cwd, reviewCacheKey);
@@ -512,7 +517,9 @@ export async function runOpenSpecWorkspaceAction(
         // A non-git workspace can still run the action without a diff review.
       }
     }
+    stopped();
     const route = await resolveActionRoute(input.card, input.action);
+    stopped();
     const agentPhase = actionAgentPhase(input.action);
     const thinkingLevel =
       input.card.agentProfile === "custom"
@@ -529,6 +536,8 @@ export async function runOpenSpecWorkspaceAction(
       cwd: input.cwd,
       forceCli: true,
       runId: id,
+      signal: execution.controller.signal,
+      waitForExitOnAbort: true,
       thinkingLevel,
       onDelta: (chunk) => {
         updateActive(key, id, (current) => ({
@@ -552,6 +561,7 @@ export async function runOpenSpecWorkspaceAction(
       },
     };
     let text = await completeGatewayText(request);
+    stopped();
     if (createsPlanningReview) {
       // One model turn may produce only one artifact. The CLI status, not the
       // model's completion message, decides when planning has finished.
@@ -561,6 +571,7 @@ export async function runOpenSpecWorkspaceAction(
         const current = loadSnapshot(key).activeRun;
         if (!current || current.id !== id || current.state === "cancelling") throw new Error("已取消");
         const result = await getOpenSpecChangeStatus(input.cwd, input.card.openSpecChange);
+        stopped();
         if (!result.success) throw new Error(result.stderr || result.stdout || "无法读取 OpenSpec 工件状态");
         const status = result.json as { isComplete?: boolean; isPlanningComplete?: boolean; artifacts?: Array<{ status: string }> } | null;
         const complete = status?.artifacts?.length
@@ -568,6 +579,7 @@ export async function runOpenSpecWorkspaceAction(
           : status?.isComplete === true || status?.isPlanningComplete === true;
         if (complete) {
           const validation = await validateOpenSpecChange(input.cwd, input.card.openSpecChange);
+          stopped();
           if (!validation.success) throw new Error("OpenSpec 严格校验失败：" + (validation.stderr || validation.stdout));
           break;
         }
@@ -578,6 +590,7 @@ export async function runOpenSpecWorkspaceAction(
         updateActive(key, id, run => ({ ...run, output: appendOutput(run.output, "\n[UGS] 继续生成缺失的 OpenSpec 工件…\n") }));
         text = await completeGatewayText({ ...request, userContent: prompt.userContent +
           "\n\n官方状态仍有未完成工件，请按依赖顺序继续读取 openspec instructions 并写入对应 outputPath，不要只返回摘要：\n" + statusText });
+        stopped();
       }
     }
     const latest = loadSnapshot(key).activeRun;
@@ -618,6 +631,7 @@ export async function runOpenSpecWorkspaceAction(
         // The action result remains valid when the optional diff cannot load.
       }
     }
+    stopped();
     const completed = finishRun(key, id, "succeeded");
     if (!completed) throw new Error("OpenSpec 动作状态已失效");
     if (planningReview) {
@@ -650,9 +664,9 @@ export async function runOpenSpecWorkspaceAction(
   } catch (reason) {
     const message = reason instanceof Error ? reason.message : String(reason);
     const current = loadSnapshot(key).activeRun;
-    const cancelled =
+    const cancelled = execution.controller.signal.aborted || (
       current?.id === id &&
-      (current.state === "cancelling" || message === "已取消");
+      (current.state === "cancelling" || message === "已取消"));
     const completed = finishRun(
       key,
       id,
@@ -672,6 +686,8 @@ export async function runOpenSpecWorkspaceAction(
       });
     }
     throw reason;
+  } finally {
+    execution.release();
   }
 }
 
@@ -683,12 +699,8 @@ export async function cancelOpenSpecWorkspaceAction(
   const active = loadSnapshot(key).activeRun;
   if (!active || active.state !== "running") return;
   updateActive(key, active.id, (run) => ({ ...run, state: "cancelling" }));
-  try {
-    await cancelAiCli(active.id);
-  } catch (reason) {
-    updateActive(key, active.id, (run) => ({ ...run, state: "running" }));
-    throw reason;
-  }
+  getTaskExecution(boardKey, cardId)?.controller.abort();
+  await cancelAiCli(active.id);
 }
 
 export async function sendOpenSpecSessionInput(
@@ -822,6 +834,7 @@ export function resolveOpenSpecAutomaticAction(
 }
 
 export function __resetOpenSpecActionsForTests(): void {
+  __resetTaskExecutionsForTests();
   snapshots.clear();
   listeners.clear();
   sequence = 0;

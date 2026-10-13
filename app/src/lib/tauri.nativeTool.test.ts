@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { aiEditViaCli } from './tauri';
+import { __resetTaskExecutionsForTests, getTaskExecution, reserveTaskExecution } from './taskExecution';
 import type { SkillNativeToolEvent } from '@/runtime/skills/types';
 
 const ipc = vi.hoisted(() => ({ invoke: vi.fn(), listen: vi.fn() }));
@@ -13,6 +14,7 @@ const listeners = new Map<string, (event: { payload: unknown }) => void>();
 const unlisteners = new Map<string, ReturnType<typeof vi.fn>>();
 
 beforeEach(() => {
+  __resetTaskExecutionsForTests();
   for (const key of originals.keys()) delete (globalThis as Record<string, unknown>)[key];
   Object.defineProperty(globalThis, 'isTauri', { configurable: true, value: true });
   ipc.invoke.mockReset();
@@ -76,13 +78,13 @@ describe('desktop native tool evidence callback', () => {
     expect(unlisteners.get('ugs-cli-tool')).toHaveBeenCalledOnce();
   });
 
-  it('aborts a pending source barrier without ever granting native authority', async () => {
+  it.each([undefined, true])('aborts a pending source barrier before dispatch with native settlement %s', async (waitForExitOnAbort) => {
     const controller = new AbortController();
     const source = { hostId: 'local', workspaceId: 'workspace-a', sessionId: 'session-a',
       turnId: 'source-turn', runId: 'source-main', cwd: 'E:/fixture-project' };
     const run = aiEditViaCli('prompt', 'claude', { runId: 'child-pending', cwd: source.cwd,
       skillTools: { source, config: { enabled: true, mode: 'auto-safe' }, ready: new Promise<void>(() => {}) },
-      signal: controller.signal });
+      signal: controller.signal, waitForExitOnAbort });
     controller.abort();
     const result = await Promise.race([run.then(() => 'completed', (error: Error) => error.name),
       new Promise<string>((resolve) => setTimeout(() => resolve('hanging'), 40))]);
@@ -115,6 +117,28 @@ describe('desktop native tool evidence callback', () => {
       ['cancel_ai_cli', { runId: 'abort-native-request' }],
     ]);
     expect(unlisteners.get('ugs-cli-tool')).toHaveBeenCalledOnce();
+  });
+
+  it('keeps a task reserved after abort until native exit while cleaning subscriptions promptly', async () => {
+    const execution = reserveTaskExecution('board', 'card', 'openspec')!;
+    let finish!: (value: string) => void;
+    ipc.invoke.mockImplementation((command: string) => command === 'cancel_ai_cli'
+      ? Promise.resolve() : new Promise<string>((resolve) => { finish = resolve; }));
+    const run = aiEditViaCli('prompt', 'codex', { runId: 'reserved-task',
+      onTool: vi.fn(), signal: execution.controller.signal, waitForExitOnAbort: true })
+      .finally(execution.release);
+    const outcome = expect(run).rejects.toMatchObject({ name: 'AbortError' });
+    await vi.waitFor(() => expect(ipc.invoke).toHaveBeenCalledWith('ai_cli', expect.anything()));
+    execution.controller.abort();
+    await vi.waitFor(() => expect(unlisteners.get('ugs-cli-tool')).toHaveBeenCalledOnce());
+    expect(getTaskExecution('board', 'card')).toBe(execution);
+    expect(reserveTaskExecution('board', 'card', 'runner')).toBeNull();
+    finish('native exited');
+    await outcome;
+    expect(getTaskExecution('board', 'card')).toBeNull();
+    const next = reserveTaskExecution('board', 'card', 'runner');
+    expect(next).not.toBeNull();
+    next?.release();
   });
 
   it('disposes already-subscribed listeners when the native subscription fails', async () => {

@@ -6,6 +6,7 @@ import {
   getDefaultGatewaySelection,
   getExplicitActiveGatewaySelection,
   resetGatewayConfigStoreForTests,
+  setActiveGatewaySelection,
 } from "./gatewayConfig";
 
 const ZCODE_PROVIDER = {
@@ -37,6 +38,26 @@ beforeEach(() => {
 });
 
 describe("gateway active selection recovery", () => {
+  it.each(["codex", "zcode"] as const)(
+    "preserves the explicit system %s selection with configured providers",
+    (adapter) => {
+      window.localStorage.setItem(
+        GATEWAY_CONFIG_STORAGE,
+        JSON.stringify({ version: 1, providers: [ZCODE_PROVIDER] }),
+      );
+      const selection = {
+        adapter,
+        modelClass: "default",
+        systemDefault: true,
+        thinkingLevel: "high",
+      };
+      setActiveGatewaySelection(selection);
+
+      expect(getExplicitActiveGatewaySelection()).toEqual(selection);
+      expect(getActiveGatewaySelection()).toEqual(selection);
+    },
+  );
+
   it("rejects a stale raw Claude selection and falls back to configured GLM", () => {
     window.localStorage.setItem(
       GATEWAY_CONFIG_STORAGE,

@@ -55,6 +55,7 @@ import {
   type TaskSubtask,
 } from "./taskBoard";
 import { syncTaskArtifacts } from "./taskArtifacts";
+import { __resetTaskExecutionsForTests, getTaskExecution, reserveTaskExecution, subscribeTaskExecutions } from "./taskExecution";
 import { parseStandardSubtasks, standardPlanIssues, orderStandardSubtasks } from "./standardPlan";
 
 type TaskAgentPhase = keyof TaskPhaseThinking;
@@ -91,6 +92,11 @@ const running = new Set<string>();
 const stopping = new Set<string>();
 const taskStreams = new Map<string, RunnerTaskStream>();
 const boardParallel = new Map<string, number>();
+const waitingBoards = new Map<string, RunnerContext>();
+subscribeTaskExecutions((boardKey) => {
+  const ctx = waitingBoards.get(boardKey);
+  if (ctx) queueMicrotask(() => pumpBoard(boardKey, ctx));
+});
 let maxParallel = loadMaxParallel();
 let streamRevision = 0;
 
@@ -271,7 +277,7 @@ export function __publishTaskStreamForTests(
 }
 
 function findQueuedCard(boardKey: string): TaskCard | null {
-  return getBoardTasks(boardKey).find((c) => c.status === "queue") ?? null;
+  return getBoardTasks(boardKey).find((c) => c.status === "queue" && !getTaskExecution(boardKey, c.id)) ?? null;
 }
 
 /**
@@ -279,6 +285,7 @@ function findQueuedCard(boardKey: string): TaskCard | null {
  * Call again whenever the board changes or a task finishes — it is idempotent.
  */
 export function pumpBoard(boardKey: string, ctx: RunnerContext): void {
+  waitingBoards.delete(boardKey);
   if (!tauriAvailable()) return;
   if (!ctx.cwd.trim()) return; // execution needs a workspace
   for (;;) {
@@ -287,17 +294,23 @@ export function pumpBoard(boardKey: string, ctx: RunnerContext): void {
     ).length;
     if (boardRunning >= getMaxParallel(boardKey)) return;
     const card = findQueuedCard(boardKey);
-    if (!card) return;
+    if (!card) {
+      if (getBoardTasks(boardKey).some((c) => c.status === "queue")) waitingBoards.set(boardKey, ctx);
+      return;
+    }
     const key = runKey(boardKey, card.id);
     if (running.has(key)) {
       // The queued head is already executing (stale column state); wait for it.
       return;
     }
+    const execution = reserveTaskExecution(boardKey, card.id, "runner");
+    if (!execution) continue;
     running.add(key);
     emit();
-    void executeCard(boardKey, card.id, card, ctx).finally(() => {
+    void executeCard(boardKey, card.id, card, ctx, execution.controller.signal).finally(() => {
       running.delete(key);
       stopping.delete(key);
+      execution.release();
       emit();
       // A slot freed up — pick up the next queued task, if any.
       pumpBoard(boardKey, ctx);
@@ -633,6 +646,7 @@ async function executeCard(
   cardId: string,
   card: TaskCard,
   ctx: RunnerContext,
+  signal: AbortSignal,
 ): Promise<void> {
   const runId = executionRunId(boardKey, cardId);
   try {
@@ -673,7 +687,7 @@ async function executeCard(
         } as GatewaySelection)
       : route;
     const stopped = () => {
-      if (stopping.has(runKey(boardKey, cardId))) throw new Error("手动停止");
+      if (signal.aborted) throw new Error("手动停止");
     };
     const pauseForInput = (needsInput: TaskNeedsInputDecisions) => {
       updateTaskExecution(boardKey, cardId, { needsInput });
@@ -721,6 +735,7 @@ async function executeCard(
       const startedAt = Date.now();
       startTaskStream(boardKey, cardId, phase, startedAt);
       await persistTaskArtifacts(getTaskStream(boardKey, cardId));
+      stopped();
       const resolvedAgentPhase: TaskAgentPhase =
         agentPhase ??
         (planning ? "planning" : phase === "reviewing" ? "qa" : "coding");
@@ -736,8 +751,9 @@ async function executeCard(
         cacheReadTokens?: number;
         cacheCreationTokens?: number;
       } = {};
+      let text: string;
       try {
-        const text = await completeGatewayText({
+        text = await completeGatewayText({
           route:
             resolvedAgentPhase === "spec"
               ? specRoute
@@ -758,6 +774,8 @@ async function executeCard(
           cwd,
           forceCli: true,
           runId,
+          signal,
+          waitForExitOnAbort: true,
           thinkingLevel,
           onDelta: (chunk) => appendTaskStream(boardKey, cardId, phase, chunk),
           onUsage: (next) => {
@@ -786,7 +804,6 @@ async function executeCard(
             : {}),
         });
         await persistTaskArtifacts(null);
-        return text;
       } catch (error) {
         const streamText = getTaskStream(boardKey, cardId)?.text || "";
         appendTaskRun(boardKey, cardId, {
@@ -805,6 +822,8 @@ async function executeCard(
         await persistTaskArtifacts(null);
         throw error;
       }
+      stopped();
+      return text;
     };
 
     updateTaskExecution(boardKey, cardId, { needsInput: undefined });
@@ -987,6 +1006,7 @@ async function executeCard(
       }
 
       const tasksMarkdown = await readOpenSpecTasks(cwd, openSpecChange);
+      stopped();
       const parsedSubtasks = openSpecSubtasks(card.id, tasksMarkdown);
       if (!parsedSubtasks.length) {
         throw new Error("OpenSpec tasks.md 没有可执行的 Markdown 复选任务");
@@ -1072,6 +1092,7 @@ async function executeCard(
             ),
           });
           await persistTaskArtifacts(null, usesStandardWorkflow);
+          stopped();
         } catch (error) {
           const latest =
             getBoardTasks(boardKey).find((item) => item.id === cardId)
@@ -1191,7 +1212,10 @@ async function executeCard(
 
 /** Cancel the in-flight execution of a task; it lands in human_review as failed. */
 export function stopTask(boardKey: string, cardId: string): void {
+  const execution = getTaskExecution(boardKey, cardId);
+  if (execution?.owner !== "runner") return;
   stopping.add(runKey(boardKey, cardId));
+  execution.controller.abort();
   void cancelAiCli(`tbrun_${boardKey}_${cardId}`).catch(() => {});
 }
 
@@ -1222,6 +1246,8 @@ export async function steerTask(
 
 /** Test hook: reset in-memory runner state (localStorage is managed by the test). */
 export function __resetRunnerForTests(): void {
+  __resetTaskExecutionsForTests();
+  waitingBoards.clear();
   running.clear();
   stopping.clear();
   taskStreams.clear();

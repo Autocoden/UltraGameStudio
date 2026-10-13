@@ -3,6 +3,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { TaskCard } from "@/lib/taskBoard";
 import TaskOpenSpecModal from "./TaskOpenSpecModal";
+import { __resetTaskExecutionsForTests, reserveTaskExecution } from "@/lib/taskExecution";
 
 const runnerMocks = vi.hoisted(() => ({
   steerTask: vi.fn(),
@@ -32,6 +33,7 @@ describe("TaskOpenSpecModal", () => {
   let root: Root;
 
   beforeEach(() => {
+    __resetTaskExecutionsForTests();
     runnerMocks.steerTask.mockReset();
     runnerMocks.stopTask.mockReset();
     runnerMocks.steerTask.mockResolvedValue(true);
@@ -43,6 +45,22 @@ describe("TaskOpenSpecModal", () => {
   afterEach(() => {
     act(() => root.unmount());
     container.remove();
+  });
+
+  it.each(["backlog", "human_review"] as const)("disables %s start or approval while a manual action holds the task", async (status) => {
+    const card: TaskCard = { id: "manual-busy", title: "Manual action", note: "", status,
+      phase: "awaiting_human", developmentMode: "spec", openSpecChange: "manual-busy",
+      plan: "- [ ] Implement", planApproved: false, createdAt: 1, updatedAt: 1 };
+    await act(async () => root.render(<TaskOpenSpecModal boardKey="default" cwd="D:/project"
+      card={card} locale="zh-CN" onClose={vi.fn()} />));
+    const label = status === "backlog" ? "开始" : "批准规范并构建";
+    const button = () => [...document.querySelectorAll('button')].find((item) => item.textContent?.includes(label))!;
+    expect(button().disabled).toBe(false);
+    let execution!: NonNullable<ReturnType<typeof reserveTaskExecution>>;
+    act(() => { execution = reserveTaskExecution('default', card.id, 'openspec')!; });
+    expect(button().disabled).toBe(true);
+    act(() => execution.release());
+    expect(button().disabled).toBe(false);
   });
 
   it("sends an extra instruction from an active OpenSpec task window", async () => {

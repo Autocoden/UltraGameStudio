@@ -513,6 +513,9 @@ function reconcileExplicitGatewaySelection(
   selection: GatewaySelection,
   providers: GatewayProvider[],
 ): GatewaySelection | null {
+  // A system CLI uses its own configuration, independently of saved providers.
+  if (selection.systemDefault) return selection;
+
   if (selection.providerId) {
     const provider = providers.find(
       (candidate) => candidate.id === selection.providerId,

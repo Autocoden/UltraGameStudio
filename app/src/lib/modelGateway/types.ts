@@ -111,6 +111,8 @@ export interface GatewayTextRequest {
   /** Reasoning effort requested for this turn. */
   thinkingLevel?: GatewayThinkingLevel;
   signal?: AbortSignal;
+  /** Keep a task's execution reservation until the cancelled native process exits. */
+  waitForExitOnAbort?: boolean;
   runId?: string;
   usageContext?: UsageMeterContext;
   onDelta?: (chunk: string) => void;

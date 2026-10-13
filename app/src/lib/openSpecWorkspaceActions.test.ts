@@ -45,6 +45,7 @@ import {
   __resetOpenSpecActionsForTests,
   acknowledgeOpenSpecPlanningReview,
   buildOpenSpecActionPrompt,
+  cancelOpenSpecWorkspaceAction,
   getOpenSpecActionSnapshot,
   resolveOpenSpecAutomaticAction,
   runOpenSpecWorkspaceAction,
@@ -55,6 +56,7 @@ import {
   addTask,
   getBoardTasks,
 } from "./taskBoard";
+import { getTaskExecution } from "./taskExecution";
 
 const BOARD_KEY = "openspec-test";
 
@@ -89,6 +91,51 @@ beforeEach(() => {
 });
 
 describe("OpenSpec workspace actions", () => {
+  it.each(["baseline", "route"] as const)("does not launch after cancellation during %s preparation", async (stage) => {
+    const card = addTask(BOARD_KEY, "backlog", "Cancel preparation", "", { developmentMode: "spec", openSpecChange: "cancel-preparation" })!;
+    let resume!: () => void;
+    const preparation = new Promise<void>((resolve) => { resume = resolve; });
+    if (stage === "baseline") ensureWorkspaceChangesBaselineMock.mockReturnValueOnce(preparation);
+    else resolveCliGatewayRouteMock.mockImplementationOnce(async () => {
+      await preparation;
+      return { transport: "cli", adapter: "codex" };
+    });
+    const pending = runOpenSpecWorkspaceAction({ boardKey: BOARD_KEY, cwd: "D:/project", card, action: stage === "baseline" ? "new" : "apply" });
+    const outcome = expect(pending).rejects.toThrow("已取消");
+    await cancelOpenSpecWorkspaceAction(BOARD_KEY, card.id);
+    expect(getTaskExecution(BOARD_KEY, card.id)).not.toBeNull();
+    resume();
+    await outcome;
+    expect(completeGatewayTextMock).not.toHaveBeenCalled();
+    expect(getOpenSpecActionSnapshot(BOARD_KEY, card.id).history.at(-1)?.state).toBe("cancelled");
+    expect(getTaskExecution(BOARD_KEY, card.id)).toBeNull();
+  });
+
+  it("does not start another planning turn after cancellation during the status check", async () => {
+    const card = addTask(BOARD_KEY, "backlog", "Cancel continuation", "", { developmentMode: "spec", openSpecChange: "cancel-continuation" })!;
+    let resume!: (value: Awaited<ReturnType<typeof getOpenSpecChangeStatus>>) => void;
+    vi.mocked(getOpenSpecChangeStatus).mockReturnValueOnce(new Promise((resolve) => { resume = resolve; }));
+    completeGatewayTextMock.mockResolvedValue("proposal generated");
+    const pending = runOpenSpecWorkspaceAction({ boardKey: BOARD_KEY, cwd: "D:/project", card, action: "new" });
+    const outcome = expect(pending).rejects.toThrow("已取消");
+    await vi.waitFor(() => expect(getOpenSpecChangeStatus).toHaveBeenCalledOnce());
+    await cancelOpenSpecWorkspaceAction(BOARD_KEY, card.id);
+    expect(completeGatewayTextMock.mock.calls[0][0].signal.aborted).toBe(true);
+    resume({ success: true, timedOut: false, stdout: "", stderr: "", json: { artifacts: [{ status: "ready" }] } });
+    await outcome;
+    expect(completeGatewayTextMock).toHaveBeenCalledOnce();
+    expect(validateOpenSpecChange).not.toHaveBeenCalled();
+  });
+
+  it("releases a failed action so the task can be retried", async () => {
+    const card = addTask(BOARD_KEY, "backlog", "Retry", "", { developmentMode: "spec", openSpecChange: "retry" })!;
+    completeGatewayTextMock.mockRejectedValueOnce(new Error("native failed")).mockResolvedValueOnce("done");
+    const input = { boardKey: BOARD_KEY, cwd: "D:/project", card, action: "apply" as const };
+    await expect(runOpenSpecWorkspaceAction(input)).rejects.toThrow("native failed");
+    await expect(runOpenSpecWorkspaceAction(input)).resolves.toMatchObject({ state: "succeeded" });
+    expect(getTaskExecution(BOARD_KEY, card.id)).toBeNull();
+  });
+
   it("continues through all four artifacts before waiting for human approval", async () => {
     const card = addTask(BOARD_KEY, "backlog", "Four artifacts", "", { developmentMode: "spec", openSpecChange: "four" })!;
     completeGatewayTextMock.mockResolvedValue("one artifact generated");

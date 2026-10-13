@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 import {
   ArrowLeft,
@@ -28,6 +28,7 @@ import {
   type TaskReferenceImage,
 } from "@/lib/taskBoard";
 import { stopTask } from "@/lib/taskBoardRunner";
+import { getTaskExecution, subscribeTaskExecutions } from "@/lib/taskExecution";
 import {
   taskAwaitsPlanApproval,
   taskRequiresWorktreeReview,
@@ -56,7 +57,11 @@ export default function TaskOpenSpecModal({
   onArchived?: () => void;
 }) {
   const modal = useRef<HTMLDivElement>(null);
+  const execution = useSyncExternalStore(subscribeTaskExecutions,
+    () => getTaskExecution(boardKey, card.id), () => null);
+  const taskBusy = Boolean(execution);
   const active =
+    execution?.owner === "runner" ||
     card.phase === "planning" ||
     card.phase === "executing" ||
     card.phase === "reviewing";
@@ -70,12 +75,16 @@ export default function TaskOpenSpecModal({
     Boolean(card.needsInput?.blocked),
   );
 
-  const start = () => requeueTask(boardKey, card.id);
+  const start = () => {
+    if (!getTaskExecution(boardKey, card.id)) requeueTask(boardKey, card.id);
+  };
   const approvePlan = () => {
+    if (getTaskExecution(boardKey, card.id)) return;
     approveTask(boardKey, card.id);
     setReviewOpen(false);
   };
   const requestChanges = () => {
+    if (getTaskExecution(boardKey, card.id)) return;
     const value = feedback.trim();
     if (!value && !feedbackImages.length) return;
     const attachmentNote = feedbackImages.length
@@ -105,6 +114,7 @@ export default function TaskOpenSpecModal({
     setReviewOpen(false);
   };
   const resolveNeedsInput = (answers: TaskDecisionAnswer[]) => {
+    if (getTaskExecution(boardKey, card.id)) return;
     const decisions = [
       "用户已确认以下实施决策：",
       ...answers.map(
@@ -207,6 +217,7 @@ export default function TaskOpenSpecModal({
               <button
                 type="button"
                 className={actionButton}
+                disabled={taskBusy}
                 onClick={() => {
                   setReviewView("review");
                   setReviewOpen(true);
@@ -219,6 +230,7 @@ export default function TaskOpenSpecModal({
                 <button
                   type="button"
                   className={actionButton + " bg-amber-400 text-black"}
+                  disabled={taskBusy}
                   onClick={() => setNeedsInputOpen(true)}
                 >
                   <MessageSquare size={13} />
@@ -228,6 +240,7 @@ export default function TaskOpenSpecModal({
                 <button
                   type="button"
                   className={`${actionButton} bg-accent text-bg`}
+                  disabled={taskBusy}
                   onClick={approvePlan}
                 >
                   <CheckCircle2 size={13} />
@@ -237,6 +250,7 @@ export default function TaskOpenSpecModal({
                 <button
                   type="button"
                   className={`${actionButton} bg-accent text-bg`}
+                  disabled={taskBusy}
                   onClick={() => {
                     setReviewView("review");
                     setReviewOpen(true);
@@ -249,6 +263,7 @@ export default function TaskOpenSpecModal({
                 <button
                   type="button"
                   className={`${actionButton} bg-accent text-bg`}
+                  disabled={taskBusy}
                   onClick={() => approveTask(boardKey, card.id)}
                 >
                   <CheckCircle2 size={13} />
@@ -257,7 +272,7 @@ export default function TaskOpenSpecModal({
               )}
             </>
           ) : card.status !== "done" ? (
-            <button type="button" className={actionButton} onClick={start}>
+            <button type="button" className={actionButton} disabled={taskBusy} onClick={start}>
               <Play size={13} />
               {card.runs?.length ? "继续" : "开始"}
             </button>
@@ -343,6 +358,7 @@ export default function TaskOpenSpecModal({
                         <button
                           type="button"
                           className={`${actionButton} mt-3 bg-accent text-bg`}
+                          disabled={taskBusy}
                           onClick={() =>
                             awaitingPlanApproval
                               ? approvePlan()
@@ -371,7 +387,7 @@ export default function TaskOpenSpecModal({
                         <button
                           type="button"
                           className={actionButton}
-                          disabled={!feedback.trim() && !feedbackImages.length}
+                          disabled={taskBusy || (!feedback.trim() && !feedbackImages.length)}
                           onClick={requestChanges}
                         >
                           <MessageSquare size={13} />

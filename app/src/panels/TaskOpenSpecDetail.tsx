@@ -31,6 +31,7 @@ import { cn } from "@/lib/cn";
 import { archiveTask, getBoardTasks, moveTask, setTaskPhase, updateTaskExecution, requeueTask, type TaskCard } from "@/lib/taskBoard";
 import TaskWorkspaceFiles from "@/panels/TaskWorkspaceFiles";
 import { getRunnerSnapshot, getTaskStream, subscribeRunner } from "@/lib/taskBoardRunner";
+import { getTaskExecution, subscribeTaskExecutions } from "@/lib/taskExecution";
 import { RuntimeOutput } from "@/panels/TaskRuntimeLogs";
 import {
   acknowledgeOpenSpecPlanningReview,
@@ -352,6 +353,8 @@ export default function TaskOpenSpecDetail({
   const activityOutputRef = useRef<HTMLDivElement | null>(null);
   useSyncExternalStore(subscribeRunner, getRunnerSnapshot, getRunnerSnapshot);
   const taskStream = getTaskStream(boardKey, card.id);
+  const taskBusy = Boolean(useSyncExternalStore(subscribeTaskExecutions,
+    () => getTaskExecution(boardKey, card.id), () => null));
   const subscribeActionRuntime = useCallback(
     (listener: () => void) => subscribeOpenSpecActions(listener),
     [],
@@ -693,7 +696,7 @@ export default function TaskOpenSpecDetail({
     card.subtasks ?? [],
   );
   const workspaceControlsBusy =
-    active || workspaceActionBusy || action !== null || Boolean(interruptedAction);
+    active || taskBusy || workspaceActionBusy || action !== null || Boolean(interruptedAction);
   const actionAvailable = (candidate: OpenSpecWorkspaceAction): boolean => {
     if (workspaceControlsBusy || archived) return false;
     if (candidate === "explore") return true;
@@ -715,6 +718,7 @@ export default function TaskOpenSpecDetail({
     !!snapshot?.isPlanningComplete &&
     tasksComplete &&
     !active &&
+    !taskBusy &&
     !workspaceActionBusy &&
     !interruptedAction &&
     !archived;
@@ -837,6 +841,7 @@ export default function TaskOpenSpecDetail({
             disabled={
               !snapshot ||
               active ||
+              taskBusy ||
               workspaceActionBusy ||
               action !== null ||
               archived
@@ -857,6 +862,7 @@ export default function TaskOpenSpecDetail({
             disabled={
               !cwd ||
               active ||
+              taskBusy ||
               workspaceActionBusy ||
               action !== null ||
               archived
@@ -1189,7 +1195,7 @@ export default function TaskOpenSpecDetail({
                     type="checkbox"
                     className="mt-0.5 accent-emerald-500"
                     checked={subtask.status === "completed"}
-                    disabled={active || pendingTask !== null}
+                    disabled={active || taskBusy || pendingTask !== null}
                     onChange={(event) =>
                       void toggleTask(index, event.target.checked)
                     }
@@ -1461,7 +1467,7 @@ export default function TaskOpenSpecDetail({
                   requeueTask(boardKey, card.id);
                   setPlanningReviewOpen(false);
                 }}
-                disabled={planningReview.acknowledged || active || workspaceActionBusy}
+                disabled={planningReview.acknowledged || active || taskBusy || workspaceActionBusy}
               >
                 <CheckCircle2 size={13} />
                 {planningReview.acknowledged ? "已确认" : "确认规划并继续"}

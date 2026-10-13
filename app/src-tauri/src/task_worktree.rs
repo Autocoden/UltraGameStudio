@@ -444,7 +444,7 @@ fn review_for_context(context: &WorktreeContext) -> Result<TaskWorktreeReview, S
     if ancestor.timed_out {
         return Err("检查任务分支是否已合并超时".to_string());
     }
-    let already_merged = ancestor.success;
+    let already_merged = ancestor.success && worktree_dirty_files.is_empty();
     let main_dirty = !main_dirty_files.is_empty();
     Ok(TaskWorktreeReview {
         exists: true,
@@ -488,7 +488,7 @@ fn ensure_task_commit(context: &WorktreeContext, message: &str) -> Result<bool, 
     if commit_message.is_empty() {
         commit_message = format!("Complete task {}", context.branch);
     }
-    commit_message.truncate(240);
+    commit_message = commit_message.chars().take(240).collect();
     let committed = run_git(
         &context.worktree_root,
         &["commit".to_string(), "-m".to_string(), commit_message],
@@ -999,6 +999,61 @@ mod tests {
 
     fn path_text(path: &Path) -> String {
         path.to_string_lossy().to_string()
+    }
+
+    #[test]
+    fn review_keeps_dirty_task_with_no_commits_available_for_integration() {
+        let repo = new_repository();
+        write(&repo.task, "staged.txt", "staged output\n");
+        git(&repo.task, &["add", "staged.txt"]);
+        write(&repo.task, "shared.txt", "uncommitted edit\n");
+        write(&repo.task, "untracked.txt", "new output\n");
+
+        let context = resolve_context(&path_text(&repo.main), &path_text(&repo.task), None)
+            .expect("worktree context");
+        let review = review_for_context(&context).expect("worktree review");
+
+        assert_eq!(review.commit_count, 0);
+        assert!(review.worktree_dirty);
+        assert_eq!(
+            review.files,
+            vec!["shared.txt", "staged.txt", "untracked.txt"]
+        );
+        assert!(!review.already_merged);
+        assert!(review.can_integrate);
+    }
+
+    #[test]
+    fn task_commit_preserves_unicode_and_limits_title_to_240_characters() {
+        let repo = new_repository();
+        let context = resolve_context(&path_text(&repo.main), &path_text(&repo.task), None)
+            .expect("worktree context");
+        let title = format!("A{}", "中".repeat(80));
+        let long_title = format!("A{}", "中".repeat(240));
+
+        for (message, expected) in [
+            (title.clone(), title),
+            (long_title, format!("A{}", "中".repeat(239))),
+        ] {
+            write(&repo.task, "output.txt", &message);
+            assert!(ensure_task_commit(&context, &message).expect("commit Unicode task title"));
+            assert_eq!(git(&repo.task, &["log", "-1", "--format=%s"]), expected);
+            assert!(git(&repo.task, &["status", "--porcelain"]).is_empty());
+        }
+    }
+
+    #[test]
+    fn task_commit_uses_default_title_for_empty_message() {
+        let repo = new_repository();
+        write(&repo.task, "output.txt", "task output\n");
+        let context = resolve_context(&path_text(&repo.main), &path_text(&repo.task), None)
+            .expect("worktree context");
+
+        assert!(ensure_task_commit(&context, " \r\n ").expect("commit with default task title"));
+        assert_eq!(
+            git(&repo.task, &["log", "-1", "--format=%s"]),
+            "Complete task task/test"
+        );
     }
 
     #[test]

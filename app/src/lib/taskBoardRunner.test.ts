@@ -6,7 +6,11 @@ import {
   getBoardTasks,
   approveTask,
   updateTask,
+  updateTaskExecution,
+  requeueTask,
 } from "./taskBoard";
+import { __resetOpenSpecActionsForTests, runOpenSpecWorkspaceAction } from "./openSpecWorkspaceActions";
+import { getTaskExecution } from "./taskExecution";
 import {
   __resetRunnerForTests,
   getMaxParallel,
@@ -24,6 +28,7 @@ import {
   ensureWorkspaceChangesBaseline,
   getOpenSpecChangeStatus,
   prepareOpenSpecChange,
+  pushWorkspaceBranch,
   previewLocalFile,
   setOpenSpecTaskStatus,
   steerAiCli,
@@ -122,9 +127,11 @@ async function settle() {
 
 beforeEach(() => {
   vi.mocked(syncTaskArtifactFiles).mockClear();
+  vi.mocked(pushWorkspaceBranch).mockClear();
   window.localStorage.clear();
   __resetTaskBoardForTests();
   __resetRunnerForTests();
+  __resetOpenSpecActionsForTests();
   vi.mocked(completeGatewayText).mockReset();
   vi.mocked(resolveCliGatewayRoute).mockReset();
   vi.mocked(resolveCliGatewayRoute).mockResolvedValue(ROUTE);
@@ -145,6 +152,116 @@ afterEach(() => {
 });
 
 describe("taskBoardRunner", () => {
+  it("does not launch a model after a stop during artifact persistence", async () => {
+    const card = addTask("ws", "queue", "Cancel persistence", "", { developmentMode: "direct" })!;
+    let resume!: (value: Awaited<ReturnType<typeof syncTaskArtifactFiles>>) => void;
+    vi.mocked(syncTaskArtifactFiles).mockReturnValueOnce(new Promise((resolve) => { resume = resolve; }));
+    pumpBoard("ws", CTX);
+    await vi.waitFor(() => expect(syncTaskArtifactFiles).toHaveBeenCalledOnce());
+    stopTask("ws", card.id);
+    expect(getTaskExecution("ws", card.id)).not.toBeNull();
+    resume({ rootPath: "D:/ws/task", filesWritten: 6 });
+    await settle();
+    expect(completeGatewayText).not.toHaveBeenCalled();
+    expect(getBoardTasks("ws")[0]).toMatchObject({ phase: "failed", executionError: "手动停止" });
+    expect(getTaskExecution("ws", card.id)).toBeNull();
+  });
+
+  it("does not push or complete a task stopped while persisting the model result", async () => {
+    const card = addTask("ws", "queue", "Cancel result persistence", "", {
+      developmentMode: "direct", useWorktree: true, pushNewBranches: true,
+    })!;
+    const artifacts = { rootPath: "D:/ws/task", filesWritten: 6 };
+    let resume!: (value: Awaited<ReturnType<typeof syncTaskArtifactFiles>>) => void;
+    vi.mocked(syncTaskArtifactFiles).mockResolvedValueOnce(artifacts)
+      .mockReturnValueOnce(new Promise((resolve) => { resume = resolve; }));
+    pumpBoard("ws", CTX);
+    await vi.waitFor(() => expect(syncTaskArtifactFiles).toHaveBeenCalledTimes(2));
+    expect(completeGatewayText).toHaveBeenCalledOnce();
+    stopTask("ws", card.id);
+    resume(artifacts);
+    await settle();
+    expect(pushWorkspaceBranch).not.toHaveBeenCalled();
+    expect(getBoardTasks("ws")[0]).toMatchObject({
+      status: "human_review", phase: "failed", executionError: "手动停止",
+    });
+    expect(getBoardTasks("ws")[0].runs).toHaveLength(1);
+    expect(getTaskExecution("ws", card.id)).toBeNull();
+  });
+
+  it("does not push after a stop while persisting a completed subtask", async () => {
+    const card = addTask("ws", "queue", "Cancel subtask persistence", "", {
+      developmentMode: "spec", openSpecChange: "cancel-subtask", useWorktree: true, pushNewBranches: true,
+    })!;
+    updateTaskExecution("ws", card.id, { plan: "- [ ] Implement", planApproved: true });
+    vi.mocked(previewLocalFile).mockResolvedValueOnce({ text: "- [ ] Implement" } as Awaited<ReturnType<typeof previewLocalFile>>);
+    const artifacts = { rootPath: "D:/ws/task", filesWritten: 6 };
+    let resume!: (value: Awaited<ReturnType<typeof syncTaskArtifactFiles>>) => void;
+    vi.mocked(syncTaskArtifactFiles).mockResolvedValueOnce(artifacts).mockResolvedValueOnce(artifacts)
+      .mockReturnValueOnce(new Promise((resolve) => { resume = resolve; }));
+    pumpBoard("ws", CTX);
+    await vi.waitFor(() => expect(syncTaskArtifactFiles).toHaveBeenCalledTimes(3));
+    stopTask("ws", card.id);
+    resume(artifacts);
+    await settle();
+    expect(pushWorkspaceBranch).not.toHaveBeenCalled();
+    expect(completeGatewayText).toHaveBeenCalledOnce();
+    expect(getBoardTasks("ws")[0]).toMatchObject({ phase: "failed", executionError: "手动停止" });
+  });
+
+  it("does not enter plan approval after a stop while reading OpenSpec tasks", async () => {
+    const card = addTask("ws", "queue", "Cancel task read", "", {
+      developmentMode: "spec", openSpecChange: "cancel-read",
+    })!;
+    updateTaskExecution("ws", card.id, { plan: "- [ ] Implement", planApproved: false });
+    let resume!: (value: Awaited<ReturnType<typeof previewLocalFile>>) => void;
+    vi.mocked(previewLocalFile).mockReturnValueOnce(new Promise((resolve) => { resume = resolve; }));
+    pumpBoard("ws", CTX);
+    await vi.waitFor(() => expect(previewLocalFile).toHaveBeenCalledOnce());
+    stopTask("ws", card.id);
+    resume({ text: "- [ ] Implement" } as Awaited<ReturnType<typeof previewLocalFile>>);
+    await settle();
+    expect(completeGatewayText).not.toHaveBeenCalled();
+    expect(getBoardTasks("ws")[0]).toMatchObject({ phase: "failed", executionError: "手动停止" });
+  });
+
+  it("waits for a manual action and then automatically resumes the queued card", async () => {
+    const card = addTask("ws", "backlog", "Shared task", "", { developmentMode: "direct", openSpecChange: "shared" })!;
+    let finish!: (text: string) => void;
+    vi.mocked(completeGatewayText).mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+    const manual = runOpenSpecWorkspaceAction({ boardKey: "ws", cwd: CTX.cwd, card, action: "apply" });
+    await vi.waitFor(() => expect(completeGatewayText).toHaveBeenCalledOnce());
+    requeueTask("ws", card.id);
+    pumpBoard("ws", CTX);
+    await settle();
+    expect(completeGatewayText).toHaveBeenCalledOnce();
+    expect(getBoardTasks("ws")[0].status).toBe("queue");
+    finish("manual complete");
+    await manual;
+    await settle();
+    expect(completeGatewayText).toHaveBeenCalledTimes(2);
+    expect(getBoardTasks("ws")[0].status).toBe("human_review");
+    expect(getTaskExecution("ws", card.id)).toBeNull();
+  });
+
+  it("rejects manual actions while the runner is preparing or stopping, and permits a later retry", async () => {
+    const card = addTask("ws", "queue", "Runner first", "", { developmentMode: "direct", openSpecChange: "runner-first" })!;
+    let finish!: (text: string) => void;
+    vi.mocked(completeGatewayText).mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+    pumpBoard("ws", CTX);
+    const manualInput = { boardKey: "ws", cwd: CTX.cwd, card, action: "apply" as const };
+    await expect(runOpenSpecWorkspaceAction(manualInput)).rejects.toThrow("已有动作正在执行");
+    await vi.waitFor(() => expect(completeGatewayText).toHaveBeenCalledOnce());
+    stopTask("ws", card.id);
+    expect(vi.mocked(completeGatewayText).mock.calls[0][0]).toMatchObject({ signal: expect.objectContaining({ aborted: true }), waitForExitOnAbort: true });
+    await expect(runOpenSpecWorkspaceAction(manualInput)).rejects.toThrow("已有动作正在执行");
+    expect(completeGatewayText).toHaveBeenCalledOnce();
+    finish("native exited");
+    await settle();
+    await expect(runOpenSpecWorkspaceAction(manualInput)).resolves.toMatchObject({ state: "succeeded" });
+    expect(completeGatewayText).toHaveBeenCalledTimes(2);
+  });
+
   it("persists compatible documents before approval and blocks coding on write failures", async () => {
     const plan = "## Requirements\nR1\n## Spec\nSCN-001\n## Design\nDES-001\n## Tasks\n- [ ] 1.1 Work";
     vi.mocked(completeGatewayText).mockResolvedValueOnce(plan);

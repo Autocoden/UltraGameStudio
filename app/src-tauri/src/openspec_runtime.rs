@@ -150,38 +150,25 @@ fn command_launch(path: PathBuf) -> Option<OpenSpecLaunch> {
 
     #[cfg(windows)]
     {
-        if extension == "cmd" || extension == "bat" {
-            let command = std::env::var_os("COMSPEC")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("cmd.exe"));
-            return Some(OpenSpecLaunch {
-                program: command,
-                prefix_args: vec![
-                    "/D".to_string(),
-                    "/S".to_string(),
-                    "/C".to_string(),
-                    display_path.clone(),
-                ],
-                source: "path".to_string(),
-                display_path,
-            });
-        }
-        if extension == "ps1" {
-            let powershell = crate::cli_runtime::resolve_command_path("powershell")
-                .unwrap_or_else(|| PathBuf::from("powershell.exe"));
-            return Some(OpenSpecLaunch {
-                program: powershell,
-                prefix_args: vec![
-                    "-NoProfile".to_string(),
-                    "-NonInteractive".to_string(),
-                    "-ExecutionPolicy".to_string(),
-                    "Bypass".to_string(),
-                    "-File".to_string(),
-                    display_path.clone(),
-                ],
-                source: "path".to_string(),
-                display_path,
-            });
+        if matches!(extension.as_str(), "cmd" | "bat" | "ps1") {
+            let dir = path.parent()?;
+            let node_modules = if dir.file_name().is_some_and(|name| name == ".bin") {
+                dir.parent()?.to_path_buf()
+            } else {
+                dir.join("node_modules")
+            };
+            let script = node_modules
+                .join("@fission-ai")
+                .join("openspec")
+                .join("bin")
+                .join("openspec.js");
+            // Task descriptions are arbitrary text; never pass them through a shell wrapper.
+            if !script.is_file() {
+                return None;
+            }
+            let mut launch = node_script_launch(script, "path")?;
+            launch.display_path = display_path;
+            return Some(launch);
         }
     }
 
@@ -732,6 +719,78 @@ pub async fn openspec_list_changes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn npm_shims_launch_node_with_literal_arguments() {
+        let root = std::env::temp_dir().join(format!(
+            "ugs-openspec-shims-{}-{}-{} 空格",
+            std::process::id(),
+            now_ms(),
+            TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let node = crate::cli_runtime::resolve_command_path("node")
+            .expect("the OpenSpec runtime tests require Node.js");
+        let args = vec![
+            "new".to_string(),
+            "change".to_string(),
+            "literal-args".to_string(),
+            "--description".to_string(),
+            "计划 \"quoted\" & | < > ^ %PATH% !value!\r\nsecond line \\".to_string(),
+        ];
+        for (name, extension, local) in [
+            ("global", "CMD", false),
+            ("local", "bat", true),
+            ("powershell", "ps1", false),
+        ] {
+            let install = root.join(name);
+            let node_modules = install.join("node_modules");
+            let shim_dir = if local {
+                node_modules.join(".bin")
+            } else {
+                install
+            };
+            let script = node_modules
+                .join("@fission-ai")
+                .join("openspec")
+                .join("bin")
+                .join("openspec.js");
+            std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+            std::fs::create_dir_all(&shim_dir).unwrap();
+            std::fs::write(
+                &script,
+                "console.log(process.argv[2] === '--version' ? '1.2.3' : JSON.stringify(process.argv.slice(2)));",
+            )
+            .unwrap();
+            let shim = shim_dir.join(format!("openspec.{extension}"));
+            std::fs::write(&shim, "this wrapper must never execute").unwrap();
+
+            let launch = command_launch(shim.clone()).expect("supported npm layout");
+            assert_eq!(launch.program, node);
+            assert_eq!(launch.prefix_args, [script.to_string_lossy().to_string()]);
+            assert_eq!(launch.source, "path");
+            assert_eq!(launch.display_path, shim.to_string_lossy());
+            let result = run_launch(&launch, &root, &args, Duration::from_secs(10)).unwrap();
+            assert!(result.success, "{}", result.stderr);
+            assert_eq!(result.json, Some(serde_json::json!(args)));
+            let version = run_launch(
+                &launch,
+                &root,
+                &["--version".to_string()],
+                Duration::from_secs(10),
+            )
+            .unwrap();
+            assert!(version.success, "{}", version.stderr);
+            assert_eq!(version.stdout.trim(), "1.2.3");
+
+            std::fs::remove_file(script).unwrap();
+            assert!(
+                command_launch(shim).is_none(),
+                "unknown wrappers must fail closed"
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn change_id_and_schema_validation_reject_option_injection() {

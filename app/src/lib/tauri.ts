@@ -900,6 +900,8 @@ export interface CliOpts {
   /** Foreground-only scoped Rust skill tools; never a review capsule. */
   skillTools?: NativeCliSkillToolsOptions;
   signal?: AbortSignal;
+  /** Task runners must retain their reservation until the native invocation settles. */
+  waitForExitOnAbort?: boolean;
   /**
    * Claude session id for context continuity (claude adapter only). With
    * `resume: false` the call creates this session; with `resume: true` it
@@ -1014,6 +1016,7 @@ export async function aiEditViaCli(
   let cancelDispatched: (() => void) | undefined;
   let nativeDispatched = false;
   let cancelledNative = false;
+  let nativeResult: Promise<string | AiCliResult> | undefined;
   try {
     if (opts.signal?.aborted) throw new DOMException('The operation was aborted.', 'AbortError');
     if (skillTools) await waitForHttpBudget(() => Promise.resolve(skillReady), opts.signal, undefined);
@@ -1077,7 +1080,7 @@ export async function aiEditViaCli(
     opts.signal?.addEventListener('abort', cancelDispatched, { once: true });
     const result = await waitForHttpBudget(() => {
       nativeDispatched = true;
-      return invoke<string | AiCliResult>('ai_cli', {
+      nativeResult = invoke<string | AiCliResult>('ai_cli', {
       prompt,
       adapter,
       cliCommand: opts.cliCommand ?? null,
@@ -1096,6 +1099,7 @@ export async function aiEditViaCli(
       languageDirective: opts.languageDirective ?? null,
       shell: runShellPayload(),
       });
+      return nativeResult;
     }, opts.signal, undefined);
     if (isAiCliResult(result)) {
       if (result.usage != null && !usageSeen) {
@@ -1116,6 +1120,9 @@ export async function aiEditViaCli(
         } catch {
           // Listener cleanup must not replace the CLI result with an error.
         }
+      }
+      if (opts.waitForExitOnAbort && opts.signal?.aborted) {
+        await nativeResult?.catch(() => {});
       }
     }
   }
