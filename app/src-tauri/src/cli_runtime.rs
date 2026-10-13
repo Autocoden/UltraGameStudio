@@ -500,14 +500,14 @@ pub fn resolve_zcode_node_entry(zcode_binary: &str) -> Option<PathBuf> {
     entry.is_file().then_some(entry)
 }
 
-/// zcode (`zcode-app-cli`) exposes a real-time token stream through the bundled
-/// runtime's `app-server` subcommand (`node <pkg>/vendor/zcode.cjs app-server`),
-/// a newline-delimited JSON-RPC 2.0 stdio server (`session/create` →
-/// `session/subscribe` → `session/send` → `session/event` deltas). The npm
-/// launcher (`bin/zcode.js`) would only re-spawn that same runtime with one
-/// extra process layer (and its own TUI/config setup), so the protocol agent
-/// points `node` straight at the vendor bundle. Returns `None` when the
-/// expected npm layout is missing so the caller can fall back to the
+/// zcode (`zcode-app-cli`) exposes a real-time token stream through its
+/// `app-server` subcommand, a newline-delimited JSON-RPC 2.0 stdio server
+/// (`session/create` → `session/subscribe` → `session/send` →
+/// `session/event` deltas). Older packages keep the runtime at
+/// `vendor/zcode.cjs`; newer single-bundle packages implement the same command
+/// directly in `bin/zcode.js`. Prefer the vendor runtime when present, then use
+/// the launcher bundle when it advertises `app-server`. Returns `None` when no
+/// protocol-capable npm layout exists so the caller can fall back to the
 /// historical `--prompt --json` one-shot path.
 pub fn resolve_zcode_runtime_entry(zcode_binary: &str) -> Option<PathBuf> {
     let launcher = if looks_like_path(zcode_binary) {
@@ -517,12 +517,19 @@ pub fn resolve_zcode_runtime_entry(zcode_binary: &str) -> Option<PathBuf> {
         resolve_command_path(zcode_binary)?
     };
     let dir = launcher.parent()?;
-    let entry = dir
-        .join("node_modules")
-        .join("zcode-app-cli")
-        .join("vendor")
-        .join("zcode.cjs");
-    entry.is_file().then_some(entry)
+    let package = dir.join("node_modules").join("zcode-app-cli");
+    let vendor_entry = package.join("vendor").join("zcode.cjs");
+    if vendor_entry.is_file() {
+        return Some(vendor_entry);
+    }
+    let bundled_entry = package.join("bin").join("zcode.js");
+    let supports_app_server = bundled_entry.is_file()
+        && std::fs::read(&bundled_entry).ok().is_some_and(|source| {
+            source
+                .windows(b"app-server".len())
+                .any(|window| window == b"app-server")
+        });
+    supports_app_server.then_some(bundled_entry)
 }
 
 /// kimi-code (`@moonshot-ai/kimi-code`) ships as an npm `.cmd`/shell shim that
@@ -861,6 +868,40 @@ mod tests {
         // to the historical `cmd /C` shim path.
         fs::remove_file(&entry).unwrap();
         assert!(resolve_zcode_node_entry(&shim.to_string_lossy()).is_none());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn zcode_runtime_entry_supports_vendor_and_single_bundle_layouts() {
+        use std::fs;
+        let root =
+            std::env::temp_dir().join(format!("ugs-zcode-runtime-entry-{}", std::process::id()));
+        let package = root.join("node_modules").join("zcode-app-cli");
+        let vendor = package.join("vendor");
+        let bin = package.join("bin");
+        fs::create_dir_all(&vendor).unwrap();
+        fs::create_dir_all(&bin).unwrap();
+        let shim = root.join("zcode.cmd");
+        fs::write(&shim, b"@echo off").unwrap();
+        let vendor_entry = vendor.join("zcode.cjs");
+        let bundled_entry = bin.join("zcode.js");
+        fs::write(&vendor_entry, b"// vendor runtime").unwrap();
+        fs::write(&bundled_entry, b"// app-server single bundle runtime").unwrap();
+
+        assert_eq!(
+            resolve_zcode_runtime_entry(&shim.to_string_lossy()).as_deref(),
+            Some(vendor_entry.as_path())
+        );
+
+        fs::remove_file(&vendor_entry).unwrap();
+        assert_eq!(
+            resolve_zcode_runtime_entry(&shim.to_string_lossy()).as_deref(),
+            Some(bundled_entry.as_path())
+        );
+
+        fs::write(&bundled_entry, b"// old one-shot-only bundle").unwrap();
+        assert!(resolve_zcode_runtime_entry(&shim.to_string_lossy()).is_none());
 
         let _ = fs::remove_dir_all(&root);
     }

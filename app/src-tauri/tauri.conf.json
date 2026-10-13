@@ -7,7 +7,7 @@
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173",
     "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build"
+    "beforeBuildCommand": "npm run stage:openspec && npm run build"
   },
   "app": {
     "windows": [
@@ -33,9 +33,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": [
-      "nsis"
-    ],
+    "targets": ["nsis"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -45,7 +43,8 @@
     ],
     "resources": {
       "../cli/dist/ugs.mjs": "cli/ugs.mjs",
-      "../cli/ugs-job.mjs": "cli/ugs-job.mjs"
+      "../cli/ugs-job.mjs": "cli/ugs-job.mjs",
+      "resources/openspec/": "openspec/"
     },
     "android": {
       "debugApplicationIdSuffix": ".debug"

@@ -1,26 +1,26 @@
-import { primeCliRuntime, resolveCliInvocation } from '@/lib/cliConfig';
-import { aiEditViaCli, isTauri } from '@/lib/tauri';
-import { canUseProviderDirectTransport } from '@/lib/apiConfig';
+import { primeCliRuntime, resolveCliInvocation } from "@/lib/cliConfig";
+import { aiEditViaCli, isTauri } from "@/lib/tauri";
+import { canUseProviderDirectTransport } from "@/lib/apiConfig";
 import {
   estimateGatewayUsage,
   mergeUsageReports,
   recordModelUsageForRoute,
   type ModelUsageReport,
   usageReportFromCliUsage,
-} from '@/lib/usageMeter';
-import { completeAnthropic } from './adapters/anthropic';
-import { completeOpenAICompatible } from './adapters/openaiCompatible';
+} from "@/lib/usageMeter";
+import { completeAnthropic } from "./adapters/anthropic";
+import { completeOpenAICompatible } from "./adapters/openaiCompatible";
 import {
   mergeGatewaySelection,
   nodeGatewayOverride,
   resolveGatewayRoute,
-} from './resolver';
+} from "./resolver";
 import type {
   GatewaySelection,
   GatewayTextRequest,
   NodeGatewayOverride,
   ResolvedGatewayRoute,
-} from './types';
+} from "./types";
 
 export async function completeGatewayText(
   request: GatewayTextRequest,
@@ -30,7 +30,7 @@ export async function completeGatewayText(
   }
 
   if (
-    request.route.transport === 'anthropic' &&
+    request.route.transport === "anthropic" &&
     canUseProviderDirectTransport(request.route.apiKey, request.route.baseUrl)
   ) {
     try {
@@ -43,7 +43,7 @@ export async function completeGatewayText(
     }
   }
   if (
-    request.route.transport === 'openai-compatible' &&
+    request.route.transport === "openai-compatible" &&
     canUseProviderDirectTransport(request.route.apiKey, request.route.baseUrl)
   ) {
     try {
@@ -68,11 +68,13 @@ async function completeDirectWithUsage(
     ...request,
     onUsage: (report) => {
       usage = mergeUsageReports(usage, report);
-      request.onUsage?.(report);
+      request.onUsage?.(usage ?? report);
     },
   });
   if (!text.trim()) {
-    throw new Error('模型返回了空内容（可能原因：上游鉴权失败、模型不可用、响应被过滤或请求被拦截）。');
+    throw new Error(
+      "模型返回了空内容（可能原因：上游鉴权失败、模型不可用、响应被过滤或请求被拦截）。",
+    );
   }
   recordModelUsageForRoute(
     request.route,
@@ -87,9 +89,9 @@ async function completeGatewayTextViaCli(
 ): Promise<string> {
   if (!isTauri()) {
     throw new Error(
-      request.route.transport === 'simulator'
-        ? 'SIMULATOR_ONLY'
-        : 'NO_MODEL_GATEWAY_BACKEND',
+      request.route.transport === "simulator"
+        ? "SIMULATOR_ONLY"
+        : "NO_MODEL_GATEWAY_BACKEND",
     );
   }
 
@@ -97,9 +99,10 @@ async function completeGatewayTextViaCli(
   const prompt = `${request.system}\n\n${request.userContent}`;
   let usage: ModelUsageReport | null = null;
   const text = await aiEditViaCli(prompt, request.route.adapter, {
-    permission: request.permission ?? 'full',
+    permission: request.permission ?? "full",
     cwd: request.cwd,
     model: request.route.model,
+    thinkingLevel: request.thinkingLevel,
     cliCommand: cli.command,
     // Inject the channel's credentials (e.g. a Codex relay key/base url) so the
     // local CLI targets the selected provider. See gatewayRouteEnv (cli branch).
@@ -107,11 +110,12 @@ async function completeGatewayTextViaCli(
     timeoutSeconds: request.timeoutSeconds,
     idleTimeoutSeconds: request.idleTimeoutSeconds,
     runId: request.runId,
+    onProgress: request.onDelta,
     onUsage: (rawUsage) => {
       const report = usageReportFromCliUsage(rawUsage);
       if (!report) return;
       usage = mergeUsageReports(usage, report);
-      request.onUsage?.(report);
+      request.onUsage?.(usage ?? report);
     },
   });
   recordModelUsageForRoute(
@@ -127,16 +131,19 @@ function shouldFallbackDirectFetchToCli(
   route: ResolvedGatewayRoute,
 ): boolean {
   if (!isTauri()) return false;
-  if (route.transport !== 'anthropic' && route.transport !== 'openai-compatible') {
+  if (
+    route.transport !== "anthropic" &&
+    route.transport !== "openai-compatible"
+  ) {
     return false;
   }
   if (!route.apiKey && !route.baseUrl) return false;
   if (error instanceof TypeError) return true;
   const message = error instanceof Error ? error.message : String(error);
   return (
-    message === 'Failed to fetch' ||
-    message.includes('NetworkError') ||
-    message.includes('Load failed') ||
+    message === "Failed to fetch" ||
+    message.includes("NetworkError") ||
+    message.includes("Load failed") ||
     /protocol_not_supported|does not support chat completions|不支持\s+chat completions/i.test(
       message,
     )
@@ -157,8 +164,8 @@ export function resolveDirectGatewayRoute(
 ): ResolvedGatewayRoute | null {
   const route = resolveGatewayRoute(selectionWorkflow(selection));
   if (
-    (route.transport === 'anthropic' ||
-      route.transport === 'openai-compatible') &&
+    (route.transport === "anthropic" ||
+      route.transport === "openai-compatible") &&
     canUseProviderDirectTransport(route.apiKey, route.baseUrl)
   ) {
     return route;
@@ -190,13 +197,13 @@ async function resolveCliForRoute(route: ResolvedGatewayRoute) {
       (item) =>
         item.id === route.channelId &&
         item.adapter === route.adapter &&
-        item.status === 'available',
+        item.status === "available",
     );
     if (candidate) {
       return {
         adapter: route.adapter,
         command: candidate.path ?? candidate.command,
-        status: 'ready' as const,
+        status: "ready" as const,
         source: candidate.source,
         candidate,
       };
@@ -204,8 +211,8 @@ async function resolveCliForRoute(route: ResolvedGatewayRoute) {
   }
 
   const cli = await resolveCliInvocation(route.adapter);
-  if (cli.status === 'invalid') {
-    throw new Error(cli.error ?? 'CLI 路径不可用，请重新选择。');
+  if (cli.status === "invalid") {
+    throw new Error(cli.error ?? "CLI 路径不可用，请重新选择。");
   }
   return cli;
 }

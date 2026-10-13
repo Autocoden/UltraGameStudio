@@ -17,6 +17,7 @@ import {
   Brain,
   Boxes,
   Check,
+  Code2,
   Copy,
   Cpu,
   DownloadCloud,
@@ -128,6 +129,7 @@ import {
 } from '@/lib/cliUpdateStatus';
 import LocalModelSetupDialog from '@/components/LocalModelSetupDialog';
 import ErrorBoundary from '@/components/ErrorBoundary';
+import TaskDeveloperToolsSettings from '@/panels/TaskDeveloperToolsSettings';
 import ProjectSettingsModal, {
   type ProjectEmbedTab,
 } from '@/panels/ProjectSettingsModal';
@@ -431,8 +433,9 @@ import {
   type CapturePerfSkillDefinition,
 } from '@/lib/capturePerfSkills';
 
-  type SettingsTab =
+type SettingsTab =
   | 'general'
+  | 'developerTools'
   | 'personalization'
   | 'memory'
   | 'knowledgeBase'
@@ -468,6 +471,7 @@ type TranslationProviderOption = {
 
 const tabs: { id: SettingsTab; labelKey: TranslationKey; Icon: LucideIcon }[] = [
   { id: 'general', labelKey: 'settings.tabs.general', Icon: SlidersHorizontal },
+  { id: 'developerTools', labelKey: 'settings.tabs.developerTools', Icon: Code2 },
   { id: 'personalization', labelKey: 'settings.tabs.personalization', Icon: FileText },
   { id: 'memory', labelKey: 'settings.tabs.memory', Icon: Brain },
   { id: 'knowledgeBase', labelKey: 'settings.tabs.knowledgeBase', Icon: BookOpen },
@@ -843,6 +847,8 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
                   setLocale={setLocale}
                   setPromptAutoTranslate={setPromptAutoTranslate}
                 />
+              ) : tab === 'developerTools' ? (
+                <TaskDeveloperToolsSettings locale={locale} />
               ) : tab === 'personalization' ? (
                 <PersonalizationSettings
                   locale={locale}

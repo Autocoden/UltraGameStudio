@@ -224,6 +224,27 @@ afterEach(async () => {
 });
 
 describe('simple-workflow chat mode', () => {
+  it('uses the selected local agent for project access even when a direct API route exists', async () => {
+    resetStore(simpleBlueprint('Project terminal'));
+    mockDirectRoute();
+    tauriMocks.isTauri.mockReturnValue(true);
+    tauriMocks.tauriAvailable.mockReturnValue(true);
+    useStore.setState({ composer: { ...defaultComposer, workspace: 'D:/project', permission: 'readonly' } });
+    gatewayMocks.resolveCliGatewayRoute.mockResolvedValue({
+      selection: { adapter: 'zcode', modelClass: 'sonnet' },
+      adapter: 'zcode', model: 'glm-5', transport: 'cli', mode: 'cli',
+      label: 'GLM', source: 'provider', cliCommand: 'zcode',
+      env: { ANTHROPIC_BASE_URL: 'https://glm.example' },
+    });
+    tauriMocks.aiEditViaCli.mockResolvedValue('Project files inspected');
+    useStore.getState().sendPrompt('Read the project directory');
+    await waitFor(() => useStore.getState().messages.some(m => m.text.includes('Project files inspected')), 'project agent output');
+    expect(tauriMocks.aiEditViaCli).toHaveBeenCalledWith(expect.any(String), 'zcode', expect.objectContaining({
+      cwd: 'D:/project', permission: 'readonly', model: 'glm-5',
+      env: expect.objectContaining({ ANTHROPIC_BASE_URL: 'https://glm.example' }),
+    }));
+    expect(gatewayMocks.completeGatewayText).not.toHaveBeenCalled();
+  });
   it('does not treat a background AI-edit channel as the active view', () => {
     // A UGS_GEN generation driven from inside the chat loop is marked
     // `background: true`; its two-message shadow view must never flash over the

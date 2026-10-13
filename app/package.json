@@ -17,12 +17,15 @@
     "test": "vitest run --environment jsdom",
     "cli:build": "node cli/build.mjs",
     "cli:dev": "node --experimental-strip-types cli/bin/ugs.ts",
+    "stage:openspec": "node scripts/stage-openspec.mjs",
+    "verify:openspec-runtime": "npm run stage:openspec && node scripts/verify-openspec-runtime.mjs",
     "tauri": "tauri",
     "desktop": "tauri dev",
     "check:built-in-workflows": "node scripts/check-built-in-workflows.mjs",
     "package": "npm run cli:build && npm run check:built-in-workflows && node scripts/tauri-build-platform.mjs"
   },
   "dependencies": {
+    "@fission-ai/openspec": "1.13.0",
     "@tauri-apps/api": "^2.11.0",
     "@tauri-apps/plugin-dialog": "^2.7.1",
     "@tauri-apps/plugin-fs": "^2.5.1",

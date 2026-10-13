@@ -356,11 +356,18 @@ function MarkdownImpl({
     children: ReactNode,
   ): { title: string; body: ReactNode } | null => {
     const arr = Array.isArray(children) ? children : [children];
-    const intro = plainText(arr[0]);
+    const introIndex = arr.findIndex(
+      (child) => plainText(child).trim().length > 0,
+    );
+    if (introIndex < 0) return null;
+    const intro = plainText(arr[introIndex]);
     if (!detectDetails(intro)) return null;
     return {
       title: detectDetailsTitle(intro),
-      body: arr.length > 1 ? arr.slice(1) : null,
+      body:
+        arr.length > 1
+          ? [...arr.slice(0, introIndex), ...arr.slice(introIndex + 1)]
+          : null,
     };
   };
 

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from "vitest";
 import {
   preferRicherSnapshot,
   readUsageMeterSnapshot,
@@ -12,36 +12,36 @@ import {
   usageReportFromOpenAI,
   usageTurnFromReport,
   usageTurnFromSnapshots,
-} from './usageMeter';
+} from "./usageMeter";
 
 const selection = {
-  adapter: 'claude-code',
-  modelClass: 'sonnet',
+  adapter: "claude-code",
+  modelClass: "sonnet",
 } as const;
 
-describe('usage meter', () => {
+describe("usage meter", () => {
   beforeEach(() => {
     window.localStorage.clear();
   });
 
-  it('persists token totals per session context', () => {
+  it("persists token totals per session context", () => {
     recordEstimatedModelUsageForSelection(
       selection,
-      'hello from session one',
-      'reply one',
-      { providerName: 'DeepSeek', model: 'deepseek-chat' },
-      { context: { workspaceId: 'w1', sessionId: 's1' } },
+      "hello from session one",
+      "reply one",
+      { providerName: "DeepSeek", model: "deepseek-chat" },
+      { context: { workspaceId: "w1", sessionId: "s1" } },
     );
     recordEstimatedModelUsageForSelection(
       selection,
-      'hello from session two '.repeat(20),
-      'reply two '.repeat(20),
-      { providerName: 'DeepSeek', model: 'deepseek-chat' },
-      { context: { workspaceId: 'w1', sessionId: 's2' } },
+      "hello from session two ".repeat(20),
+      "reply two ".repeat(20),
+      { providerName: "DeepSeek", model: "deepseek-chat" },
+      { context: { workspaceId: "w1", sessionId: "s2" } },
     );
 
-    const s1 = readUsageMeterSnapshot({ workspaceId: 'w1', sessionId: 's1' });
-    const s2 = readUsageMeterSnapshot({ workspaceId: 'w1', sessionId: 's2' });
+    const s1 = readUsageMeterSnapshot({ workspaceId: "w1", sessionId: "s1" });
+    const s2 = readUsageMeterSnapshot({ workspaceId: "w1", sessionId: "s2" });
 
     expect(s1.totals.calls).toBe(1);
     expect(s2.totals.calls).toBe(1);
@@ -49,42 +49,46 @@ describe('usage meter', () => {
     expect(s2.totals.totalTokens).toBeGreaterThan(s1.totals.totalTokens);
   });
 
-  it('keeps sessions separate from the global fallback bucket', () => {
-    recordEstimatedModelUsageForSelection(selection, 'global', 'reply');
+  it("keeps sessions separate from the global fallback bucket", () => {
+    recordEstimatedModelUsageForSelection(selection, "global", "reply");
     recordEstimatedModelUsageForSelection(
       selection,
-      'session',
-      'reply',
-      { providerName: 'DeepSeek', model: 'deepseek-chat' },
-      { context: { workspaceId: 'w1', sessionId: 's1' } },
+      "session",
+      "reply",
+      { providerName: "DeepSeek", model: "deepseek-chat" },
+      { context: { workspaceId: "w1", sessionId: "s1" } },
     );
 
     expect(readUsageMeterSnapshot().totals.calls).toBe(1);
-    expect(readUsageMeterSnapshot({ workspaceId: 'w1', sessionId: 's1' }).totals.calls)
-      .toBe(1);
-    expect(readUsageMeterSnapshot({ workspaceId: 'w1', sessionId: 's2' }).totals.calls)
-      .toBe(0);
+    expect(
+      readUsageMeterSnapshot({ workspaceId: "w1", sessionId: "s1" }).totals
+        .calls,
+    ).toBe(1);
+    expect(
+      readUsageMeterSnapshot({ workspaceId: "w1", sessionId: "s2" }).totals
+        .calls,
+    ).toBe(0);
   });
 
-  it('falls back to the default-workspace bucket when a session gains a workspace id later', () => {
+  it("falls back to the default-workspace bucket when a session gains a workspace id later", () => {
     recordEstimatedModelUsageForSelection(
       selection,
-      'created before workspace resolved',
-      'reply',
-      { providerName: 'Claude Code', model: 'sonnet' },
-      { context: { sessionId: 's1' } },
+      "created before workspace resolved",
+      "reply",
+      { providerName: "Claude Code", model: "sonnet" },
+      { context: { sessionId: "s1" } },
     );
 
     const snapshot = readUsageMeterSnapshot({
-      workspaceId: 'w1',
-      sessionId: 's1',
+      workspaceId: "w1",
+      sessionId: "s1",
     });
 
     expect(snapshot.totals.calls).toBe(1);
     expect(snapshot.totals.totalTokens).toBeGreaterThan(0);
   });
 
-  it('records OpenAI-compatible cached token usage as real data', () => {
+  it("records OpenAI-compatible cached token usage as real data", () => {
     const report = usageReportFromOpenAI({
       prompt_tokens: 100,
       completion_tokens: 20,
@@ -93,18 +97,21 @@ describe('usage meter', () => {
     });
 
     recordModelUsageForRoute(
-      { providerName: 'OpenAI', model: 'gpt-5.1' },
+      { providerName: "OpenAI", model: "gpt-5.1" },
       report!,
-      { estimated: false, context: { workspaceId: 'w1', sessionId: 's1' } },
+      { estimated: false, context: { workspaceId: "w1", sessionId: "s1" } },
     );
 
-    const snapshot = readUsageMeterSnapshot({ workspaceId: 'w1', sessionId: 's1' });
+    const snapshot = readUsageMeterSnapshot({
+      workspaceId: "w1",
+      sessionId: "s1",
+    });
     expect(snapshot.lastCall.estimated).toBe(false);
     expect(snapshot.lastCall.cachedInputTokens).toBe(64);
     expect(snapshot.lastCall.cachePercent).toBe(64);
   });
 
-  it('records Codex CLI cached token usage as real data', () => {
+  it("records Codex CLI cached token usage as real data", () => {
     const report = usageReportFromCodex({
       input_tokens: 22451,
       cached_input_tokens: 11648,
@@ -113,19 +120,23 @@ describe('usage meter', () => {
     });
 
     recordModelUsageForRoute(
-      { providerName: 'RelayAI', model: 'gpt-5.5' },
+      { providerName: "RelayAI", model: "gpt-5.5" },
       report!,
-      { estimated: false, context: { workspaceId: 'w1', sessionId: 's1' } },
+      { estimated: false, context: { workspaceId: "w1", sessionId: "s1" } },
     );
 
-    const snapshot = readUsageMeterSnapshot({ workspaceId: 'w1', sessionId: 's1' });
+    const snapshot = readUsageMeterSnapshot({
+      workspaceId: "w1",
+      sessionId: "s1",
+    });
     expect(snapshot.lastCall.estimated).toBe(false);
     expect(snapshot.lastCall.inputTokens).toBe(22451);
     expect(snapshot.lastCall.cachedInputTokens).toBe(11648);
     expect(snapshot.lastCall.cachePercent).toBeCloseTo(51.88, 2);
+    expect(report?.thinkingTokens).toBe(21);
   });
 
-  it('folds Anthropic CLI cache tokens into visible input but counts only reads as hits', () => {
+  it("folds Anthropic CLI cache tokens into visible input but counts only reads as hits", () => {
     // claude stream-json reports input_tokens as the *uncached* prefix only;
     // cache reads/writes live in cache_read/cache_creation.
     const report = usageReportFromCliUsage({
@@ -140,12 +151,15 @@ describe('usage meter', () => {
     expect(report!.inputTokens).toBe(1000);
 
     recordModelUsageForRoute(
-      { providerName: 'Anthropic', model: 'claude-sonnet-4' },
+      { providerName: "Anthropic", model: "claude-sonnet-4" },
       report!,
-      { estimated: false, context: { workspaceId: 'w1', sessionId: 's1' } },
+      { estimated: false, context: { workspaceId: "w1", sessionId: "s1" } },
     );
 
-    const snapshot = readUsageMeterSnapshot({ workspaceId: 'w1', sessionId: 's1' });
+    const snapshot = readUsageMeterSnapshot({
+      workspaceId: "w1",
+      sessionId: "s1",
+    });
     expect(snapshot.lastCall.estimated).toBe(false);
     expect(snapshot.lastCall.inputTokens).toBe(1000);
     expect(snapshot.lastCall.cachedInputTokens).toBe(800);
@@ -153,7 +167,7 @@ describe('usage meter', () => {
     expect(snapshot.lastCall.cachePercent).toBeCloseTo(80, 2);
   });
 
-  it('folds Anthropic API cache tokens into visible input', () => {
+  it("folds Anthropic API cache tokens into visible input", () => {
     const report = usageReportFromAnthropic({
       input_tokens: 120,
       output_tokens: 40,
@@ -170,7 +184,7 @@ describe('usage meter', () => {
     });
   });
 
-  it('treats Codex CLI input_tokens as already inclusive of the cached portion', () => {
+  it("treats Codex CLI input_tokens as already inclusive of the cached portion", () => {
     const report = usageReportFromCliUsage({
       input_tokens: 22451,
       cached_input_tokens: 11648,
@@ -183,12 +197,13 @@ describe('usage meter', () => {
     expect(report!.cacheReadInputTokens).toBe(11648);
   });
 
-  it('reads nested CLI usage payloads from newer JSON event shapes', () => {
+  it("reads nested CLI usage payloads from newer JSON event shapes", () => {
     const report = usageReportFromCliUsage({
       total_token_usage: {
         input_tokens: 1000,
         output_tokens: 50,
         input_tokens_details: { cached_tokens: 640 },
+        output_tokens_details: { reasoning_tokens: 37 },
       },
     });
 
@@ -197,30 +212,31 @@ describe('usage meter', () => {
     expect(report!.outputTokens).toBe(50);
     expect(report!.totalTokens).toBe(1050);
     expect(report!.cacheReadInputTokens).toBe(640);
+    expect(report!.thinkingTokens).toBe(37);
   });
 
-  it('returns null for usage payloads without recognizable token counts', () => {
+  it("returns null for usage payloads without recognizable token counts", () => {
     expect(usageReportFromCliUsage(null)).toBeNull();
     expect(usageReportFromCliUsage({})).toBeNull();
-    expect(usageReportFromCliUsage({ some: 'thing' })).toBeNull();
+    expect(usageReportFromCliUsage({ some: "thing" })).toBeNull();
   });
 
-  it('computes the session cache percent from real calls only', () => {
-    const ctx = { workspaceId: 'w1', sessionId: 's1' };
+  it("computes the session cache percent from real calls only", () => {
+    const ctx = { workspaceId: "w1", sessionId: "s1" };
 
     // An estimated turn first: it must not pollute the session cache ratio.
     recordEstimatedModelUsageForSelection(
       selection,
-      'estimate me '.repeat(50),
-      'reply',
-      { providerName: 'DeepSeek', model: 'deepseek-chat' },
+      "estimate me ".repeat(50),
+      "reply",
+      { providerName: "DeepSeek", model: "deepseek-chat" },
       { context: ctx },
     );
     expect(sessionCachePercent(readUsageMeterSnapshot(ctx))).toBeNull();
 
     // Then a real call with a known cache hit.
     recordModelUsageForRoute(
-      { providerName: 'OpenAI', model: 'gpt-5.1' },
+      { providerName: "OpenAI", model: "gpt-5.1" },
       usageReportFromOpenAI({
         prompt_tokens: 200,
         completion_tokens: 20,
@@ -234,11 +250,11 @@ describe('usage meter', () => {
     expect(sessionCachePercent(readUsageMeterSnapshot(ctx))).toBeCloseTo(75, 5);
   });
 
-  it('migrates legacy session snapshots without real-only totals for cache percent', () => {
+  it("migrates legacy session snapshots without real-only totals for cache percent", () => {
     window.localStorage.setItem(
-      'ugs_usage_meter_by_session_v1',
+      "ugs_usage_meter_by_session_v1",
       JSON.stringify({
-        'w1:s1': {
+        "w1:s1": {
           version: 1,
           totals: {
             calls: 1,
@@ -255,8 +271,8 @@ describe('usage meter', () => {
             cacheCreationInputTokens: 0,
             cachePercent: 60,
             estimated: false,
-            providerLabel: 'Legacy',
-            modelLabel: 'legacy-model',
+            providerLabel: "Legacy",
+            modelLabel: "legacy-model",
             updatedAt: 1,
           },
         },
@@ -264,19 +280,19 @@ describe('usage meter', () => {
     );
 
     const snapshot = readUsageMeterSnapshot({
-      workspaceId: 'w1',
-      sessionId: 's1',
+      workspaceId: "w1",
+      sessionId: "s1",
     });
 
     expect(sessionCachePercent(snapshot)).toBeCloseTo(60, 5);
   });
 
-  it('derives per-turn token usage from the snapshot delta', () => {
-    const ctx = { workspaceId: 'w1', sessionId: 's1' };
+  it("derives per-turn token usage from the snapshot delta", () => {
+    const ctx = { workspaceId: "w1", sessionId: "s1" };
     const before = readUsageMeterSnapshot(ctx);
 
     recordModelUsageForRoute(
-      { providerName: 'OpenAI', model: 'gpt-5.1' },
+      { providerName: "OpenAI", model: "gpt-5.1" },
       usageReportFromOpenAI({
         prompt_tokens: 100,
         completion_tokens: 30,
@@ -287,7 +303,7 @@ describe('usage meter', () => {
     );
     // A second sub-call in the same turn (e.g. a follow-up generation).
     recordModelUsageForRoute(
-      { providerName: 'OpenAI', model: 'gpt-5.1' },
+      { providerName: "OpenAI", model: "gpt-5.1" },
       usageReportFromOpenAI({
         prompt_tokens: 100,
         completion_tokens: 10,
@@ -306,14 +322,14 @@ describe('usage meter', () => {
     expect(delta.estimated).toBe(false);
   });
 
-  it('flags an estimated-only turn delta as estimated', () => {
-    const ctx = { workspaceId: 'w1', sessionId: 's1' };
+  it("flags an estimated-only turn delta as estimated", () => {
+    const ctx = { workspaceId: "w1", sessionId: "s1" };
     const before = readUsageMeterSnapshot(ctx);
     recordEstimatedModelUsageForSelection(
       selection,
-      'just an estimate',
-      'reply text',
-      { providerName: 'DeepSeek', model: 'deepseek-chat' },
+      "just an estimate",
+      "reply text",
+      { providerName: "DeepSeek", model: "deepseek-chat" },
       { context: ctx },
     );
     const delta = usageTurnFromSnapshots(before, readUsageMeterSnapshot(ctx));
@@ -322,7 +338,7 @@ describe('usage meter', () => {
     expect(delta.cachePercent).toBe(0);
   });
 
-  it('derives a message usage delta directly from a real usage report', () => {
+  it("derives a message usage delta directly from a real usage report", () => {
     const delta = usageTurnFromReport(
       usageReportFromOpenAI({
         prompt_tokens: 200,
@@ -341,7 +357,7 @@ describe('usage meter', () => {
     expect(delta.estimated).toBe(false);
   });
 
-  it('does not count cache creation tokens as cache hits in message usage', () => {
+  it("does not count cache creation tokens as cache hits in message usage", () => {
     const delta = usageTurnFromReport(
       {
         inputTokens: 1000,
@@ -357,7 +373,7 @@ describe('usage meter', () => {
     expect(delta.cachePercent).toBe(80);
   });
 
-  it('rebuilds a session snapshot from persisted message turns', () => {
+  it("rebuilds a session snapshot from persisted message turns", () => {
     const snapshot = rebuildSnapshotFromTurns([
       undefined,
       {
@@ -384,7 +400,7 @@ describe('usage meter', () => {
     expect(sessionCachePercent(snapshot)).toBeCloseTo(40, 5);
   });
 
-  it('returns null cache % when rebuilt from estimated-only turns', () => {
+  it("returns null cache % when rebuilt from estimated-only turns", () => {
     const snapshot = rebuildSnapshotFromTurns([
       {
         inputTokens: 80,
@@ -399,7 +415,7 @@ describe('usage meter', () => {
     expect(sessionCachePercent(snapshot)).toBeNull();
   });
 
-  it('prefers whichever snapshot carries more tokens', () => {
+  it("prefers whichever snapshot carries more tokens", () => {
     const live = rebuildSnapshotFromTurns([
       {
         inputTokens: 10,

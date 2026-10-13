@@ -66,6 +66,8 @@ export async function installQuitFlushHandler(): Promise<void> {
     const { listen } = await import("@tauri-apps/api/event");
     if (beforeQuitListener) return;
     beforeQuitListener = () => {
+      runQuitFlushTasks();
+      flushSecretsToLocalStorageFallback();
       // 守卫：仍有会话在运行时，退出必须用户显式确认。否则只 flush 不退出。
       void (async () => {
         try {
@@ -92,8 +94,6 @@ export async function installQuitFlushHandler(): Promise<void> {
           /* fall through:守卫失败不阻断原有 flush+退出流程 */
         }
 
-        runQuitFlushTasks();
-        flushSecretsToLocalStorageFallback();
         void Promise.all([
           flushSecureStorage().catch(() => {
             /* keychain write failed — localStorage fallback above still applies */

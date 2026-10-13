@@ -2,28 +2,27 @@ import type {
   GatewaySelection,
   ModelClass,
   NodeGatewayOverride,
-} from '@/core/ir';
-import type { ProviderRuntimeStatus } from '@/lib/apiConfig';
-import type { RuntimeAdapterId } from '@/lib/adapters';
-import type { UsageMeterContext } from '@/lib/usageMeter';
+} from "@/core/ir";
+import type { ProviderRuntimeStatus } from "@/lib/apiConfig";
+import type { RuntimeAdapterId } from "@/lib/adapters";
+import type { UsageMeterContext } from "@/lib/usageMeter";
 
 export type { GatewaySelection, ModelClass, NodeGatewayOverride };
 
 export type GatewayTransport =
-  | 'anthropic'
-  | 'openai-compatible'
-  | 'cli'
-  | 'simulator';
+  "anthropic" | "openai-compatible" | "cli" | "simulator";
+
+export type GatewayThinkingLevel = "low" | "medium" | "high" | "xhigh";
 
 export const DEFAULT_GATEWAY_SELECTION: GatewaySelection = {
-  adapter: 'claude-code',
-  modelClass: 'sonnet',
+  adapter: "claude-code",
+  modelClass: "sonnet",
 };
 
 export const MODEL_CLASSES = [
-  { id: 'sonnet', label: 'Sonnet' },
-  { id: 'opus', label: 'Opus' },
-  { id: 'haiku', label: 'Haiku' },
+  { id: "sonnet", label: "Sonnet" },
+  { id: "opus", label: "Opus" },
+  { id: "haiku", label: "Haiku" },
 ] as const satisfies ReadonlyArray<{ id: ModelClass; label: string }>;
 
 export interface GatewayChannel {
@@ -85,12 +84,12 @@ export interface ResolvedGatewayRoute {
   channelId?: string;
   channelName?: string;
   transport: GatewayTransport;
-  mode: 'direct' | 'cli' | 'simulator';
+  mode: "direct" | "cli" | "simulator";
   apiKey?: string;
   baseUrl?: string;
   cliCommand?: string;
   label: string;
-  source: 'global' | 'node' | 'fallback';
+  source: "global" | "node" | "fallback";
   env?: Record<string, string>;
 }
 
@@ -107,6 +106,8 @@ export interface GatewayTextRequest {
    */
   userImages?: string[];
   maxTokens?: number;
+  /** Reasoning effort requested for this turn. */
+  thinkingLevel?: GatewayThinkingLevel;
   signal?: AbortSignal;
   runId?: string;
   usageContext?: UsageMeterContext;
@@ -115,6 +116,7 @@ export interface GatewayTextRequest {
     inputTokens?: number;
     outputTokens?: number;
     totalTokens?: number;
+    thinkingTokens?: number;
     cacheReadInputTokens?: number;
     cacheCreationInputTokens?: number;
   }) => void;

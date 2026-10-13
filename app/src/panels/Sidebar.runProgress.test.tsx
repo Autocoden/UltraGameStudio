@@ -2110,7 +2110,9 @@ describe('Sidebar session search', () => {
     try {
       await changeInputValue(historySearchInput(view.container), 'missing');
 
-      expect(view.container.textContent).toContain('没有找到匹配的会话');
+      await vi.waitFor(() =>
+        expect(view.container.textContent).toContain('没有找到匹配的会话'),
+      );
       expect(view.container.textContent).not.toContain('Workflow run');
 
       const clearButton = Array.from(
@@ -2182,7 +2184,9 @@ describe('Sidebar session search', () => {
         deploySession.id,
         WORKSPACE.id,
       );
-      expect(view.container.textContent).toContain('没有找到匹配的会话');
+      await vi.waitFor(() =>
+        expect(view.container.textContent).toContain('没有找到匹配的会话'),
+      );
       expect(view.container.textContent).not.toContain('Deploy Pipeline');
       expect(view.container.textContent).not.toContain('Review Notes');
     } finally {
@@ -2249,7 +2253,9 @@ describe('Sidebar session search', () => {
         WORKSPACE.id,
         'Published Workflow',
       );
-      expect(view.container.textContent).toContain('没有找到匹配的会话');
+      await vi.waitFor(() =>
+        expect(view.container.textContent).toContain('没有找到匹配的会话'),
+      );
       expect(view.container.textContent).not.toContain('Draft Workflow');
       expect(view.container.textContent).not.toContain('Archive Workflow');
     } finally {

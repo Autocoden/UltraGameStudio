@@ -5214,8 +5214,15 @@ export const useStore = create<StoreState>((set, get) => ({
     );
     const projectMcpGuidance = projectMcpGuidanceForState(state, aiEditingSession);
     const preferCliForProjectMcp = inTauri && !!projectMcpGuidance;
-    const useApi = !!directRoute && !preferCliForProjectMcp;
-    const useCli = (!useApi && inTauri) || preferCliForProjectMcp;
+    // A text-only API request has no filesystem tools. Project chat must run
+    // through the selected provider's local agent, carrying the same cwd and
+    // permission as the composer. Keep browser and remote execution routes.
+    const terminalCwd = aiEditCliWorkspaceOptions(ch, state.composer).cwd;
+    const preferCliForProjectChat = inTauri && simpleMode && !!terminalCwd &&
+      !isRemoteWorkspacePath(terminalCwd) && !parseRemoteProviderId(gatewaySelection.providerId);
+    const preferCli = preferCliForProjectMcp || preferCliForProjectChat;
+    const useApi = !!directRoute && !preferCli;
+    const useCli = (!useApi && inTauri) || preferCli;
     const selectedRemoteWorkspaceConfig =
       simpleMode && workspaceRootPath && isRemoteWorkspacePath(workspaceRootPath)
         ? getRemoteWorkspace(remoteWorkspaceIdFromPath(workspaceRootPath))

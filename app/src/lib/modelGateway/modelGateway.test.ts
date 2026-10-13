@@ -1,9 +1,6 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { completeGatewayText } from './modelGateway';
-import {
-  readUsageMeterSnapshot,
-  sessionCachePercent,
-} from '@/lib/usageMeter';
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { completeGatewayText } from "./modelGateway";
+import { readUsageMeterSnapshot, sessionCachePercent } from "@/lib/usageMeter";
 
 const mocks = vi.hoisted(() => ({
   aiEditViaCli: vi.fn(),
@@ -14,25 +11,25 @@ const mocks = vi.hoisted(() => ({
   resolveCliInvocation: vi.fn(),
 }));
 
-vi.mock('@/lib/tauri', () => ({
+vi.mock("@/lib/tauri", () => ({
   aiEditViaCli: mocks.aiEditViaCli,
   isTauri: mocks.isTauri,
 }));
 
-vi.mock('@/lib/cliConfig', () => ({
+vi.mock("@/lib/cliConfig", () => ({
   primeCliRuntime: mocks.primeCliRuntime,
   resolveCliInvocation: mocks.resolveCliInvocation,
 }));
 
-vi.mock('./adapters/anthropic', () => ({
+vi.mock("./adapters/anthropic", () => ({
   completeAnthropic: mocks.completeAnthropic,
 }));
 
-vi.mock('./adapters/openaiCompatible', () => ({
+vi.mock("./adapters/openaiCompatible", () => ({
   completeOpenAICompatible: mocks.completeOpenAICompatible,
 }));
 
-describe('completeGatewayText', () => {
+describe("completeGatewayText", () => {
   beforeEach(() => {
     window.localStorage.clear();
     mocks.aiEditViaCli.mockReset();
@@ -45,93 +42,93 @@ describe('completeGatewayText', () => {
     mocks.isTauri.mockReturnValue(true);
     mocks.primeCliRuntime.mockResolvedValue({ candidates: [] });
     mocks.resolveCliInvocation.mockResolvedValue({
-      adapter: 'claude-code',
-      command: 'claude',
-      status: 'ready',
-      source: 'system',
+      adapter: "claude-code",
+      command: "claude",
+      status: "ready",
+      source: "system",
     });
-    mocks.aiEditViaCli.mockResolvedValue('cli fallback');
+    mocks.aiEditViaCli.mockResolvedValue("cli fallback");
   });
 
-  it('falls back to Claude Code CLI when browser-direct Anthropic fetch fails', async () => {
-    mocks.completeAnthropic.mockRejectedValue(new TypeError('Failed to fetch'));
+  it("falls back to Claude Code CLI when browser-direct Anthropic fetch fails", async () => {
+    mocks.completeAnthropic.mockRejectedValue(new TypeError("Failed to fetch"));
 
     const route = {
       selection: {
-        adapter: 'claude-code' as const,
-        modelClass: 'sonnet' as const,
-        providerId: 'relay_provider',
-        channelId: 'default',
+        adapter: "claude-code" as const,
+        modelClass: "sonnet" as const,
+        providerId: "relay_provider",
+        channelId: "default",
       },
-      adapter: 'claude-code' as const,
-      modelClass: 'sonnet' as const,
-      model: 'kimi-for-coding',
-      providerId: 'relay_provider',
-      channelId: 'default',
-      transport: 'anthropic' as const,
-      mode: 'direct' as const,
-      apiKey: 'sk-imported',
-      baseUrl: 'https://api.kimi.com/coding/',
-      label: 'Claude Code · Kimi',
-      source: 'global' as const,
+      adapter: "claude-code" as const,
+      modelClass: "sonnet" as const,
+      model: "kimi-for-coding",
+      providerId: "relay_provider",
+      channelId: "default",
+      transport: "anthropic" as const,
+      mode: "direct" as const,
+      apiKey: "sk-imported",
+      baseUrl: "https://api.kimi.com/coding/",
+      label: "Claude Code · Kimi",
+      source: "global" as const,
       env: {
-        ANTHROPIC_API_KEY: 'sk-imported',
-        ANTHROPIC_AUTH_TOKEN: 'sk-imported',
-        ANTHROPIC_BASE_URL: 'https://api.kimi.com/coding/',
-        ANTHROPIC_MODEL: 'kimi-for-coding',
+        ANTHROPIC_API_KEY: "sk-imported",
+        ANTHROPIC_AUTH_TOKEN: "sk-imported",
+        ANTHROPIC_BASE_URL: "https://api.kimi.com/coding/",
+        ANTHROPIC_MODEL: "kimi-for-coding",
       },
     };
 
     await expect(
       completeGatewayText({
         route,
-        system: 'system prompt',
-        userContent: 'user prompt',
+        system: "system prompt",
+        userContent: "user prompt",
       }),
-    ).resolves.toBe('cli fallback');
+    ).resolves.toBe("cli fallback");
 
     expect(mocks.aiEditViaCli).toHaveBeenCalledWith(
-      'system prompt\n\nuser prompt',
-      'claude-code',
+      "system prompt\n\nuser prompt",
+      "claude-code",
       expect.objectContaining({
-        cliCommand: 'claude',
+        cliCommand: "claude",
         env: route.env,
-        model: 'kimi-for-coding',
-        permission: 'full',
+        model: "kimi-for-coding",
+        permission: "full",
       }),
     );
   });
 
-  it('uses browser-direct Anthropic for keyless localhost routes', async () => {
-    mocks.completeAnthropic.mockResolvedValue('local answer');
+  it("uses browser-direct Anthropic for keyless localhost routes", async () => {
+    mocks.completeAnthropic.mockResolvedValue("local answer");
 
     const route = {
       selection: {
-        adapter: 'claude-code' as const,
-        modelClass: 'sonnet' as const,
-        providerId: 'local_anthropic',
-        channelId: 'default',
+        adapter: "claude-code" as const,
+        modelClass: "sonnet" as const,
+        providerId: "local_anthropic",
+        channelId: "default",
       },
-      adapter: 'claude-code' as const,
-      modelClass: 'sonnet' as const,
-      model: 'gemini-3-flash',
-      providerId: 'local_anthropic',
-      channelId: 'default',
-      transport: 'anthropic' as const,
-      mode: 'direct' as const,
-      apiKey: '',
-      baseUrl: 'http://127.0.0.1:8045',
-      label: 'Claude Code · Local Antigravity',
-      source: 'global' as const,
+      adapter: "claude-code" as const,
+      modelClass: "sonnet" as const,
+      model: "gemini-3-flash",
+      providerId: "local_anthropic",
+      channelId: "default",
+      transport: "anthropic" as const,
+      mode: "direct" as const,
+      apiKey: "",
+      baseUrl: "http://127.0.0.1:8045",
+      label: "Claude Code · Local Antigravity",
+      source: "global" as const,
     };
 
     await expect(
       completeGatewayText({
         route,
-        system: 'system prompt',
-        userContent: 'user prompt',
+        system: "system prompt",
+        userContent: "user prompt",
       }),
-    ).resolves.toBe('local answer');
+    ).resolves.toBe("local answer");
 
     expect(mocks.completeAnthropic).toHaveBeenCalledWith(
       expect.objectContaining({ route }),
@@ -139,36 +136,36 @@ describe('completeGatewayText', () => {
     expect(mocks.aiEditViaCli).not.toHaveBeenCalled();
   });
 
-  it('uses browser-direct OpenAI-compatible for keyless localhost routes', async () => {
-    mocks.completeOpenAICompatible.mockResolvedValue('local openai answer');
+  it("uses browser-direct OpenAI-compatible for keyless localhost routes", async () => {
+    mocks.completeOpenAICompatible.mockResolvedValue("local openai answer");
 
     const route = {
       selection: {
-        adapter: 'codex' as const,
-        modelClass: 'gpt-oss' as const,
-        providerId: 'local_openai',
-        channelId: 'default',
+        adapter: "codex" as const,
+        modelClass: "gpt-oss" as const,
+        providerId: "local_openai",
+        channelId: "default",
       },
-      adapter: 'codex' as const,
-      modelClass: 'gpt-oss' as const,
-      model: 'gpt-oss',
-      providerId: 'local_openai',
-      channelId: 'default',
-      transport: 'openai-compatible' as const,
-      mode: 'direct' as const,
-      apiKey: '',
-      baseUrl: 'http://localhost:1234/v1',
-      label: 'Codex · Local OpenAI-compatible',
-      source: 'global' as const,
+      adapter: "codex" as const,
+      modelClass: "gpt-oss" as const,
+      model: "gpt-oss",
+      providerId: "local_openai",
+      channelId: "default",
+      transport: "openai-compatible" as const,
+      mode: "direct" as const,
+      apiKey: "",
+      baseUrl: "http://localhost:1234/v1",
+      label: "Codex · Local OpenAI-compatible",
+      source: "global" as const,
     };
 
     await expect(
       completeGatewayText({
         route,
-        system: 'system prompt',
-        userContent: 'user prompt',
+        system: "system prompt",
+        userContent: "user prompt",
       }),
-    ).resolves.toBe('local openai answer');
+    ).resolves.toBe("local openai answer");
 
     expect(mocks.completeOpenAICompatible).toHaveBeenCalledWith(
       expect.objectContaining({ route }),
@@ -176,54 +173,93 @@ describe('completeGatewayText', () => {
     expect(mocks.aiEditViaCli).not.toHaveBeenCalled();
   });
 
-  it('falls back to Codex CLI when a relay only supports Responses', async () => {
+  it("falls back to Codex CLI when a relay only supports Responses", async () => {
     mocks.completeOpenAICompatible.mockRejectedValue(
       new Error(
         'HTTP 400: {"error":{"code":"protocol_not_supported","message":"模型不支持 chat completions 协议"}}',
       ),
     );
     mocks.resolveCliInvocation.mockResolvedValue({
-      adapter: 'codex',
-      command: 'codex',
-      status: 'ready',
-      source: 'system',
+      adapter: "codex",
+      command: "codex",
+      status: "ready",
+      source: "system",
     });
 
     const route = {
       selection: {
-        adapter: 'codex' as const,
-        modelClass: 'gpt-5.6-sol' as const,
-        providerId: 'packy',
-        channelId: 'default',
+        adapter: "codex" as const,
+        modelClass: "gpt-5.6-sol" as const,
+        providerId: "packy",
+        channelId: "default",
       },
-      adapter: 'codex' as const,
-      modelClass: 'gpt-5.6-sol' as const,
-      model: 'gpt-5.6-sol',
-      providerId: 'packy',
-      channelId: 'default',
-      transport: 'openai-compatible' as const,
-      mode: 'direct' as const,
-      apiKey: 'sk-relay',
-      baseUrl: 'https://www.packyapi.com/v1',
-      label: 'Codex · packy',
-      source: 'global' as const,
+      adapter: "codex" as const,
+      modelClass: "gpt-5.6-sol" as const,
+      model: "gpt-5.6-sol",
+      providerId: "packy",
+      channelId: "default",
+      transport: "openai-compatible" as const,
+      mode: "direct" as const,
+      apiKey: "sk-relay",
+      baseUrl: "https://www.packyapi.com/v1",
+      label: "Codex · packy",
+      source: "global" as const,
       env: {
-        OPENAI_API_KEY: 'sk-relay',
-        OPENAI_BASE_URL: 'https://www.packyapi.com/v1',
+        OPENAI_API_KEY: "sk-relay",
+        OPENAI_BASE_URL: "https://www.packyapi.com/v1",
       },
     };
 
     await expect(
-      completeGatewayText({ route, system: 'system prompt', userContent: 'user prompt' }),
-    ).resolves.toBe('cli fallback');
+      completeGatewayText({
+        route,
+        system: "system prompt",
+        userContent: "user prompt",
+      }),
+    ).resolves.toBe("cli fallback");
     expect(mocks.aiEditViaCli).toHaveBeenCalledWith(
-      'system prompt\n\nuser prompt',
-      'codex',
-      expect.objectContaining({ cliCommand: 'codex', model: 'gpt-5.6-sol' }),
+      "system prompt\n\nuser prompt",
+      "codex",
+      expect.objectContaining({ cliCommand: "codex", model: "gpt-5.6-sol" }),
     );
   });
 
-  it('records Anthropic-style CLI cache usage through the generic CLI parser', async () => {
+  it("forwards CLI progress chunks to the gateway delta callback", async () => {
+    const onDelta = vi.fn();
+    mocks.aiEditViaCli.mockImplementation(async (_prompt, _adapter, opts) => {
+      opts.onProgress?.("第一段");
+      opts.onProgress?.("第二段");
+      return "完整结果";
+    });
+
+    await expect(
+      completeGatewayText({
+        route: {
+          selection: { adapter: "claude-code", modelClass: "sonnet" },
+          adapter: "claude-code",
+          modelClass: "sonnet",
+          model: "sonnet",
+          transport: "cli",
+          mode: "cli",
+          label: "Claude Code",
+          source: "fallback",
+        },
+        system: "system prompt",
+        userContent: "user prompt",
+        thinkingLevel: "high",
+        onDelta,
+      }),
+    ).resolves.toBe("完整结果");
+
+    expect(onDelta.mock.calls).toEqual([["第一段"], ["第二段"]]);
+    expect(mocks.aiEditViaCli).toHaveBeenCalledWith(
+      "system prompt\n\nuser prompt",
+      "claude-code",
+      expect.objectContaining({ onProgress: onDelta, thinkingLevel: "high" }),
+    );
+  });
+
+  it("records Anthropic-style CLI cache usage through the generic CLI parser", async () => {
     mocks.aiEditViaCli.mockImplementation(async (_prompt, _adapter, opts) => {
       opts.onUsage?.({
         input_tokens: 120,
@@ -231,28 +267,28 @@ describe('completeGatewayText', () => {
         cache_read_input_tokens: 800,
         cache_creation_input_tokens: 80,
       });
-      return 'cli answer';
+      return "cli answer";
     });
 
     await completeGatewayText({
       route: {
-        selection: { adapter: 'claude-code', modelClass: 'sonnet' },
-        adapter: 'claude-code',
-        modelClass: 'sonnet',
-        model: 'sonnet',
-        transport: 'cli',
-        mode: 'cli',
-        label: 'Claude Code',
-        source: 'fallback',
+        selection: { adapter: "claude-code", modelClass: "sonnet" },
+        adapter: "claude-code",
+        modelClass: "sonnet",
+        model: "sonnet",
+        transport: "cli",
+        mode: "cli",
+        label: "Claude Code",
+        source: "fallback",
       },
-      system: 'system prompt',
-      userContent: 'user prompt',
-      usageContext: { workspaceId: 'w1', sessionId: 's1' },
+      system: "system prompt",
+      userContent: "user prompt",
+      usageContext: { workspaceId: "w1", sessionId: "s1" },
     });
 
     const snapshot = readUsageMeterSnapshot({
-      workspaceId: 'w1',
-      sessionId: 's1',
+      workspaceId: "w1",
+      sessionId: "s1",
     });
     expect(snapshot.totals.inputTokens).toBe(1000);
     expect(snapshot.totals.outputTokens).toBe(40);

@@ -1,8 +1,7 @@
-import type { IRGraph } from '@/core/ir';
-import type {
-  WorkspaceDirectoryListing,
-} from '@ugs/protocol';
-import { runShellPayload } from '@/lib/shellConfig';
+import type { IRGraph } from "@/core/ir";
+import type { WorkspaceDirectoryListing } from "@ugs/protocol";
+import type { TaskIDEId, TaskTerminalId } from "@/lib/taskDeveloperTools";
+import { runShellPayload } from "@/lib/shellConfig";
 import {
   markAssetDone,
   markDownloadDone,
@@ -12,7 +11,7 @@ import {
   type AssetKind,
   type AssetOrigin,
   type AssetSource,
-} from '@/lib/downloadRegistry';
+} from "@/lib/downloadRegistry";
 
 /**
  * CONTRACT: thin, browser-safe bridge to the Tauri Rust backend.
@@ -34,7 +33,7 @@ import {
  */
 
 /** Per-node runtime status pushed from the backend over 'workflow-node'. */
-export type WorkflowNodeState = 'idle' | 'running' | 'success' | 'error';
+export type WorkflowNodeState = "idle" | "running" | "success" | "error";
 
 /** Payload of a 'workflow-node' event. */
 export interface WorkflowNodeEvent {
@@ -42,7 +41,7 @@ export interface WorkflowNodeEvent {
   state: WorkflowNodeState;
 }
 
-export type CliPlatform = 'windows' | 'macos' | 'linux';
+export type CliPlatform = "windows" | "macos" | "linux";
 
 export interface ModelCliCandidate {
   adapter: string;
@@ -77,11 +76,11 @@ export interface CliVersionStatus {
   installable?: boolean;
 }
 
-export type SlashCatalogEntryKind = 'command' | 'skill';
+export type SlashCatalogEntryKind = "command" | "skill";
 
 export interface SlashCatalogText {
-  'zh-CN'?: string;
-  'en-US'?: string;
+  "zh-CN"?: string;
+  "en-US"?: string;
   [locale: string]: string | undefined;
 }
 
@@ -112,7 +111,7 @@ export interface SkillInstallTarget {
   skills: string[];
   isDefault: boolean;
   /** "project" for the active workspace's skill dirs, "global" otherwise. */
-  scope: 'project' | 'global';
+  scope: "project" | "global";
 }
 
 export interface InstalledSkill {
@@ -146,7 +145,7 @@ export interface CapabilityTranslateResult {
 }
 
 export interface CapabilityTranslateRequest {
-  kind: 'skill' | 'mcp' | 'lsp';
+  kind: "skill" | "mcp" | "lsp";
   projectRoot?: string | null;
   targets: string[];
   overwrite?: boolean;
@@ -203,7 +202,7 @@ export interface LocalModelHardware {
 export interface LocalFilePreview {
   path: string;
   fileName: string;
-  kind: 'text' | 'image' | 'video' | 'binary' | 'document';
+  kind: "text" | "image" | "video" | "binary" | "document";
   mime?: string | null;
   sizeBytes: number;
   truncated: boolean;
@@ -213,7 +212,7 @@ export interface LocalFilePreview {
 
 export interface KnowledgeBaseScanSource {
   path: string;
-  kind?: 'file' | 'folder' | null;
+  kind?: "file" | "folder" | null;
   enabled?: boolean | null;
 }
 
@@ -237,7 +236,7 @@ export interface KnowledgeBaseScanResult {
 export type {
   WorkspaceDirectoryListing,
   WorkspaceTreeEntry,
-} from '@ugs/protocol';
+} from "@ugs/protocol";
 
 /**
  * Result of preparing an isolated working directory for a "worktree"-mode
@@ -246,11 +245,12 @@ export type {
  */
 export interface IsolatedWorkspace {
   path: string;
-  kind: 'worktree' | 'copy';
+  kind: "worktree" | "copy";
   branch?: string | null;
 }
 
-export type ProjectEngineKind = 'unreal' | 'unity' | 'godot' | 'cocos' | 'unknown';
+export type ProjectEngineKind =
+  "unreal" | "unity" | "godot" | "cocos" | "unknown";
 
 export interface ProjectEngineDetection {
   engine: ProjectEngineKind;
@@ -274,7 +274,7 @@ export interface ProjectMcpServerSuggestion {
   id: string;
   label: string;
   description: string;
-  transport: 'stdio' | string;
+  transport: "stdio" | string;
   command: string;
   args: string[];
   env: Record<string, string>;
@@ -294,7 +294,7 @@ export interface ProjectEnvironmentScan {
 
 export interface ProjectMcpProbeServerConfig {
   id: string;
-  transport: 'stdio' | 'streamable-http' | string;
+  transport: "stdio" | "streamable-http" | string;
   command?: string | null;
   args?: string[] | null;
   env?: Record<string, string> | null;
@@ -353,10 +353,10 @@ export interface ProjectLspInstallResult {
 }
 
 /** Stable server id shared by one-click install + the recommended UE suggestion. */
-export const UE_MCP_SERVER_ID = 'ue-mcp-for-all-versions';
-export const UNITY_MCP_SERVER_ID = 'unity-mcp';
-export const GODOT_MCP_SERVER_ID = 'godot-mcp';
-export const COCOS_MCP_SERVER_ID = 'cocos-mcp-server';
+export const UE_MCP_SERVER_ID = "ue-mcp-for-all-versions";
+export const UNITY_MCP_SERVER_ID = "unity-mcp";
+export const GODOT_MCP_SERVER_ID = "godot-mcp";
+export const COCOS_MCP_SERVER_ID = "cocos-mcp-server";
 
 export interface UnityMcpSetupRequest {
   rootPath: string;
@@ -392,7 +392,7 @@ export interface GenericProjectMcpSetupResult {
   serverId: string;
   label: string;
   description: string;
-  transport: 'stdio' | 'streamable-http' | string;
+  transport: "stdio" | "streamable-http" | string;
   serverCommand?: string | null;
   serverArgs: string[];
   serverUrl?: string | null;
@@ -445,10 +445,7 @@ export interface UeMcpSetupResult {
 }
 
 export type WorkspaceChangeLineKind =
-  | 'added'
-  | 'deleted'
-  | 'replacedAdded'
-  | 'replacedDeleted';
+  "added" | "deleted" | "replacedAdded" | "replacedDeleted";
 
 export interface WorkspaceChangeLine {
   kind: WorkspaceChangeLineKind;
@@ -457,7 +454,8 @@ export interface WorkspaceChangeLine {
   content: string;
 }
 
-export type WorkspaceChangeFileStatus = 'added' | 'modified' | 'deleted' | 'renamed';
+export type WorkspaceChangeFileStatus =
+  "added" | "modified" | "deleted" | "renamed";
 
 export interface WorkspaceChangeFile {
   path: string;
@@ -474,7 +472,127 @@ export interface WorkspaceChanges {
   source?: string;
   files: WorkspaceChangeFile[];
   truncated: boolean;
-  scanScope?: 'root' | 'full' | string;
+  scanScope?: "root" | "full" | string;
+}
+
+export interface TaskGitOverview {
+  currentBranch?: string | null;
+  upstream?: string | null;
+  ahead: number;
+  behind: number;
+  dirty: boolean;
+  remoteUrl?: string | null;
+  defaultBranch?: string | null;
+  branches: string[];
+}
+
+export interface TaskGitCommit {
+  hash: string;
+  shortHash: string;
+  message: string;
+  author: string;
+  date: string;
+  timestamp: number;
+  parents: string[];
+  refs: string[];
+  isMerge: boolean;
+}
+
+export interface TaskGitCommitFile {
+  path: string;
+  previousPath?: string | null;
+  status: "M" | "A" | "D" | "R";
+  additions: number;
+  deletions: number;
+}
+
+export interface TaskGitDiff {
+  text: string;
+  truncated: boolean;
+}
+
+export interface TaskWorktreeReview {
+  exists: boolean;
+  mainRoot: string;
+  worktreePath: string;
+  branch: string;
+  targetBranch: string;
+  files: string[];
+  filesChanged: number;
+  additions: number;
+  deletions: number;
+  commitCount: number;
+  commitsBehind: number;
+  worktreeDirty: boolean;
+  worktreeDirtyFiles: string[];
+  mainDirty: boolean;
+  mainDirtyFiles: string[];
+  potentialConflicts: string[];
+  remoteUrl?: string | null;
+  alreadyMerged: boolean;
+  canIntegrate: boolean;
+}
+
+export interface TaskWorktreeIntegrateResult {
+  success: boolean;
+  staged: boolean;
+  merged: boolean;
+  commitCreated: boolean;
+  worktreeCleaned: boolean;
+  branchDeleted: boolean;
+  cleanupWarning?: string | null;
+  message: string;
+  branch: string;
+  targetBranch: string;
+  files: string[];
+  conflicts: string[];
+}
+
+export interface TaskWorktreePushResult {
+  success: boolean;
+  branch: string;
+  commitCreated: boolean;
+  message: string;
+}
+
+export interface TaskWorktreeCleanupResult {
+  success: boolean;
+  branch: string;
+  branchDeleted: boolean;
+  message: string;
+}
+
+export interface TaskPullRequestResult {
+  success: boolean;
+  url?: string | null;
+  alreadyExists: boolean;
+  branch: string;
+  targetBranch: string;
+  commitCreated: boolean;
+  message: string;
+}
+
+export interface OpenSpecRuntimeStatus {
+  available: boolean;
+  version?: string | null;
+  source?: string | null;
+  executable?: string | null;
+  message?: string | null;
+}
+
+export interface OpenSpecCommandResult {
+  success: boolean;
+  timedOut: boolean;
+  stdout: string;
+  stderr: string;
+  json?: unknown;
+}
+
+export interface OpenSpecPrepareResult {
+  runtime: OpenSpecRuntimeStatus;
+  initialized: boolean;
+  created: boolean;
+  status: OpenSpecCommandResult;
 }
 
 export interface P4PendingListCollectResult {
@@ -547,13 +665,13 @@ export interface SessionCaptureSaveRequest {
 }
 
 export type LocalModelRuntimeState =
-  | 'missing_model'
-  | 'service_unavailable'
-  | 'service_error'
-  | 'model_missing'
-  | 'ready'
-  | 'unsupported'
-  | 'desktop_unavailable';
+  | "missing_model"
+  | "service_unavailable"
+  | "service_error"
+  | "model_missing"
+  | "ready"
+  | "unsupported"
+  | "desktop_unavailable";
 
 export interface LocalModelRuntimeStatus {
   channelId: string;
@@ -568,7 +686,7 @@ export interface LocalModelRuntimeStatus {
 export interface RemoteModelListRequest {
   urls: string[];
   apiKey?: string;
-  transport: 'anthropic' | 'openai';
+  transport: "anthropic" | "openai";
 }
 
 export interface RemoteModelListResult {
@@ -596,7 +714,7 @@ export interface SessionNotificationClickPayload {
 export interface DesktopSessionNotificationInput extends SessionNotificationClickPayload {
   title: string;
   body: string;
-  kind?: 'success' | 'error' | 'waitingInput';
+  kind?: "success" | "error" | "waitingInput";
 }
 
 /**
@@ -605,7 +723,7 @@ export interface DesktopSessionNotificationInput extends SessionNotificationClic
  */
 export function tauriAvailable(): boolean {
   try {
-    if (typeof globalThis === 'undefined') return false;
+    if (typeof globalThis === "undefined") return false;
     const runtime = globalThis as typeof globalThis & {
       isTauri?: unknown;
       __TAURI__?: unknown;
@@ -613,8 +731,8 @@ export function tauriAvailable(): boolean {
     };
     return (
       runtime.isTauri === true ||
-      typeof runtime.__TAURI_INTERNALS__ !== 'undefined' ||
-      typeof runtime.__TAURI__ !== 'undefined'
+      typeof runtime.__TAURI_INTERNALS__ !== "undefined" ||
+      typeof runtime.__TAURI__ !== "undefined"
     );
   } catch {
     return false;
@@ -628,13 +746,13 @@ export function isTauri(): boolean {
 
 /** Dynamically load the `invoke` IPC entrypoint (Tauri-only). */
 async function getInvoke() {
-  const { invoke } = await import('@tauri-apps/api/core');
+  const { invoke } = await import("@tauri-apps/api/core");
   return invoke;
 }
 
 /** Dynamically load the `listen` event API (Tauri-only). */
 async function getListen() {
-  const { listen } = await import('@tauri-apps/api/event');
+  const { listen } = await import("@tauri-apps/api/event");
   return listen;
 }
 
@@ -642,7 +760,7 @@ async function getListen() {
 export async function focusMainWindow(): Promise<void> {
   if (!tauriAvailable()) return;
   const invoke = await getInvoke();
-  await invoke('focus_main_window');
+  await invoke("focus_main_window");
 }
 
 /** Send a native desktop session notification that can emit a click event. */
@@ -651,12 +769,12 @@ export async function notifySessionCompleteDesktop(
 ): Promise<boolean> {
   if (!tauriAvailable()) return false;
   const invoke = await getInvoke();
-  return invoke<boolean>('notify_session_complete', {
+  return invoke<boolean>("notify_session_complete", {
     title: input.title,
     body: input.body,
     workspaceId: input.workspaceId,
     sessionId: input.sessionId,
-    kind: input.kind ?? 'success',
+    kind: input.kind ?? "success",
   });
 }
 
@@ -666,7 +784,7 @@ export async function dismissSessionWaitingInputNotificationDesktop(
 ): Promise<boolean> {
   if (!tauriAvailable()) return false;
   const invoke = await getInvoke();
-  return invoke<boolean>('dismiss_session_waiting_input_notification', {
+  return invoke<boolean>("dismiss_session_waiting_input_notification", {
     workspaceId: input.workspaceId,
     sessionId: input.sessionId,
   });
@@ -679,7 +797,7 @@ export async function onSessionNotificationClicked(
   if (!tauriAvailable()) return () => {};
   const listen = await getListen();
   return listen<SessionNotificationClickPayload>(
-    'session-notification-clicked',
+    "session-notification-clicked",
     (event) => cb(event.payload),
   );
 }
@@ -696,13 +814,13 @@ export async function aiEditGraph(
   apiKey?: string,
 ): Promise<IRGraph> {
   if (!tauriAvailable()) {
-    throw new Error('NO_BACKEND');
+    throw new Error("NO_BACKEND");
   }
   if (!apiKey) {
-    throw new Error('NO_API_KEY');
+    throw new Error("NO_API_KEY");
   }
   const invoke = await getInvoke();
-  const resultJson = await invoke<string>('ai_edit_graph', {
+  const resultJson = await invoke<string>("ai_edit_graph", {
     currentIrJson: JSON.stringify(currentIr),
     instruction,
     apiKey,
@@ -719,6 +837,8 @@ export async function aiEditGraph(
 export interface CliOpts {
   /** Model tier for the CLI (`--model`), e.g. 'haiku' | 'sonnet' | 'opus'. */
   model?: string;
+  /** Per-turn reasoning effort supported by Codex and Claude CLIs. */
+  thinkingLevel?: "low" | "medium" | "high" | "xhigh";
   /** Resolved CLI executable/path selected in Settings. Omit for adapter default. */
   cliCommand?: string;
   /** Working directory for the agent (the run's workspace). */
@@ -770,7 +890,7 @@ function createProgressBatcher(
   onProgress: (text: string) => void,
   delayMs = STREAM_PROGRESS_FLUSH_MS,
 ): ProgressBatcher {
-  let pending = '';
+  let pending = "";
   let timer: ReturnType<typeof setTimeout> | undefined;
 
   const clearTimer = () => {
@@ -783,7 +903,7 @@ function createProgressBatcher(
     clearTimer();
     if (!pending) return;
     const text = pending;
-    pending = '';
+    pending = "";
     onProgress(text);
   };
 
@@ -807,9 +927,9 @@ interface AiCliResult {
 
 function isAiCliResult(value: unknown): value is AiCliResult {
   return (
-    typeof value === 'object' &&
+    typeof value === "object" &&
     value !== null &&
-    typeof (value as { text?: unknown }).text === 'string'
+    typeof (value as { text?: unknown }).text === "string"
   );
 }
 
@@ -819,7 +939,7 @@ export async function aiEditViaCli(
   opts: CliOpts = {},
 ): Promise<string> {
   if (!tauriAvailable()) {
-    throw new Error('NO_BACKEND');
+    throw new Error("NO_BACKEND");
   }
   __cliSeq += 1;
   const runId = opts.runId ?? `cli_${Date.now()}_${__cliSeq}`;
@@ -832,41 +952,54 @@ export async function aiEditViaCli(
     ? createProgressBatcher(opts.onProgress)
     : null;
   if (opts.onProgress || opts.onUsage) {
-    const listen = await getListen();
-    if (progressBatcher) {
-      unlisteners.push(
-        await listen<{ runId: string; text: string }>(
-          'ai-cli-progress',
-          (event) => {
-            if (event.payload?.runId === runId) {
-              progressBatcher.push(event.payload.text);
-            }
-          },
-        ),
-      );
-    }
-    if (opts.onUsage) {
-      unlisteners.push(
-        await listen<{ runId: string; usage: unknown }>(
-          'ai-cli-usage',
-          (event) => {
-            if (event.payload?.runId === runId) {
-              usageSeen = true;
-              opts.onUsage!(event.payload.usage);
-            }
-          },
-        ),
-      );
+    try {
+      const listen = await getListen();
+      if (progressBatcher) {
+        try {
+          unlisteners.push(
+            await listen<{ runId: string; text: string }>(
+              "ai-cli-progress",
+              (event) => {
+                if (event.payload?.runId === runId) {
+                  progressBatcher.push(event.payload.text);
+                }
+              },
+            ),
+          );
+        } catch {
+          // Streaming events are optional; the command result remains usable.
+        }
+      }
+      if (opts.onUsage) {
+        try {
+          unlisteners.push(
+            await listen<{ runId: string; usage: unknown }>(
+              "ai-cli-usage",
+              (event) => {
+                if (event.payload?.runId === runId) {
+                  usageSeen = true;
+                  opts.onUsage!(event.payload.usage);
+                }
+              },
+            ),
+          );
+        } catch {
+          // Usage is also returned with the final command result when available.
+        }
+      }
+    } catch {
+      // Event APIs may be unavailable even when command IPC is healthy.
     }
   }
 
   try {
     const invoke = await getInvoke();
-    const result = await invoke<string | AiCliResult>('ai_cli', {
+    const result = await invoke<string | AiCliResult>("ai_cli", {
       prompt,
       adapter,
       cliCommand: opts.cliCommand ?? null,
       model: opts.model ?? null,
+      thinkingLevel: opts.thinkingLevel ?? null,
       cwd: opts.cwd ?? null,
       extraWorkspacePaths: opts.extraWorkspacePaths ?? [],
       permission: opts.permission ?? null,
@@ -891,7 +1024,13 @@ export async function aiEditViaCli(
     try {
       progressBatcher?.flush();
     } finally {
-      for (const unlisten of unlisteners) unlisten();
+      for (const unlisten of unlisteners) {
+        try {
+          unlisten();
+        } catch {
+          // Listener cleanup must not replace the CLI result with an error.
+        }
+      }
     }
   }
 }
@@ -913,24 +1052,26 @@ export async function freeProxyEnsure(
   }>,
 ): Promise<{ port: number; token: string }> {
   if (!tauriAvailable()) {
-    throw new Error('NO_BACKEND');
+    throw new Error("NO_BACKEND");
   }
   const invoke = await getInvoke();
-  return invoke<{ port: number; token: string }>('free_proxy_ensure', { channels });
+  return invoke<{ port: number; token: string }>("free_proxy_ensure", {
+    channels,
+  });
 }
 
 /** Stop the built-in local free-channel proxy. No-op outside the desktop shell. */
 export async function freeProxyStop(): Promise<void> {
   if (!tauriAvailable()) return;
   const invoke = await getInvoke();
-  await invoke('free_proxy_stop');
+  await invoke("free_proxy_stop");
 }
 
 /** Read whitelisted free-channel API keys from local private config + env. */
 export async function freeChannelAutoKeys(): Promise<Record<string, string>> {
   if (!tauriAvailable()) return {};
   const invoke = await getInvoke();
-  return invoke<Record<string, string>>('free_channel_auto_keys');
+  return invoke<Record<string, string>>("free_channel_auto_keys");
 }
 
 /** Read multiple named secrets from the desktop OS keychain. */
@@ -939,29 +1080,34 @@ export async function secureSecretGetMany(
 ): Promise<Record<string, string>> {
   if (!tauriAvailable()) return {};
   const invoke = await getInvoke();
-  return invoke<Record<string, string>>('secure_secret_get_many', { keys });
+  return invoke<Record<string, string>>("secure_secret_get_many", { keys });
 }
 
 /** Write one named secret to the desktop OS keychain. */
-export async function secureSecretSet(key: string, value: string): Promise<void> {
+export async function secureSecretSet(
+  key: string,
+  value: string,
+): Promise<void> {
   if (!tauriAvailable()) return;
   const invoke = await getInvoke();
-  await invoke('secure_secret_set', { key, value });
+  await invoke("secure_secret_set", { key, value });
 }
 
 /** Delete one named secret from the desktop OS keychain. */
 export async function secureSecretDelete(key: string): Promise<void> {
   if (!tauriAvailable()) return;
   const invoke = await getInvoke();
-  await invoke('secure_secret_delete', { key });
+  await invoke("secure_secret_delete", { key });
 }
 
 /** Read rough local hardware for choosing an Ollama model. */
 export async function localModelHardware(): Promise<LocalModelHardware> {
   if (!tauriAvailable()) {
-    const nav = typeof navigator !== 'undefined' ? navigator : undefined;
+    const nav = typeof navigator !== "undefined" ? navigator : undefined;
     const memory =
-      nav && typeof (nav as Navigator & { deviceMemory?: unknown }).deviceMemory === 'number'
+      nav &&
+      typeof (nav as Navigator & { deviceMemory?: unknown }).deviceMemory ===
+        "number"
         ? (nav as Navigator & { deviceMemory: number }).deviceMemory
         : null;
     return {
@@ -971,7 +1117,7 @@ export async function localModelHardware(): Promise<LocalModelHardware> {
     };
   }
   const invoke = await getInvoke();
-  return invoke<LocalModelHardware>('local_model_hardware');
+  return invoke<LocalModelHardware>("local_model_hardware");
 }
 
 /** Probe whether a local-model runtime is reachable and exposes the selected model. */
@@ -983,12 +1129,12 @@ export async function localModelStatus(
   if (!configuredModel) {
     return {
       channelId,
-      configuredModel: '',
+      configuredModel: "",
       reachable: false,
       ready: false,
-      state: 'missing_model',
+      state: "missing_model",
       models: [],
-      message: 'missing model',
+      message: "missing model",
     };
   }
   if (!tauriAvailable()) {
@@ -997,13 +1143,13 @@ export async function localModelStatus(
       configuredModel,
       reachable: false,
       ready: false,
-      state: 'desktop_unavailable',
+      state: "desktop_unavailable",
       models: [],
-      message: 'desktop backend unavailable',
+      message: "desktop backend unavailable",
     };
   }
   const invoke = await getInvoke();
-  return invoke<LocalModelRuntimeStatus>('local_model_status', {
+  return invoke<LocalModelRuntimeStatus>("local_model_status", {
     channelId,
     model: configuredModel,
   });
@@ -1013,26 +1159,28 @@ export async function localModelStatus(
 export async function listLocalModels(channelId: string): Promise<string[]> {
   if (!tauriAvailable()) return [];
   const invoke = await getInvoke();
-  return invoke<string[]>('local_model_list', { channelId });
+  return invoke<string[]>("local_model_list", { channelId });
 }
 
 function extractRemoteModelIds(value: unknown): string[] {
   const out: string[] = [];
   const push = (candidate: unknown) => {
-    if (typeof candidate !== 'string') return;
+    if (typeof candidate !== "string") return;
     const model = candidate.trim();
     if (!model) return;
-    if (out.some((existing) => existing.toLowerCase() === model.toLowerCase())) {
+    if (
+      out.some((existing) => existing.toLowerCase() === model.toLowerCase())
+    ) {
       return;
     }
     out.push(model);
   };
   const visitModel = (item: unknown) => {
-    if (typeof item === 'string') {
+    if (typeof item === "string") {
       push(item);
       return;
     }
-    if (typeof item !== 'object' || item === null) return;
+    if (typeof item !== "object" || item === null) return;
     const record = item as Record<string, unknown>;
     push(record.id);
     push(record.name);
@@ -1043,7 +1191,7 @@ function extractRemoteModelIds(value: unknown): string[] {
     value.forEach(visitModel);
     return out;
   }
-  if (typeof value !== 'object' || value === null) return out;
+  if (typeof value !== "object" || value === null) return out;
   const record = value as Record<string, unknown>;
   if (Array.isArray(record.data)) record.data.forEach(visitModel);
   if (Array.isArray(record.models)) record.models.forEach(visitModel);
@@ -1056,13 +1204,13 @@ async function fetchRemoteModels(
   request: RemoteModelListRequest,
 ): Promise<RemoteModelListResult> {
   const errors: string[] = [];
-  const headers: Record<string, string> = { accept: 'application/json' };
+  const headers: Record<string, string> = { accept: "application/json" };
   const apiKey = request.apiKey?.trim();
   if (apiKey) {
     headers.authorization = `Bearer ${apiKey}`;
-    if (request.transport === 'anthropic') {
-      headers['x-api-key'] = apiKey;
-      headers['anthropic-version'] = '2023-06-01';
+    if (request.transport === "anthropic") {
+      headers["x-api-key"] = apiKey;
+      headers["anthropic-version"] = "2023-06-01";
     }
   }
 
@@ -1082,12 +1230,14 @@ async function fetchRemoteModels(
       if (models.length > 0) return { models, url };
       errors.push(`${url}: empty model list`);
     } catch (err) {
-      errors.push(`${url}: ${err instanceof Error ? err.message : String(err)}`);
+      errors.push(
+        `${url}: ${err instanceof Error ? err.message : String(err)}`,
+      );
     } finally {
       window.clearTimeout(timeout);
     }
   }
-  throw new Error(errors.join('; ') || 'No model list endpoint available');
+  throw new Error(errors.join("; ") || "No model list endpoint available");
 }
 
 /** List remote provider models. Tauri backend is preferred to avoid CORS. */
@@ -1096,9 +1246,9 @@ export async function listRemoteModels(
 ): Promise<RemoteModelListResult> {
   if (!tauriAvailable()) return fetchRemoteModels(request);
   const invoke = await getInvoke();
-  return invoke<RemoteModelListResult>('list_remote_models', {
+  return invoke<RemoteModelListResult>("list_remote_models", {
     urls: request.urls,
-    apiKey: request.apiKey ?? '',
+    apiKey: request.apiKey ?? "",
     transport: request.transport,
   });
 }
@@ -1108,10 +1258,10 @@ export async function generateCloudflareImage(
   request: CloudflareImageRequest,
 ): Promise<string> {
   if (!tauriAvailable()) {
-    throw new Error('NO_BACKEND');
+    throw new Error("NO_BACKEND");
   }
   const invoke = await getInvoke();
-  return invoke<string>('generate_cloudflare_image', {
+  return invoke<string>("generate_cloudflare_image", {
     accountId: request.accountId,
     apiKey: request.apiKey,
     model: request.model,
@@ -1122,14 +1272,14 @@ export async function generateCloudflareImage(
 /** Launch the bundled Windows Ollama setup script in a visible terminal. */
 export async function setupLocalModel(model: string): Promise<void> {
   if (!tauriAvailable()) {
-    throw new Error('NO_BACKEND');
+    throw new Error("NO_BACKEND");
   }
   const invoke = await getInvoke();
-  await invoke('setup_local_model', { model });
+  await invoke("setup_local_model", { model });
 }
 
 /** Known ComfyUI one-click model profiles (must match the installer script + Rust validator). */
-export type ComfyUiSetupModel = 'sd1.5' | 'sdxl-turbo' | 'flux-schnell';
+export type ComfyUiSetupModel = "sd1.5" | "sdxl-turbo" | "flux-schnell";
 
 /**
  * Kick off the one-click ComfyUI install: downloads the official Windows
@@ -1141,21 +1291,21 @@ export async function setupComfyui(
   skipModel = false,
 ): Promise<void> {
   if (!tauriAvailable()) {
-    throw new Error('NO_BACKEND');
+    throw new Error("NO_BACKEND");
   }
   const invoke = await getInvoke();
-  await invoke('setup_comfyui', { model: model ?? null, skipModel });
+  await invoke("setup_comfyui", { model: model ?? null, skipModel });
   // The installer runs fire-and-forget in a terminal and launches the server on
   // 127.0.0.1:8188, so there is no on-disk path to track. Surface it in the
   // Asset Hub as an installed local tool with its server endpoint as "source".
   registerAsset({
-    kind: 'plugin',
-    source: 'installed',
-    origin: 'local',
-    title: model ? `ComfyUI · ${model}` : 'ComfyUI',
-    status: 'success',
-    remoteUrl: 'http://127.0.0.1:8188',
-    provider: 'ComfyUI',
+    kind: "plugin",
+    source: "installed",
+    origin: "local",
+    title: model ? `ComfyUI · ${model}` : "ComfyUI",
+    status: "success",
+    remoteUrl: "http://127.0.0.1:8188",
+    provider: "ComfyUI",
     meta: { model: model ?? null, skipModel },
   });
 }
@@ -1163,23 +1313,23 @@ export async function setupComfyui(
 /** Open an external URL via the OS default browser (web: new tab). */
 export async function openExternal(url: string): Promise<void> {
   if (!tauriAvailable()) {
-    if (typeof window !== 'undefined') window.open(url, '_blank', 'noopener');
+    if (typeof window !== "undefined") window.open(url, "_blank", "noopener");
     return;
   }
   const invoke = await getInvoke();
-  await invoke('open_external', { url });
+  await invoke("open_external", { url });
 }
 
 /** Default workspace folder name created when no workspace is selected. */
-export const DEFAULT_WORKSPACE_DIR_NAME = 'UltraGameStudio';
+export const DEFAULT_WORKSPACE_DIR_NAME = "UltraGameStudio";
 
 /** Detect the current platform from the browser/runtime (best-effort). */
 function currentPlatform(): CliPlatform {
   const platform =
-    typeof navigator === 'undefined' ? '' : navigator.platform.toLowerCase();
-  if (platform.includes('win')) return 'windows';
-  if (platform.includes('mac')) return 'macos';
-  return 'linux';
+    typeof navigator === "undefined" ? "" : navigator.platform.toLowerCase();
+  if (platform.includes("win")) return "windows";
+  if (platform.includes("mac")) return "macos";
+  return "linux";
 }
 
 /**
@@ -1197,14 +1347,14 @@ export async function ensureDefaultWorkspaceDir(): Promise<string | null> {
   if (!tauriAvailable()) return null;
   try {
     let target: string;
-    if (currentPlatform() === 'windows') {
+    if (currentPlatform() === "windows") {
       target = `C:\\${DEFAULT_WORKSPACE_DIR_NAME}`;
     } else {
-      const { homeDir, join } = await import('@tauri-apps/api/path');
+      const { homeDir, join } = await import("@tauri-apps/api/path");
       const home = await homeDir();
       target = await join(home, DEFAULT_WORKSPACE_DIR_NAME);
     }
-    const { exists, mkdir } = await import('@tauri-apps/plugin-fs');
+    const { exists, mkdir } = await import("@tauri-apps/plugin-fs");
     if (!(await exists(target))) {
       await mkdir(target, { recursive: true });
     }
@@ -1219,25 +1369,102 @@ export async function openWorkspaceDirectory(path: string): Promise<boolean> {
   if (!tauriAvailable()) return false;
   try {
     const invoke = await getInvoke();
-    await invoke('open_workspace_directory', { path });
+    await invoke("open_workspace_directory", { path });
     return true;
   } catch {
     return false;
   }
 }
 
+export interface DetectedTaskDeveloperTool {
+  id: string;
+  name: string;
+  path: string;
+  installed: boolean;
+}
+
+export interface DetectedTaskDeveloperTools {
+  ides: DetectedTaskDeveloperTool[];
+  terminals: DetectedTaskDeveloperTool[];
+}
+
+export async function detectTaskDeveloperTools(): Promise<DetectedTaskDeveloperTools> {
+  if (!tauriAvailable()) throw new Error("NO_BACKEND");
+  const invoke = await getInvoke();
+  return invoke<DetectedTaskDeveloperTools>("task_detect_developer_tools");
+}
+
+/** Open a task worktree in a supported desktop editor. */
+export async function openWorkspaceInIde(
+  path: string,
+  editor: TaskIDEId = "vscode",
+  customPath?: string,
+): Promise<void> {
+  if (!tauriAvailable()) throw new Error("NO_BACKEND");
+  const invoke = await getInvoke();
+  await invoke("open_workspace_in_ide", {
+    path,
+    editor,
+    customPath: customPath?.trim() || null,
+  });
+}
+
+/** Open a task worktree in the platform's system terminal. */
+export async function openWorkspaceInTerminal(
+  path: string,
+  terminal: TaskTerminalId = "system",
+  customPath?: string,
+): Promise<void> {
+  if (!tauriAvailable()) throw new Error("NO_BACKEND");
+  const invoke = await getInvoke();
+  await invoke("open_workspace_in_terminal", {
+    path,
+    terminal,
+    customPath: customPath?.trim() || null,
+  });
+}
+
 /** List one workspace directory for the right-side project tree. Desktop-only. */
 export async function listWorkspaceDirectory(
   rootPath: string,
-  relativePath = '',
+  relativePath = "",
 ): Promise<WorkspaceDirectoryListing> {
   if (!tauriAvailable()) {
-    throw new Error('NO_BACKEND');
+    throw new Error("NO_BACKEND");
   }
   const invoke = await getInvoke();
-  return invoke<WorkspaceDirectoryListing>('list_workspace_dir', {
+  return invoke<WorkspaceDirectoryListing>("list_workspace_dir", {
     rootPath,
     relativePath,
+  });
+}
+
+/** One canonical file stored in an Autocode-compatible task artifact folder. */
+export interface TaskArtifactFileInput {
+  name: string;
+  content: string;
+}
+
+export interface TaskArtifactSyncResult {
+  rootPath: string;
+  filesWritten: number;
+}
+
+/**
+ * Persist the files shown by a task detail window under
+ * `<workspace>/.ultragamestudio/tasks/<task-id>`.
+ */
+export async function syncTaskArtifactFiles(
+  rootPath: string,
+  taskId: string,
+  files: TaskArtifactFileInput[],
+): Promise<TaskArtifactSyncResult> {
+  if (!tauriAvailable()) throw new Error("NO_BACKEND");
+  const invoke = await getInvoke();
+  return invoke<TaskArtifactSyncResult>("sync_task_artifacts", {
+    rootPath,
+    taskId,
+    files,
   });
 }
 
@@ -1250,15 +1477,24 @@ export async function listWorkspaceDirectory(
 export async function prepareIsolatedWorkspace(
   rootPath: string,
   sessionId: string,
+  baseBranch?: string,
 ): Promise<IsolatedWorkspace> {
   if (!tauriAvailable()) {
-    throw new Error('NO_BACKEND');
+    throw new Error("NO_BACKEND");
   }
   const invoke = await getInvoke();
-  return invoke<IsolatedWorkspace>('prepare_isolated_workspace', {
+  return invoke<IsolatedWorkspace>("prepare_isolated_workspace", {
     rootPath,
     sessionId,
+    baseBranch: baseBranch?.trim() || null,
   });
+}
+
+/** Push the currently checked-out task branch and establish its origin upstream. */
+export async function pushWorkspaceBranch(rootPath: string): Promise<string> {
+  if (!tauriAvailable()) throw new Error("NO_BACKEND");
+  const invoke = await getInvoke();
+  return invoke<string>("push_workspace_branch", { rootPath });
 }
 
 /** Detect game-engine project metadata and project-local skill roots. */
@@ -1266,10 +1502,12 @@ export async function scanProjectEnvironment(
   rootPath: string,
 ): Promise<ProjectEnvironmentScan> {
   if (!tauriAvailable()) {
-    throw new Error('NO_BACKEND');
+    throw new Error("NO_BACKEND");
   }
   const invoke = await getInvoke();
-  return invoke<ProjectEnvironmentScan>('project_environment_scan', { rootPath });
+  return invoke<ProjectEnvironmentScan>("project_environment_scan", {
+    rootPath,
+  });
 }
 
 /** Probe one project MCP server with initialize + tools/list. */
@@ -1278,10 +1516,10 @@ export async function probeProjectMcpServer(
   server: ProjectMcpProbeServerConfig,
 ): Promise<ProjectMcpProbeResult> {
   if (!tauriAvailable()) {
-    throw new Error('NO_BACKEND');
+    throw new Error("NO_BACKEND");
   }
   const invoke = await getInvoke();
-  return invoke<ProjectMcpProbeResult>('project_mcp_probe', {
+  return invoke<ProjectMcpProbeResult>("project_mcp_probe", {
     rootPath,
     server,
   });
@@ -1292,10 +1530,10 @@ export async function probeProjectLspServer(
   server: ProjectLspProbeServerConfig,
 ): Promise<ProjectLspProbeResult> {
   if (!tauriAvailable()) {
-    throw new Error('NO_BACKEND');
+    throw new Error("NO_BACKEND");
   }
   const invoke = await getInvoke();
-  return invoke<ProjectLspProbeResult>('project_lsp_probe', { server });
+  return invoke<ProjectLspProbeResult>("project_lsp_probe", { server });
 }
 
 /** Install one catalog-backed LSP server by running a structured installer command. */
@@ -1303,20 +1541,20 @@ export async function installProjectLspServer(
   request: ProjectLspInstallRequest,
 ): Promise<ProjectLspInstallResult> {
   if (!tauriAvailable()) {
-    throw new Error('NO_BACKEND');
+    throw new Error("NO_BACKEND");
   }
   const invoke = await getInvoke();
-  const result = await invoke<ProjectLspInstallResult>('project_lsp_install', {
+  const result = await invoke<ProjectLspInstallResult>("project_lsp_install", {
     request,
   });
   // Record successful LSP installs in the Asset Hub as installed plugins.
   if (result.ok) {
     registerAsset({
-      kind: 'plugin',
-      source: 'installed',
-      origin: 'local',
+      kind: "plugin",
+      source: "installed",
+      origin: "local",
       title: `LSP · ${result.serverId}`,
-      status: 'success',
+      status: "success",
       provider: result.serverId,
       meta: {
         status: result.status,
@@ -1337,10 +1575,10 @@ export async function unityMcpSetupProject(
   request: UnityMcpSetupRequest,
 ): Promise<UnityMcpSetupResult> {
   if (!tauriAvailable()) {
-    throw new Error('NO_BACKEND');
+    throw new Error("NO_BACKEND");
   }
   const invoke = await getInvoke();
-  return invoke<UnityMcpSetupResult>('unity_mcp_setup_project', { request });
+  return invoke<UnityMcpSetupResult>("unity_mcp_setup_project", { request });
 }
 
 export interface BlueprintModeInstallRequest {
@@ -1391,10 +1629,12 @@ export async function blueprintModeStatus(
   request: BlueprintModeTargetRequest,
 ): Promise<BlueprintModeStatusResult> {
   if (!tauriAvailable()) {
-    throw new Error('NO_BACKEND');
+    throw new Error("NO_BACKEND");
   }
   const invoke = await getInvoke();
-  return invoke<BlueprintModeStatusResult>('blueprint_mode_status', { request });
+  return invoke<BlueprintModeStatusResult>("blueprint_mode_status", {
+    request,
+  });
 }
 
 /**
@@ -1405,40 +1645,48 @@ export async function blueprintModeInstall(
   request: BlueprintModeInstallRequest,
 ): Promise<BlueprintModeInstallResult> {
   if (!tauriAvailable()) {
-    throw new Error('NO_BACKEND');
+    throw new Error("NO_BACKEND");
   }
   const invoke = await getInvoke();
-  return invoke<BlueprintModeInstallResult>('blueprint_mode_install', { request });
+  return invoke<BlueprintModeInstallResult>("blueprint_mode_install", {
+    request,
+  });
 }
 
 export async function blueprintModeUninstall(
   request: BlueprintModeTargetRequest,
 ): Promise<BlueprintModeUninstallResult> {
   if (!tauriAvailable()) {
-    throw new Error('NO_BACKEND');
+    throw new Error("NO_BACKEND");
   }
   const invoke = await getInvoke();
-  return invoke<BlueprintModeUninstallResult>('blueprint_mode_uninstall', { request });
+  return invoke<BlueprintModeUninstallResult>("blueprint_mode_uninstall", {
+    request,
+  });
 }
 
 export async function godotMcpSetupProject(
   request: GenericProjectMcpSetupRequest,
 ): Promise<GenericProjectMcpSetupResult> {
   if (!tauriAvailable()) {
-    throw new Error('NO_BACKEND');
+    throw new Error("NO_BACKEND");
   }
   const invoke = await getInvoke();
-  return invoke<GenericProjectMcpSetupResult>('godot_mcp_setup_project', { request });
+  return invoke<GenericProjectMcpSetupResult>("godot_mcp_setup_project", {
+    request,
+  });
 }
 
 export async function cocosMcpSetupProject(
   request: GenericProjectMcpSetupRequest,
 ): Promise<GenericProjectMcpSetupResult> {
   if (!tauriAvailable()) {
-    throw new Error('NO_BACKEND');
+    throw new Error("NO_BACKEND");
   }
   const invoke = await getInvoke();
-  return invoke<GenericProjectMcpSetupResult>('cocos_mcp_setup_project', { request });
+  return invoke<GenericProjectMcpSetupResult>("cocos_mcp_setup_project", {
+    request,
+  });
 }
 
 /**
@@ -1448,19 +1696,19 @@ export async function cocosMcpSetupProject(
  */
 export async function ueMcpEnsureBinary(): Promise<UeMcpBinaryStatus> {
   if (!tauriAvailable()) {
-    throw new Error('NO_BACKEND');
+    throw new Error("NO_BACKEND");
   }
   const invoke = await getInvoke();
-  const status = await invoke<UeMcpBinaryStatus>('ue_mcp_ensure_binary');
+  const status = await invoke<UeMcpBinaryStatus>("ue_mcp_ensure_binary");
   // Surface freshly downloaded MCP binaries in the Asset Hub. Already-cached
   // binaries (downloaded === false) are not re-registered to avoid duplicates.
   if (status.available && status.downloaded) {
     registerAsset({
-      kind: 'mcp',
-      source: 'installed',
-      origin: 'local',
+      kind: "mcp",
+      source: "installed",
+      origin: "local",
       title: `${status.serverId} ${status.version}`.trim(),
-      status: 'success',
+      status: "success",
       localPath: status.path,
       provider: status.serverId,
       remoteUrl: status.source || undefined,
@@ -1479,10 +1727,10 @@ export async function ueMcpSetupProject(
   request: UeMcpSetupRequest,
 ): Promise<UeMcpSetupResult> {
   if (!tauriAvailable()) {
-    throw new Error('NO_BACKEND');
+    throw new Error("NO_BACKEND");
   }
   const invoke = await getInvoke();
-  return invoke<UeMcpSetupResult>('ue_mcp_setup_project', { request });
+  return invoke<UeMcpSetupResult>("ue_mcp_setup_project", { request });
 }
 
 /** Ensure this session has a filesystem baseline. No VCS dependency. */
@@ -1492,10 +1740,10 @@ export async function ensureWorkspaceChangesBaseline(
   baselineAtMs?: number | null,
 ): Promise<WorkspaceChangeBaseline> {
   if (!tauriAvailable()) {
-    throw new Error('NO_BACKEND');
+    throw new Error("NO_BACKEND");
   }
   const invoke = await getInvoke();
-  return invoke<WorkspaceChangeBaseline>('workspace_changes_baseline', {
+  return invoke<WorkspaceChangeBaseline>("workspace_changes_baseline", {
     rootPath,
     cacheKey,
     baselineAtMs,
@@ -1509,10 +1757,10 @@ export async function listWorkspaceChanges(
   baselineAtMs?: number | null,
 ): Promise<WorkspaceChanges> {
   if (!tauriAvailable()) {
-    throw new Error('NO_BACKEND');
+    throw new Error("NO_BACKEND");
   }
   const invoke = await getInvoke();
-  return invoke<WorkspaceChanges>('workspace_changes', {
+  return invoke<WorkspaceChanges>("workspace_changes", {
     rootPath,
     cacheKey,
     baselineAtMs,
@@ -1525,10 +1773,10 @@ export async function readWorkspaceChangesCache(
   cacheKey: string,
 ): Promise<WorkspaceChanges | null> {
   if (!tauriAvailable()) {
-    throw new Error('NO_BACKEND');
+    throw new Error("NO_BACKEND");
   }
   const invoke = await getInvoke();
-  return invoke<WorkspaceChanges | null>('workspace_changes_cached', {
+  return invoke<WorkspaceChanges | null>("workspace_changes_cached", {
     rootPath,
     cacheKey,
   });
@@ -1540,13 +1788,270 @@ export async function workspaceFileDiff(
   path: string,
 ): Promise<WorkspaceChangeFile | null> {
   if (!tauriAvailable()) {
-    throw new Error('NO_BACKEND');
+    throw new Error("NO_BACKEND");
   }
   const invoke = await getInvoke();
-  return invoke<WorkspaceChangeFile | null>('workspace_file_diff', {
+  return invoke<WorkspaceChangeFile | null>("workspace_file_diff", {
     rootPath,
     path,
   });
+}
+
+/** Read branch, upstream and local/remote branch choices for a task workspace. */
+export async function getTaskGitOverview(
+  rootPath: string,
+): Promise<TaskGitOverview> {
+  if (!tauriAvailable()) {
+    throw new Error("NO_BACKEND");
+  }
+  const invoke = await getInvoke();
+  return invoke<TaskGitOverview>("task_git_overview", { rootPath });
+}
+
+/** Read task-branch commits, optionally restricted to commits after a base branch. */
+export async function listTaskGitCommits(
+  rootPath: string,
+  baseBranch?: string | null,
+  limit = 100,
+): Promise<TaskGitCommit[]> {
+  if (!tauriAvailable()) {
+    throw new Error("NO_BACKEND");
+  }
+  const invoke = await getInvoke();
+  return invoke<TaskGitCommit[]>("task_git_commits", {
+    rootPath,
+    baseBranch: baseBranch || null,
+    limit,
+  });
+}
+
+/** Read the files and line statistics for one task-branch commit. */
+export async function listTaskGitCommitFiles(
+  rootPath: string,
+  commit: string,
+): Promise<TaskGitCommitFile[]> {
+  if (!tauriAvailable()) {
+    throw new Error("NO_BACKEND");
+  }
+  const invoke = await getInvoke();
+  return invoke<TaskGitCommitFile[]>("task_git_commit_files", {
+    rootPath,
+    commit,
+  });
+}
+
+/** Read the raw unified diff for one file in one task-branch commit. */
+export async function readTaskGitCommitFileDiff(
+  rootPath: string,
+  commit: string,
+  path: string,
+): Promise<TaskGitDiff> {
+  if (!tauriAvailable()) {
+    throw new Error("NO_BACKEND");
+  }
+  const invoke = await getInvoke();
+  return invoke<TaskGitDiff>("task_git_commit_file_diff", {
+    rootPath,
+    commit,
+    path,
+  });
+}
+
+/** Inspect a task worktree against the branch currently checked out in the main project. */
+export async function getTaskWorktreeReview(
+  mainRoot: string,
+  worktreeRoot: string,
+  targetBranch?: string | null,
+): Promise<TaskWorktreeReview> {
+  if (!tauriAvailable()) throw new Error("NO_BACKEND");
+  const invoke = await getInvoke();
+  return invoke<TaskWorktreeReview>("task_worktree_review", {
+    mainRoot,
+    worktreeRoot,
+    targetBranch: targetBranch?.trim() || null,
+  });
+}
+
+/** Commit pending task changes and merge or squash-stage them into the main project. */
+export async function integrateTaskWorktree(
+  mainRoot: string,
+  worktreeRoot: string,
+  options: {
+    targetBranch?: string | null;
+    stageOnly?: boolean;
+    commitMessage: string;
+  },
+): Promise<TaskWorktreeIntegrateResult> {
+  if (!tauriAvailable()) throw new Error("NO_BACKEND");
+  const invoke = await getInvoke();
+  return invoke<TaskWorktreeIntegrateResult>("task_worktree_integrate", {
+    mainRoot,
+    worktreeRoot,
+    targetBranch: options.targetBranch?.trim() || null,
+    stageOnly: options.stageOnly === true,
+    commitMessage: options.commitMessage,
+  });
+}
+
+/** Commit pending task changes, then push the task branch and establish its upstream. */
+export async function pushTaskWorktree(
+  mainRoot: string,
+  worktreeRoot: string,
+  options: { targetBranch?: string | null; commitMessage: string },
+): Promise<TaskWorktreePushResult> {
+  if (!tauriAvailable()) throw new Error("NO_BACKEND");
+  const invoke = await getInvoke();
+  return invoke<TaskWorktreePushResult>("task_worktree_push", {
+    mainRoot,
+    worktreeRoot,
+    targetBranch: options.targetBranch?.trim() || null,
+    commitMessage: options.commitMessage,
+  });
+}
+
+/** Remove a registered task worktree and optionally its task branch. */
+export async function cleanupTaskWorktree(
+  mainRoot: string,
+  worktreeRoot: string,
+  options?: { deleteBranch?: boolean; force?: boolean },
+): Promise<TaskWorktreeCleanupResult> {
+  if (!tauriAvailable()) throw new Error("NO_BACKEND");
+  const invoke = await getInvoke();
+  return invoke<TaskWorktreeCleanupResult>("task_worktree_cleanup", {
+    mainRoot,
+    worktreeRoot,
+    deleteBranch: options?.deleteBranch !== false,
+    force: options?.force === true,
+  });
+}
+
+/** Commit and push a task branch, then create or resolve its GitHub pull request. */
+export async function createTaskPullRequest(
+  mainRoot: string,
+  worktreeRoot: string,
+  options: {
+    targetBranch?: string | null;
+    title: string;
+    body?: string | null;
+    draft?: boolean;
+  },
+): Promise<TaskPullRequestResult> {
+  if (!tauriAvailable()) throw new Error("NO_BACKEND");
+  const invoke = await getInvoke();
+  return invoke<TaskPullRequestResult>("task_create_pull_request", {
+    mainRoot,
+    worktreeRoot,
+    targetBranch: options.targetBranch?.trim() || null,
+    title: options.title,
+    body: options.body?.trim() || null,
+    draft: options.draft === true,
+  });
+}
+
+/** Verify that the official OpenSpec CLI can be started by the desktop host. */
+export async function getOpenSpecRuntimeStatus(): Promise<OpenSpecRuntimeStatus> {
+  if (!tauriAvailable()) {
+    throw new Error("NO_BACKEND");
+  }
+  const invoke = await getInvoke();
+  return invoke<OpenSpecRuntimeStatus>("openspec_runtime_status");
+}
+
+/** Initialize OpenSpec when needed, create an idempotent change and return its status. */
+export async function prepareOpenSpecChange(
+  rootPath: string,
+  changeId: string,
+  schema: string,
+  description: string,
+): Promise<OpenSpecPrepareResult> {
+  if (!tauriAvailable()) {
+    throw new Error("NO_BACKEND");
+  }
+  const invoke = await getInvoke();
+  return invoke<OpenSpecPrepareResult>("openspec_prepare_change", {
+    rootPath,
+    changeId,
+    schema,
+    description,
+  });
+}
+
+/** Read the official artifact graph status for one OpenSpec change. */
+export async function getOpenSpecChangeStatus(
+  rootPath: string,
+  changeId: string,
+): Promise<OpenSpecCommandResult> {
+  if (!tauriAvailable()) {
+    throw new Error("NO_BACKEND");
+  }
+  const invoke = await getInvoke();
+  return invoke<OpenSpecCommandResult>("openspec_change_status", {
+    rootPath,
+    changeId,
+  });
+}
+
+/** Run the official strict, non-interactive OpenSpec validator. */
+export async function validateOpenSpecChange(
+  rootPath: string,
+  changeId: string,
+): Promise<OpenSpecCommandResult> {
+  if (!tauriAvailable()) {
+    throw new Error("NO_BACKEND");
+  }
+  const invoke = await getInvoke();
+  return invoke<OpenSpecCommandResult>("openspec_validate_change", {
+    rootPath,
+    changeId,
+  });
+}
+
+/** Keep an OpenSpec tasks.md checkbox synchronized with its board subtask. */
+export async function setOpenSpecTaskStatus(
+  rootPath: string,
+  changeId: string,
+  taskIndex: number,
+  completed: boolean,
+): Promise<string> {
+  if (!tauriAvailable()) {
+    throw new Error("NO_BACKEND");
+  }
+  const invoke = await getInvoke();
+  return invoke<string>("openspec_set_task_status", {
+    rootPath,
+    changeId,
+    taskIndex,
+    completed,
+  });
+}
+
+/** Validate, sync main specs and archive a completed OpenSpec change. */
+export async function archiveOpenSpecChange(
+  rootPath: string,
+  changeId: string,
+  options: { force?: boolean; skipSpecs?: boolean } = {},
+): Promise<OpenSpecCommandResult> {
+  if (!tauriAvailable()) {
+    throw new Error("NO_BACKEND");
+  }
+  const invoke = await getInvoke();
+  return invoke<OpenSpecCommandResult>("openspec_archive_change", {
+    rootPath,
+    changeId,
+    force: options.force ?? false,
+    skipSpecs: options.skipSpecs ?? false,
+  });
+}
+
+/** List active OpenSpec changes for bulk archive and change selection. */
+export async function listOpenSpecChanges(
+  rootPath: string,
+): Promise<OpenSpecCommandResult> {
+  if (!tauriAvailable()) {
+    throw new Error("NO_BACKEND");
+  }
+  const invoke = await getInvoke();
+  return invoke<OpenSpecCommandResult>("openspec_list_changes", { rootPath });
 }
 
 export async function collectWorkspacePathsToP4PendingList(
@@ -1554,23 +2059,23 @@ export async function collectWorkspacePathsToP4PendingList(
   paths: string[],
 ): Promise<P4PendingListCollectResult> {
   if (!tauriAvailable()) {
-    throw new Error('NO_BACKEND');
+    throw new Error("NO_BACKEND");
   }
   const invoke = await getInvoke();
-  return invoke<P4PendingListCollectResult>('p4_collect_to_pending_list', {
+  return invoke<P4PendingListCollectResult>("p4_collect_to_pending_list", {
     rootPath,
     paths,
   });
 }
 
 export type LegacyBrandMigrationPhase =
-  | 'checking'
-  | 'scanning'
-  | 'copying'
-  | 'archiving'
-  | 'done'
-  | 'skipped'
-  | 'error'
+  | "checking"
+  | "scanning"
+  | "copying"
+  | "archiving"
+  | "done"
+  | "skipped"
+  | "error"
   | string;
 
 export interface LegacyBrandMigrationProgress {
@@ -1593,7 +2098,7 @@ export async function migrateLegacyBrandStorage(
   onProgress?: (progress: LegacyBrandMigrationProgress) => void,
 ): Promise<LegacyBrandMigrationProgress> {
   const fallback: LegacyBrandMigrationProgress = {
-    phase: 'skipped',
+    phase: "skipped",
     rootsTotal: 0,
     rootsDone: 0,
     filesTotal: 0,
@@ -1603,20 +2108,20 @@ export async function migrateLegacyBrandStorage(
     copiedFiles: 0,
     skippedFiles: 0,
     archivedRoots: 0,
-    message: '非桌面环境，跳过旧版配置迁移',
+    message: "非桌面环境，跳过旧版配置迁移",
   };
   if (!tauriAvailable()) return fallback;
 
   const listen = await getListen();
   const unlisten = await listen<LegacyBrandMigrationProgress>(
-    'legacy-brand-migration-progress',
+    "legacy-brand-migration-progress",
     (event) => onProgress?.(event.payload),
   );
 
   try {
     const invoke = await getInvoke();
     const result = await invoke<LegacyBrandMigrationProgress>(
-      'migrate_legacy_brand_storage',
+      "migrate_legacy_brand_storage",
     );
     onProgress?.(result);
     return result;
@@ -1631,10 +2136,10 @@ export async function previewLocalFile(
   opts?: { cwd?: string },
 ): Promise<LocalFilePreview> {
   if (!tauriAvailable()) {
-    throw new Error('NO_BACKEND');
+    throw new Error("NO_BACKEND");
   }
   const invoke = await getInvoke();
-  return invoke<LocalFilePreview>('preview_local_file', {
+  return invoke<LocalFilePreview>("preview_local_file", {
     path,
     cwd: opts?.cwd ?? null,
   });
@@ -1652,7 +2157,7 @@ export async function fileExists(
     return false;
   }
   const invoke = await getInvoke();
-  return invoke<boolean>('file_exists', {
+  return invoke<boolean>("file_exists", {
     path,
     cwd: opts?.cwd ?? null,
   });
@@ -1663,10 +2168,26 @@ export async function saveClipboardImage(
   request: ClipboardImageSaveRequest,
 ): Promise<string> {
   if (!tauriAvailable()) {
-    throw new Error('NO_BACKEND');
+    throw new Error("NO_BACKEND");
   }
   const invoke = await getInvoke();
-  return invoke<string>('save_clipboard_image', {
+  return invoke<string>("save_clipboard_image", {
+    bytesBase64: request.bytesBase64,
+    mime: request.mime,
+    fileName: request.fileName ?? null,
+    cwd: request.cwd ?? null,
+  });
+}
+
+/** Persist a task feedback attachment with a strict 10MB native limit. */
+export async function saveTaskAttachment(
+  request: ClipboardImageSaveRequest,
+): Promise<string> {
+  if (!tauriAvailable()) {
+    throw new Error("NO_BACKEND");
+  }
+  const invoke = await getInvoke();
+  return invoke<string>("save_task_attachment", {
     bytesBase64: request.bytesBase64,
     mime: request.mime,
     fileName: request.fileName ?? null,
@@ -1679,10 +2200,10 @@ export async function readLocalFileForUpload(
   path: string,
 ): Promise<LocalFileUploadPayload> {
   if (!tauriAvailable()) {
-    throw new Error('NO_BACKEND');
+    throw new Error("NO_BACKEND");
   }
   const invoke = await getInvoke();
-  return invoke<LocalFileUploadPayload>('read_local_file_for_upload', { path });
+  return invoke<LocalFileUploadPayload>("read_local_file_for_upload", { path });
 }
 
 /** Scan configured local files/folders and return decoded text for KB indexing. */
@@ -1690,10 +2211,12 @@ export async function scanKnowledgeBaseFiles(
   sources: KnowledgeBaseScanSource[],
 ): Promise<KnowledgeBaseScanResult> {
   if (!tauriAvailable()) {
-    throw new Error('NO_BACKEND');
+    throw new Error("NO_BACKEND");
   }
   const invoke = await getInvoke();
-  return invoke<KnowledgeBaseScanResult>('knowledge_base_scan_files', { sources });
+  return invoke<KnowledgeBaseScanResult>("knowledge_base_scan_files", {
+    sources,
+  });
 }
 
 /** Persist a generated session screenshot/GIF and return its local preview path. */
@@ -1701,10 +2224,10 @@ export async function saveSessionCapture(
   request: SessionCaptureSaveRequest,
 ): Promise<string> {
   if (!tauriAvailable()) {
-    throw new Error('NO_BACKEND');
+    throw new Error("NO_BACKEND");
   }
   const invoke = await getInvoke();
-  return invoke<string>('save_session_capture', {
+  return invoke<string>("save_session_capture", {
     bytesBase64: request.bytesBase64,
     mime: request.mime,
     fileName: request.fileName ?? null,
@@ -1715,19 +2238,19 @@ export async function saveSessionCapture(
 /** Fetch a remote chat image through the desktop backend and return a data URL. */
 export async function fetchCaptureImageDataUrl(url: string): Promise<string> {
   if (!tauriAvailable()) {
-    throw new Error('NO_BACKEND');
+    throw new Error("NO_BACKEND");
   }
   const invoke = await getInvoke();
-  return invoke<string>('fetch_capture_image_data_url', { url });
+  return invoke<string>("fetch_capture_image_data_url", { url });
 }
 
 /** Fetch a remote 3D model through the desktop backend and return a data URL. */
 export async function fetchModelAssetDataUrl(url: string): Promise<string> {
   if (!tauriAvailable()) {
-    throw new Error('NO_BACKEND');
+    throw new Error("NO_BACKEND");
   }
   const invoke = await getInvoke();
-  return invoke<string>('fetch_model_asset_data_url', { url });
+  return invoke<string>("fetch_model_asset_data_url", { url });
 }
 
 /** Read a local 3D model through the desktop backend and return a data URL. */
@@ -1736,10 +2259,10 @@ export async function readModelAssetDataUrl(
   opts?: { cwd?: string },
 ): Promise<string> {
   if (!tauriAvailable()) {
-    throw new Error('NO_BACKEND');
+    throw new Error("NO_BACKEND");
   }
   const invoke = await getInvoke();
-  return invoke<string>('read_model_asset_data_url', {
+  return invoke<string>("read_model_asset_data_url", {
     path,
     cwd: opts?.cwd ?? null,
   });
@@ -1758,7 +2281,7 @@ export async function downloadModelAsset(
   },
 ): Promise<ModelAssetDownload> {
   if (!tauriAvailable()) {
-    throw new Error('NO_BACKEND');
+    throw new Error("NO_BACKEND");
   }
   const invoke = await getInvoke();
   // Surface the transfer in the Downloads panel. Tracking is best-effort and
@@ -1768,13 +2291,13 @@ export async function downloadModelAsset(
     startDownload({
       url,
       fileName: opts?.fileName,
-      kind: 'model',
+      kind: "model",
       sessionId: opts?.sessionId,
       workspaceId: opts?.workspaceId,
       messageId: opts?.messageId,
     });
   try {
-    const result = await invoke<ModelAssetDownload>('download_model_asset', {
+    const result = await invoke<ModelAssetDownload>("download_model_asset", {
       url,
       cwd: opts?.cwd ?? null,
       fileName: opts?.fileName ?? null,
@@ -1816,10 +2339,10 @@ export async function saveGeneratedAsset(params: {
   cwd?: string;
 }): Promise<GeneratedAssetSave> {
   if (!tauriAvailable()) {
-    throw new Error('NO_BACKEND');
+    throw new Error("NO_BACKEND");
   }
   const invoke = await getInvoke();
-  return invoke<GeneratedAssetSave>('save_generated_asset', {
+  return invoke<GeneratedAssetSave>("save_generated_asset", {
     bytesBase64: params.bytesBase64,
     mime: params.mime,
     kind: params.kind,
@@ -1829,10 +2352,12 @@ export async function saveGeneratedAsset(params: {
 }
 
 /** List durable files in the workspace `.ultragamestudio` asset cache. */
-export async function listCachedAssets(cwd?: string | null): Promise<CachedAssetFile[]> {
+export async function listCachedAssets(
+  cwd?: string | null,
+): Promise<CachedAssetFile[]> {
   if (!tauriAvailable()) return [];
   const invoke = await getInvoke();
-  return invoke<CachedAssetFile[]>('list_cached_assets', {
+  return invoke<CachedAssetFile[]>("list_cached_assets", {
     cwd: cwd ?? null,
   });
 }
@@ -1860,7 +2385,7 @@ export async function listBackgroundJobs(
 ): Promise<BackgroundJobProbeRaw[]> {
   if (!tauriAvailable()) return [];
   const invoke = await getInvoke();
-  return invoke<BackgroundJobProbeRaw[]>('list_background_jobs', {
+  return invoke<BackgroundJobProbeRaw[]>("list_background_jobs", {
     cwd: cwd ?? null,
   });
 }
@@ -1872,7 +2397,7 @@ export async function removeBackgroundJob(
 ): Promise<void> {
   if (!tauriAvailable()) return;
   const invoke = await getInvoke();
-  await invoke('remove_background_job', { cwd: cwd ?? null, fileStem });
+  await invoke("remove_background_job", { cwd: cwd ?? null, fileStem });
 }
 
 export interface ManualCacheCleanupResult {
@@ -1890,7 +2415,7 @@ export async function runManualCacheCleanup(
 ): Promise<ManualCacheCleanupResult | null> {
   if (!tauriAvailable()) return null;
   const invoke = await getInvoke();
-  return invoke<ManualCacheCleanupResult>('manual_cache_cleanup', {
+  return invoke<ManualCacheCleanupResult>("manual_cache_cleanup", {
     retentionDays,
   });
 }
@@ -1911,7 +2436,7 @@ export interface AutosaveRunResult {
 export async function runAutosaveNow(): Promise<AutosaveRunResult | null> {
   if (!tauriAvailable()) return null;
   const invoke = await getInvoke();
-  return invoke<AutosaveRunResult>('autosave_now');
+  return invoke<AutosaveRunResult>("autosave_now");
 }
 
 /**
@@ -1923,14 +2448,14 @@ export async function runAutosaveNow(): Promise<AutosaveRunResult | null> {
 export async function ugsJobWrapperPath(): Promise<string | null> {
   if (!tauriAvailable()) return null;
   const invoke = await getInvoke();
-  return invoke<string | null>('ugs_job_wrapper_path');
+  return invoke<string | null>("ugs_job_wrapper_path");
 }
 
 /** Best-effort cancellation for an in-flight local agent CLI invocation. */
 export async function cancelAiCli(runId: string): Promise<void> {
   if (!tauriAvailable()) return;
   const invoke = await getInvoke();
-  await invoke('cancel_ai_cli', { runId });
+  await invoke("cancel_ai_cli", { runId });
 }
 
 /** Whether this installed CLI and permission mode expose native steering. */
@@ -1941,7 +2466,7 @@ export async function aiCliSteerSupported(
 ): Promise<boolean> {
   if (!tauriAvailable()) return false;
   const invoke = await getInvoke();
-  return invoke<boolean>('ai_cli_steer_supported', {
+  return invoke<boolean>("ai_cli_steer_supported", {
     adapter,
     cliCommand: cliCommand ?? null,
     permission,
@@ -1950,10 +2475,13 @@ export async function aiCliSteerSupported(
 }
 
 /** Append text to an in-flight CLI turn when its adapter exposes native steering. */
-export async function steerAiCli(runId: string, text: string): Promise<boolean> {
+export async function steerAiCli(
+  runId: string,
+  text: string,
+): Promise<boolean> {
   if (!tauriAvailable() || !text.trim()) return false;
   const invoke = await getInvoke();
-  return invoke<boolean>('steer_ai_cli', { runId, text });
+  return invoke<boolean>("steer_ai_cli", { runId, text });
 }
 
 /**
@@ -1967,10 +2495,10 @@ export async function runWorkflow(
   cliCommand?: string,
 ): Promise<string> {
   if (!tauriAvailable()) {
-    throw new Error('NO_BACKEND');
+    throw new Error("NO_BACKEND");
   }
   const invoke = await getInvoke();
-  return invoke<string>('run_workflow', {
+  return invoke<string>("run_workflow", {
     script,
     adapter,
     cliCommand: cliCommand ?? null,
@@ -1984,7 +2512,7 @@ export async function runStudio(
   opts: StudioRunOptions = {},
 ): Promise<StudioRunResult> {
   if (!tauriAvailable()) {
-    throw new Error('NO_BACKEND');
+    throw new Error("NO_BACKEND");
   }
   __cliSeq += 1;
   const runId = opts.runId ?? `studio_${Date.now()}_${__cliSeq}`;
@@ -1996,7 +2524,7 @@ export async function runStudio(
   if (opts.onProgress) {
     const listen = await getListen();
     unlisten = await listen<{ runId: string; text: string }>(
-      'ai-cli-progress',
+      "ai-cli-progress",
       (event) => {
         if (event.payload?.runId === runId) {
           progressBatcher?.push(event.payload.text);
@@ -2007,7 +2535,7 @@ export async function runStudio(
 
   try {
     const invoke = await getInvoke();
-    return await invoke<StudioRunResult>('run_studio', {
+    return await invoke<StudioRunResult>("run_studio", {
       task,
       cwd: opts.cwd ?? null,
       extraWorkspacePaths: opts.extraWorkspacePaths ?? [],
@@ -2042,7 +2570,7 @@ export async function slashCatalog(): Promise<SlashCatalogSnapshot> {
     return { scannedAtMs: 0, ready: true, entries: [] };
   }
   const invoke = await getInvoke();
-  return invoke<SlashCatalogSnapshot>('slash_catalog');
+  return invoke<SlashCatalogSnapshot>("slash_catalog");
 }
 
 /** Force a desktop backend slash command / skill rescan. */
@@ -2051,7 +2579,7 @@ export async function refreshSlashCatalog(): Promise<SlashCatalogSnapshot> {
     return { scannedAtMs: Date.now(), ready: true, entries: [] };
   }
   const invoke = await getInvoke();
-  return invoke<SlashCatalogSnapshot>('refresh_slash_catalog');
+  return invoke<SlashCatalogSnapshot>("refresh_slash_catalog");
 }
 
 /** List supported skill installation targets. Desktop-only. */
@@ -2062,7 +2590,7 @@ export async function skillInstallTargets(
     return [];
   }
   const invoke = await getInvoke();
-  return invoke<SkillInstallTarget[]>('skill_install_targets', {
+  return invoke<SkillInstallTarget[]>("skill_install_targets", {
     projectRoot: projectRoot ?? null,
   });
 }
@@ -2078,10 +2606,10 @@ export async function installSkillFromUrl(params: {
   projectRoot?: string | null;
 }): Promise<InstalledSkill> {
   if (!tauriAvailable()) {
-    throw new Error('NO_BACKEND');
+    throw new Error("NO_BACKEND");
   }
   const invoke = await getInvoke();
-  const installed = await invoke<InstalledSkill>('install_skill_from_url', {
+  const installed = await invoke<InstalledSkill>("install_skill_from_url", {
     url: params.url,
     name: params.name,
     slug: params.slug,
@@ -2091,11 +2619,11 @@ export async function installSkillFromUrl(params: {
     projectRoot: params.projectRoot ?? null,
   });
   registerAsset({
-    kind: 'skill',
-    source: 'installed',
-    origin: 'local',
+    kind: "skill",
+    source: "installed",
+    origin: "local",
     title: installed.name || installed.slug,
-    status: 'success',
+    status: "success",
     localPath: installed.skillFile || installed.path,
     remoteUrl: installed.sourceUrl ?? params.sourceUrl ?? params.url,
     meta: { targetId: installed.targetId, slug: installed.slug },
@@ -2114,10 +2642,10 @@ export async function installSkillFromZipUrl(params: {
   projectRoot?: string | null;
 }): Promise<InstalledSkill> {
   if (!tauriAvailable()) {
-    throw new Error('NO_BACKEND');
+    throw new Error("NO_BACKEND");
   }
   const invoke = await getInvoke();
-  const installed = await invoke<InstalledSkill>('install_skill_from_zip_url', {
+  const installed = await invoke<InstalledSkill>("install_skill_from_zip_url", {
     url: params.url,
     name: params.name,
     slug: params.slug,
@@ -2127,11 +2655,11 @@ export async function installSkillFromZipUrl(params: {
     projectRoot: params.projectRoot ?? null,
   });
   registerAsset({
-    kind: 'skill',
-    source: 'installed',
-    origin: 'local',
+    kind: "skill",
+    source: "installed",
+    origin: "local",
     title: installed.name || installed.slug,
-    status: 'success',
+    status: "success",
     localPath: installed.skillFile || installed.path,
     remoteUrl: installed.sourceUrl ?? params.sourceUrl ?? params.url,
     meta: { targetId: installed.targetId, slug: installed.slug },
@@ -2150,10 +2678,10 @@ export async function installSkillFromText(params: {
   projectRoot?: string | null;
 }): Promise<InstalledSkill> {
   if (!tauriAvailable()) {
-    throw new Error('NO_BACKEND');
+    throw new Error("NO_BACKEND");
   }
   const invoke = await getInvoke();
-  const installed = await invoke<InstalledSkill>('install_skill_from_text', {
+  const installed = await invoke<InstalledSkill>("install_skill_from_text", {
     text: params.text,
     name: params.name,
     slug: params.slug,
@@ -2163,11 +2691,11 @@ export async function installSkillFromText(params: {
     projectRoot: params.projectRoot ?? null,
   });
   registerAsset({
-    kind: 'skill',
-    source: 'installed',
-    origin: 'local',
+    kind: "skill",
+    source: "installed",
+    origin: "local",
     title: installed.name || installed.slug,
-    status: 'success',
+    status: "success",
     localPath: installed.skillFile || installed.path,
     remoteUrl: installed.sourceUrl ?? params.sourceUrl ?? undefined,
     meta: { targetId: installed.targetId, slug: installed.slug },
@@ -2182,10 +2710,10 @@ export async function uninstallSkill(params: {
   projectRoot?: string | null;
 }): Promise<SkillUninstallResult> {
   if (!tauriAvailable()) {
-    throw new Error('NO_BACKEND');
+    throw new Error("NO_BACKEND");
   }
   const invoke = await getInvoke();
-  return invoke<SkillUninstallResult>('uninstall_skill', {
+  return invoke<SkillUninstallResult>("uninstall_skill", {
     targetId: params.targetId,
     slug: params.slug,
     projectRoot: params.projectRoot ?? null,
@@ -2200,10 +2728,10 @@ export async function translateCapability(
   request: CapabilityTranslateRequest,
 ): Promise<CapabilityTranslateResult> {
   if (!tauriAvailable()) {
-    throw new Error('NO_BACKEND');
+    throw new Error("NO_BACKEND");
   }
   const invoke = await getInvoke();
-  return invoke<CapabilityTranslateResult>('translate_capability', {
+  return invoke<CapabilityTranslateResult>("translate_capability", {
     kind: request.kind,
     projectRoot: request.projectRoot ?? null,
     targets: request.targets,
@@ -2219,19 +2747,21 @@ export async function translateCapability(
 /** Scan PATH for supported local model CLIs. Desktop-only. */
 export async function scanModelClis(): Promise<ModelCliScanResult> {
   if (!tauriAvailable()) {
-    throw new Error('NO_BACKEND');
+    throw new Error("NO_BACKEND");
   }
   const invoke = await getInvoke();
-  return invoke<ModelCliScanResult>('scan_model_clis');
+  return invoke<ModelCliScanResult>("scan_model_clis");
 }
 
 /** Validate a user-selected CLI executable path. Desktop-only. */
-export async function validateCliPath(path: string): Promise<CliPathValidation> {
+export async function validateCliPath(
+  path: string,
+): Promise<CliPathValidation> {
   if (!tauriAvailable()) {
-    throw new Error('NO_BACKEND');
+    throw new Error("NO_BACKEND");
   }
   const invoke = await getInvoke();
-  return invoke<CliPathValidation>('validate_cli_path', { path });
+  return invoke<CliPathValidation>("validate_cli_path", { path });
 }
 
 /**
@@ -2240,10 +2770,10 @@ export async function validateCliPath(path: string): Promise<CliPathValidation> 
  */
 export async function checkCliUpdates(): Promise<CliVersionStatus[]> {
   if (!tauriAvailable()) {
-    throw new Error('NO_BACKEND');
+    throw new Error("NO_BACKEND");
   }
   const invoke = await getInvoke();
-  return invoke<CliVersionStatus[]>('check_cli_updates');
+  return invoke<CliVersionStatus[]>("check_cli_updates");
 }
 
 /**
@@ -2254,10 +2784,10 @@ export async function checkCliUpdates(): Promise<CliVersionStatus[]> {
  */
 export async function updateCli(adapter: string): Promise<string> {
   if (!tauriAvailable()) {
-    throw new Error('NO_BACKEND');
+    throw new Error("NO_BACKEND");
   }
   const invoke = await getInvoke();
-  return invoke<string>('update_cli', { adapter });
+  return invoke<string>("update_cli", { adapter });
 }
 
 /** Result of a manual "clean up now" cache sweep. */
@@ -2276,10 +2806,10 @@ export async function runCacheCleanupNow(
   retentionDays?: number,
 ): Promise<CacheCleanupReport> {
   if (!tauriAvailable()) {
-    throw new Error('NO_BACKEND');
+    throw new Error("NO_BACKEND");
   }
   const invoke = await getInvoke();
-  return invoke<CacheCleanupReport>('run_cache_cleanup_now', {
+  return invoke<CacheCleanupReport>("run_cache_cleanup_now", {
     retentionDays: retentionDays ?? null,
   });
 }
@@ -2292,14 +2822,14 @@ export async function runCacheCleanupNow(
  */
 export async function validateShellPath(path: string): Promise<string> {
   if (!tauriAvailable()) {
-    throw new Error('NO_BACKEND');
+    throw new Error("NO_BACKEND");
   }
   const invoke = await getInvoke();
-  return invoke<string>('validate_shell_path', { path });
+  return invoke<string>("validate_shell_path", { path });
 }
 
 /** Provider runtime family recovered from cc-switch (maps to ProviderKind). */
-export type ImportedProviderKind = 'anthropic' | 'codex' | 'gemini';
+export type ImportedProviderKind = "anthropic" | "codex" | "gemini";
 
 /** One provider recovered from the local cc-switch database. */
 export interface ImportedProvider {
@@ -2334,10 +2864,10 @@ export interface CcSwitchImportResult {
  */
 export async function importCcSwitchClaude(): Promise<CcSwitchImportResult> {
   if (!tauriAvailable()) {
-    throw new Error('NO_BACKEND');
+    throw new Error("NO_BACKEND");
   }
   const invoke = await getInvoke();
-  const json = await invoke<string>('import_cc_switch_claude');
+  const json = await invoke<string>("import_cc_switch_claude");
   return JSON.parse(json) as CcSwitchImportResult;
 }
 
@@ -2352,7 +2882,7 @@ export async function onWorkflowLog(
     return () => {};
   }
   const listen = await getListen();
-  return listen<string>('workflow-log', (event) => cb(event.payload));
+  return listen<string>("workflow-log", (event) => cb(event.payload));
 }
 
 /**
@@ -2366,7 +2896,7 @@ export async function onWorkflowNode(
     return () => {};
   }
   const listen = await getListen();
-  return listen<WorkflowNodeEvent>('workflow-node', (event) =>
+  return listen<WorkflowNodeEvent>("workflow-node", (event) =>
     cb(event.payload),
   );
 }
@@ -2379,7 +2909,7 @@ export async function onSlashCatalogUpdated(
     return () => {};
   }
   const listen = await getListen();
-  return listen<SlashCatalogSnapshot>('slash-catalog-updated', (event) =>
+  return listen<SlashCatalogSnapshot>("slash-catalog-updated", (event) =>
     cb(event.payload),
   );
 }
@@ -2395,8 +2925,8 @@ export async function onSingleInstanceWarning(
     return () => {};
   }
   const listen = await getListen();
-  return listen<string>('single-instance-warning', (event) =>
-    cb(event.payload || '只能同时运行一个进程'),
+  return listen<string>("single-instance-warning", (event) =>
+    cb(event.payload || "只能同时运行一个进程"),
   );
 }
 
@@ -2416,16 +2946,43 @@ export async function onSingleInstanceWarning(
  * config, docs) opens directly. `reveal` (show in folder) is always safe.
  */
 const EXECUTABLE_EXT = new Set([
-  'exe', 'bat', 'cmd', 'com', 'ps1', 'psm1', 'vbs', 'js', 'jse', 'wsf', 'wsh',
-  'scr', 'msi', 'msp', 'reg', 'lnk', 'url', 'inf', 'cpl', 'jar', 'app',
-  'command', 'desktop', 'sh', 'bash', 'zsh', 'fish', 'run', 'bin', 'appimage',
+  "exe",
+  "bat",
+  "cmd",
+  "com",
+  "ps1",
+  "psm1",
+  "vbs",
+  "js",
+  "jse",
+  "wsf",
+  "wsh",
+  "scr",
+  "msi",
+  "msp",
+  "reg",
+  "lnk",
+  "url",
+  "inf",
+  "cpl",
+  "jar",
+  "app",
+  "command",
+  "desktop",
+  "sh",
+  "bash",
+  "zsh",
+  "fish",
+  "run",
+  "bin",
+  "appimage",
 ]);
 
 function executableCheckPath(p: string): string {
   const queryOrHash = p.search(/[?#]/);
   let base = (queryOrHash >= 0 ? p.slice(0, queryOrHash) : p).replace(
     /[\\/]+$/,
-    '',
+    "",
   );
   const lineHint = /^(.*?):\d+(?::\d+)?$/.exec(base);
   if (lineHint?.[1] && !/^[A-Za-z]$/.test(lineHint[1])) {
@@ -2436,7 +2993,7 @@ function executableCheckPath(p: string): string {
 
 export function executableExtensionOf(p: string): string | null {
   const base = executableCheckPath(p);
-  const dot = base.lastIndexOf('.');
+  const dot = base.lastIndexOf(".");
   if (dot <= 0) return null;
   const ext = base.slice(dot + 1).toLowerCase();
   return EXECUTABLE_EXT.has(ext) ? ext : null;
@@ -2457,7 +3014,7 @@ export async function openLocalPath(
       const ext = executableExtensionOf(resolved);
       if (ext) {
         const ok =
-          typeof window !== 'undefined' &&
+          typeof window !== "undefined" &&
           window.confirm(
             `即将用系统默认程序打开一个可执行文件（.${ext}）：\n${resolved}\n\n该路径来自 AI 输出，打开可能会运行程序。确定继续？`,
           );
@@ -2465,9 +3022,8 @@ export async function openLocalPath(
       }
     }
 
-    const { openPath, revealItemInDir } = await import(
-      '@tauri-apps/plugin-opener'
-    );
+    const { openPath, revealItemInDir } =
+      await import("@tauri-apps/plugin-opener");
     if (reveal) await revealItemInDir(resolved);
     else await openPath(resolved);
     return true;
@@ -2498,22 +3054,22 @@ export async function engineRevealAsset(
   if (!tauriAvailable()) {
     return {
       ok: false,
-      engine: 'unknown',
-      status: 'error',
-      message: '当前浏览器模式不能在引擎中定位文件。请使用桌面端。',
+      engine: "unknown",
+      status: "error",
+      message: "当前浏览器模式不能在引擎中定位文件。请使用桌面端。",
     };
   }
   try {
     const invoke = await getInvoke();
-    return (await invoke('engine_reveal_asset', {
+    return (await invoke("engine_reveal_asset", {
       rootPath,
       filePath,
     })) as EngineRevealResult;
   } catch (err) {
     return {
       ok: false,
-      engine: 'unknown',
-      status: 'error',
+      engine: "unknown",
+      status: "error",
       message: err instanceof Error ? err.message : String(err),
     };
   }
@@ -2562,10 +3118,12 @@ function normalizeHeaders(input?: HeadersInit): ProxyHttpHeader[] {
   return out;
 }
 
-async function bodyInitToBase64(body: BodyInit | null | undefined): Promise<string | null> {
+async function bodyInitToBase64(
+  body: BodyInit | null | undefined,
+): Promise<string | null> {
   if (body == null) return null;
   let bytes: Uint8Array;
-  if (typeof body === 'string') {
+  if (typeof body === "string") {
     bytes = new TextEncoder().encode(body);
   } else if (body instanceof ArrayBuffer) {
     bytes = new Uint8Array(body);
@@ -2581,7 +3139,7 @@ async function bodyInitToBase64(body: BodyInit | null | undefined): Promise<stri
     bytes = new TextEncoder().encode(String(body));
   }
   if (bytes.byteLength === 0) return null;
-  let binary = '';
+  let binary = "";
   const chunk = 0x8000;
   for (let i = 0; i < bytes.length; i += chunk) {
     binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
@@ -2609,7 +3167,11 @@ export async function tauriFetch(
   // Only Request/string/URL inputs are used by our call sites. Merge a Request's
   // own fields with the explicit init (init wins, matching fetch()).
   const reqObj = input instanceof Request ? input : null;
-  const url = reqObj ? reqObj.url : input instanceof URL ? input.toString() : String(input);
+  const url = reqObj
+    ? reqObj.url
+    : input instanceof URL
+      ? input.toString()
+      : String(input);
 
   // Only remote http(s) requests can hit CORS. data:/blob:/relative URLs are
   // local or same-origin and must go through the native fetch (the Rust proxy
@@ -2617,18 +3179,20 @@ export async function tauriFetch(
   if (!/^https?:\/\//i.test(url)) {
     return fetch(input as RequestInfo, init);
   }
-  const method = (init?.method ?? reqObj?.method ?? 'GET').toUpperCase();
+  const method = (init?.method ?? reqObj?.method ?? "GET").toUpperCase();
   const signal = init?.signal ?? reqObj?.signal ?? undefined;
 
   if (signal?.aborted) {
-    throw new DOMException('The operation was aborted.', 'AbortError');
+    throw new DOMException("The operation was aborted.", "AbortError");
   }
 
-  const headers = normalizeHeaders(init?.headers ?? reqObj?.headers ?? undefined);
+  const headers = normalizeHeaders(
+    init?.headers ?? reqObj?.headers ?? undefined,
+  );
   const bodyBase64 = await bodyInitToBase64(init?.body ?? undefined);
 
   const invoke = await getInvoke();
-  const call = invoke<ProxyHttpResponsePayload>('proxy_http', {
+  const call = invoke<ProxyHttpResponsePayload>("proxy_http", {
     request: { method, url, headers, bodyBase64 },
   });
 
@@ -2639,8 +3203,11 @@ export async function tauriFetch(
         call,
         new Promise<never>((_, reject) => {
           signal.addEventListener(
-            'abort',
-            () => reject(new DOMException('The operation was aborted.', 'AbortError')),
+            "abort",
+            () =>
+              reject(
+                new DOMException("The operation was aborted.", "AbortError"),
+              ),
             { once: true },
           );
         }),
@@ -2657,7 +3224,8 @@ export async function tauriFetch(
   }
   const bodyBytes = base64ToBytes(payload.bodyBase64);
   // 204/205/304 must not carry a body per the Response constructor contract.
-  const nullBody = payload.status === 204 || payload.status === 205 || payload.status === 304;
+  const nullBody =
+    payload.status === 204 || payload.status === 205 || payload.status === 304;
   const responseBody: BodyInit | null = nullBody
     ? null
     : new Blob([bodyBytes.buffer as ArrayBuffer]);
@@ -2668,7 +3236,7 @@ export async function tauriFetch(
   });
   // `url` is read-only on Response; expose the final URL for callers that read it.
   try {
-    Object.defineProperty(response, 'url', { value: payload.url || url });
+    Object.defineProperty(response, "url", { value: payload.url || url });
   } catch {
     // Non-fatal: some engines lock the property. Callers rarely need it.
   }
@@ -2679,11 +3247,12 @@ export async function tauriFetch(
 async function resolveAgainstCwd(path: string, cwd?: string): Promise<string> {
   // Absolute: drive-letter (C:\), POSIX root (/), UNC (\\server), or a home/env
   // prefix the user clearly means literally (~/, $HOME/…).
-  const isAbsolute =
-    /^(?:[A-Za-z]:[/\\]|[/\\]|\\\\|~[/\\]|\$\w+[/\\])/.test(path);
+  const isAbsolute = /^(?:[A-Za-z]:[/\\]|[/\\]|\\\\|~[/\\]|\$\w+[/\\])/.test(
+    path,
+  );
   if (isAbsolute || !cwd) return path;
   try {
-    const { join } = await import('@tauri-apps/api/path');
+    const { join } = await import("@tauri-apps/api/path");
     return await join(cwd, path);
   } catch {
     return path;

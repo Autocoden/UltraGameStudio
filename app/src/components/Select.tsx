@@ -161,7 +161,9 @@ export default function Select({
             {selected.hint}
           </span>
         )}
-        <span className="shrink-0 text-[9px] text-fg-faint">▾</span>
+        <span aria-hidden="true" className="shrink-0 text-[9px] text-fg-faint">
+          ▾
+        </span>
       </button>
 
       {open && !disabled && (
@@ -241,7 +243,10 @@ export default function Select({
                               index > 0 && 'border-t border-border-soft',
                             )}
                           >
-                            <span className="shrink-0 text-[9px] leading-none">
+                            <span
+                              aria-hidden="true"
+                              className="shrink-0 text-[9px] leading-none"
+                            >
                               {groupCollapsed ? '▸' : '▾'}
                             </span>
                             <span className="flex-1 truncate">{opt.group}</span>

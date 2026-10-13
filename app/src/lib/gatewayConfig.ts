@@ -77,18 +77,16 @@ const inflightDiskWrites = new Set<Promise<void>>();
 
 function diskWriteSoon(relPath: string, json: string): void {
   if (!tauriAvailable()) return;
-  let write!: Promise<void>;
-  write = (async () => {
+  const write = (async () => {
     try {
       const invoke = await getInvoke();
       await invoke<void>('history_write_json', { relPath, json });
     } catch (err) {
       console.error('[gatewayConfig] disk write failed', relPath, err);
-    } finally {
-      inflightDiskWrites.delete(write);
     }
   })();
   inflightDiskWrites.add(write);
+  void write.then(() => inflightDiskWrites.delete(write));
 }
 
 /**
@@ -498,6 +496,48 @@ function selectionFromProvider(provider: GatewayProvider): GatewaySelection {
   };
 }
 
+/**
+ * Reconcile a persisted selection with the providers that still exist.
+ * Legacy/default selections may have no provider/channel ids at all. Keep
+ * those only while no configured provider exists, or attach them to a matching
+ * adapter. A selection for an adapter that is no longer configured is stale.
+ */
+function reconcileExplicitGatewaySelection(
+  selection: GatewaySelection,
+  providers: GatewayProvider[],
+): GatewaySelection | null {
+  if (selection.providerId) {
+    const provider = providers.find(
+      (candidate) => candidate.id === selection.providerId,
+    );
+    if (!provider || provider.adapter !== selection.adapter) return null;
+    if (
+      selection.channelId &&
+      !provider.channels.some((channel) => channel.id === selection.channelId)
+    ) {
+      return null;
+    }
+    return selection;
+  }
+
+  const matchingProvider = preferredGatewayProvider(
+    providers,
+    normalizeAdapter(selection.adapter),
+  );
+  if (matchingProvider) {
+    return {
+      ...selection,
+      providerId: matchingProvider.id,
+      channelId: matchingProvider.channels[0]?.id,
+    };
+  }
+
+  const hasConfiguredProvider = providers.some(
+    (provider) => !provider.id.startsWith(FREE_CHANNEL_PROVIDER_PREFIX),
+  );
+  return hasConfiguredProvider ? null : selection;
+}
+
 export function loadGatewayConfig(): GatewayConfig {
   const stored = readStoredGatewayConfig();
   const free = freeChannelGatewayProviders();
@@ -595,7 +635,13 @@ export function getExplicitActiveGatewaySelection(): GatewaySelection | null {
   if (stored) {
     try {
       const selection = normalizeSelection(JSON.parse(stored));
-      if (selection) return selection;
+      if (selection) {
+        const reconciled = reconcileExplicitGatewaySelection(
+          selection,
+          loadGatewayConfig().providers,
+        );
+        if (reconciled) return reconciled;
+      }
     } catch {
       /* fall through to legacy active provider */
     }
@@ -610,10 +656,13 @@ export function getExplicitActiveGatewaySelection(): GatewaySelection | null {
 }
 
 export function getDefaultGatewaySelection(): GatewaySelection {
-  const provider = preferredGatewayProvider(
-    loadGatewayConfig().providers,
-    'claude-code',
+  const providers = loadGatewayConfig().providers;
+  const configuredProviders = providers.filter(
+    (provider) => !provider.id.startsWith(FREE_CHANNEL_PROVIDER_PREFIX),
   );
+  const provider =
+    preferredGatewayProvider(providers, 'claude-code') ??
+    configuredProviders[0];
   return provider ? selectionFromProvider(provider) : DEFAULT_GATEWAY_SELECTION;
 }
 

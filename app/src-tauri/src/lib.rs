@@ -20,9 +20,15 @@ mod dsh_log;
 mod free_proxy;
 mod history;
 mod kimi_log;
+mod openspec_runtime;
 mod proxy_http;
 mod secure_store;
 mod storage_paths;
+mod task_artifacts;
+mod task_developer_tools;
+mod task_worktree;
+
+use task_artifacts::sync_task_artifacts;
 
 /// Windows CreateProcess flag: don't allocate a console window for the child.
 /// Without this, spawning the `claude` console binary pops up a black terminal
@@ -4133,6 +4139,7 @@ const PREVIEW_DOCUMENT_LIMIT: u64 = 64 * 1024 * 1024;
 const PREVIEW_BASENAME_SEARCH_LIMIT: usize = 20_000;
 const CLIPBOARD_IMAGE_LIMIT: usize = 32 * 1024 * 1024;
 const CLIPBOARD_VIDEO_LIMIT: usize = 512 * 1024 * 1024;
+const TASK_ATTACHMENT_LIMIT: usize = 10 * 1024 * 1024;
 const SESSION_CAPTURE_LIMIT: usize = 128 * 1024 * 1024;
 const LOCAL_FILE_UPLOAD_LIMIT: u64 = 128 * 1024 * 1024;
 const KNOWLEDGE_BASE_MAX_FILES: usize = 1200;
@@ -10984,6 +10991,7 @@ fn copy_workspace_tree(src: &Path, dst: &Path) -> Result<(), String> {
 fn prepare_isolated_workspace_blocking(
     root_path: String,
     session_id: String,
+    base_branch: Option<String>,
 ) -> Result<IsolatedWorkspace, String> {
     let root = PathBuf::from(root_path.trim());
     if root.as_os_str().is_empty() || !root.is_dir() {
@@ -11024,16 +11032,29 @@ fn prepare_isolated_workspace_blocking(
             });
         }
         let worktree_str = worktree_path.to_string_lossy().to_string();
+        let base_ref = base_branch
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if base_ref.is_some_and(|value| {
+            value.starts_with('-') || value.chars().any(|c| matches!(c, '\r' | '\n' | '\0'))
+        }) {
+            return Err("Git 基准分支无效".to_string());
+        }
+        let mut add_args = vec![
+            "worktree".to_string(),
+            "add".to_string(),
+            "-b".to_string(),
+            branch.clone(),
+            worktree_str.clone(),
+        ];
+        if let Some(value) = base_ref {
+            add_args.push(value.to_string());
+        }
         let add = run_workspace_status_command_owned_with_timeout(
             &toplevel,
             "git",
-            &[
-                "worktree".to_string(),
-                "add".to_string(),
-                "-b".to_string(),
-                branch.clone(),
-                worktree_str.clone(),
-            ],
+            &add_args,
             std::time::Duration::from_secs(60),
         )
         .map_err(|e| format!("创建 git worktree 失败: {e}"))?;
@@ -11093,12 +11114,550 @@ fn prepare_isolated_workspace_blocking(
 async fn prepare_isolated_workspace(
     root_path: String,
     session_id: String,
+    base_branch: Option<String>,
 ) -> Result<IsolatedWorkspace, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        prepare_isolated_workspace_blocking(root_path, session_id)
+        prepare_isolated_workspace_blocking(root_path, session_id, base_branch)
     })
     .await
     .map_err(|e| format!("隔离工作区准备任务失败: {e}"))?
+}
+
+fn push_workspace_branch_blocking(root_path: String) -> Result<String, String> {
+    let root = PathBuf::from(root_path.trim());
+    if root.as_os_str().is_empty() || !root.is_dir() || !is_inside_git_work_tree(&root) {
+        return Err("任务工作区不是有效的 Git 仓库".to_string());
+    }
+    let branch_result = run_workspace_status_command_owned_with_timeout(
+        &root,
+        "git",
+        &[
+            "rev-parse".to_string(),
+            "--abbrev-ref".to_string(),
+            "HEAD".to_string(),
+        ],
+        std::time::Duration::from_secs(15),
+    )
+    .map_err(|e| format!("读取任务分支失败: {e}"))?;
+    if !branch_result.success {
+        return Err(format!(
+            "读取任务分支失败: {}",
+            workspace_status_error(&branch_result)
+        ));
+    }
+    let branch = branch_result.stdout.trim().to_string();
+    if branch.is_empty() || branch == "HEAD" || branch.starts_with('-') {
+        return Err("任务工作区当前处于 detached HEAD，无法推送".to_string());
+    }
+    let pushed = run_workspace_status_command_owned_with_timeout(
+        &root,
+        "git",
+        &[
+            "push".to_string(),
+            "--set-upstream".to_string(),
+            "origin".to_string(),
+            branch.clone(),
+        ],
+        std::time::Duration::from_secs(120),
+    )
+    .map_err(|e| format!("推送任务分支失败: {e}"))?;
+    if !pushed.success {
+        return Err(format!(
+            "推送任务分支失败: {}",
+            workspace_status_error(&pushed)
+        ));
+    }
+    Ok(branch)
+}
+
+#[tauri::command]
+async fn push_workspace_branch(root_path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || push_workspace_branch_blocking(root_path))
+        .await
+        .map_err(|e| format!("推送任务分支进程失败: {e}"))?
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TaskGitOverview {
+    current_branch: Option<String>,
+    upstream: Option<String>,
+    ahead: u32,
+    behind: u32,
+    dirty: bool,
+    remote_url: Option<String>,
+    default_branch: Option<String>,
+    branches: Vec<String>,
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TaskGitCommit {
+    hash: String,
+    short_hash: String,
+    message: String,
+    author: String,
+    date: String,
+    timestamp: i64,
+    parents: Vec<String>,
+    refs: Vec<String>,
+    is_merge: bool,
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TaskGitCommitFile {
+    path: String,
+    previous_path: Option<String>,
+    status: String,
+    additions: u64,
+    deletions: u64,
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TaskGitDiff {
+    text: String,
+    truncated: bool,
+}
+
+fn task_git_root(root_path: &str) -> Result<PathBuf, String> {
+    let (root, _) = workspace_tree_resolve_dir(root_path, "")?;
+    if !is_inside_git_work_tree(&root) {
+        return Err("任务工作区不是有效的 Git 仓库".to_string());
+    }
+    Ok(root)
+}
+
+fn valid_git_revision(value: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty()
+        && !value.starts_with('-')
+        && !value.chars().any(|c| matches!(c, '\r' | '\n' | '\0'))
+}
+
+fn task_git_command(
+    root: &Path,
+    args: &[String],
+    timeout: std::time::Duration,
+    label: &str,
+) -> Result<String, String> {
+    let output = run_workspace_status_command_owned_with_timeout(root, "git", args, timeout)
+        .map_err(|e| format!("{label}失败: {e}"))?;
+    if output.timed_out {
+        return Err(format!("{label}超时"));
+    }
+    if !output.success {
+        return Err(format!("{label}失败: {}", workspace_status_error(&output)));
+    }
+    Ok(output.stdout)
+}
+
+fn task_git_optional_command(root: &Path, args: &[String]) -> Option<String> {
+    let output = run_workspace_status_command_owned_with_timeout(
+        root,
+        "git",
+        args,
+        std::time::Duration::from_secs(15),
+    )
+    .ok()?;
+    if output.success && !output.timed_out {
+        let value = output.stdout.trim().to_string();
+        (!value.is_empty()).then_some(value)
+    } else {
+        None
+    }
+}
+
+fn normalize_default_branch(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    Some(value.strip_prefix("origin/").unwrap_or(value).to_string())
+}
+
+fn task_git_overview_blocking(root_path: String) -> Result<TaskGitOverview, String> {
+    let root = task_git_root(&root_path)?;
+    let current_branch =
+        task_git_optional_command(&root, &["branch".to_string(), "--show-current".to_string()]);
+    let upstream = task_git_optional_command(
+        &root,
+        &[
+            "rev-parse".to_string(),
+            "--abbrev-ref".to_string(),
+            "--symbolic-full-name".to_string(),
+            "@{upstream}".to_string(),
+        ],
+    );
+    let (ahead, behind) = if upstream.is_some() {
+        task_git_optional_command(
+            &root,
+            &[
+                "rev-list".to_string(),
+                "--left-right".to_string(),
+                "--count".to_string(),
+                "HEAD...@{upstream}".to_string(),
+            ],
+        )
+        .and_then(|value| {
+            let mut parts = value.split_whitespace();
+            Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
+        })
+        .unwrap_or((0, 0))
+    } else {
+        (0, 0)
+    };
+    let dirty =
+        task_git_optional_command(&root, &["status".to_string(), "--porcelain=v1".to_string()])
+            .is_some();
+    let remote_url = task_git_optional_command(
+        &root,
+        &[
+            "remote".to_string(),
+            "get-url".to_string(),
+            "origin".to_string(),
+        ],
+    );
+    let default_branch = task_git_optional_command(
+        &root,
+        &[
+            "symbolic-ref".to_string(),
+            "--short".to_string(),
+            "refs/remotes/origin/HEAD".to_string(),
+        ],
+    )
+    .and_then(|value| normalize_default_branch(&value))
+    .or_else(|| {
+        ["main", "master"].into_iter().find_map(|candidate| {
+            task_git_optional_command(
+                &root,
+                &[
+                    "rev-parse".to_string(),
+                    "--verify".to_string(),
+                    format!("refs/heads/{candidate}"),
+                ],
+            )
+            .map(|_| candidate.to_string())
+        })
+    });
+    let mut branches = task_git_command(
+        &root,
+        &[
+            "for-each-ref".to_string(),
+            "--format=%(refname:short)".to_string(),
+            "refs/heads".to_string(),
+            "refs/remotes/origin".to_string(),
+        ],
+        std::time::Duration::from_secs(15),
+        "读取 Git 分支",
+    )?
+    .lines()
+    .map(str::trim)
+    .filter(|value| !value.is_empty() && *value != "origin/HEAD")
+    .map(str::to_string)
+    .collect::<Vec<_>>();
+    branches.sort_by(|a, b| {
+        let a_rank = if Some(a.as_str()) == current_branch.as_deref() {
+            0
+        } else if Some(a.as_str()) == default_branch.as_deref() {
+            1
+        } else if a.starts_with("origin/") {
+            3
+        } else {
+            2
+        };
+        let b_rank = if Some(b.as_str()) == current_branch.as_deref() {
+            0
+        } else if Some(b.as_str()) == default_branch.as_deref() {
+            1
+        } else if b.starts_with("origin/") {
+            3
+        } else {
+            2
+        };
+        a_rank.cmp(&b_rank).then_with(|| a.cmp(b))
+    });
+    branches.dedup();
+
+    Ok(TaskGitOverview {
+        current_branch,
+        upstream,
+        ahead,
+        behind,
+        dirty,
+        remote_url,
+        default_branch,
+        branches,
+    })
+}
+
+#[tauri::command]
+async fn task_git_overview(root_path: String) -> Result<TaskGitOverview, String> {
+    tauri::async_runtime::spawn_blocking(move || task_git_overview_blocking(root_path))
+        .await
+        .map_err(|e| format!("Git 概览读取任务失败: {e}"))?
+}
+
+fn parse_task_git_commits(stdout: &str) -> Vec<TaskGitCommit> {
+    stdout
+        .split('\u{1e}')
+        .filter_map(|record| {
+            let record = record.trim_matches(['\r', '\n']);
+            if record.is_empty() {
+                return None;
+            }
+            let fields = record.split('\u{1f}').collect::<Vec<_>>();
+            if fields.len() < 8 || fields[0].trim().is_empty() {
+                return None;
+            }
+            let parents = fields[6]
+                .split_whitespace()
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            let refs = fields[7]
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            Some(TaskGitCommit {
+                hash: fields[0].to_string(),
+                short_hash: fields[1].to_string(),
+                message: fields[2].to_string(),
+                author: fields[3].to_string(),
+                date: fields[4].to_string(),
+                timestamp: fields[5].parse().unwrap_or_default(),
+                is_merge: parents.len() > 1,
+                parents,
+                refs,
+            })
+        })
+        .collect()
+}
+
+fn task_git_commits_blocking(
+    root_path: String,
+    base_branch: Option<String>,
+    limit: Option<u32>,
+) -> Result<Vec<TaskGitCommit>, String> {
+    let root = task_git_root(&root_path)?;
+    let limit = limit.unwrap_or(100).clamp(1, 250);
+    let base_branch = base_branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| valid_git_revision(value));
+    let revision = base_branch
+        .map(|value| format!("{value}..HEAD"))
+        .unwrap_or_else(|| "HEAD".to_string());
+    let output = task_git_command(
+        &root,
+        &[
+            "log".to_string(),
+            format!("--max-count={limit}"),
+            "--date=iso-strict".to_string(),
+            "--decorate=short".to_string(),
+            "--pretty=format:%H%x1f%h%x1f%s%x1f%an%x1f%aI%x1f%at%x1f%P%x1f%D%x1e".to_string(),
+            revision,
+            "--".to_string(),
+        ],
+        std::time::Duration::from_secs(30),
+        "读取 Git 提交历史",
+    )?;
+    Ok(parse_task_git_commits(&output))
+}
+
+#[tauri::command]
+async fn task_git_commits(
+    root_path: String,
+    base_branch: Option<String>,
+    limit: Option<u32>,
+) -> Result<Vec<TaskGitCommit>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        task_git_commits_blocking(root_path, base_branch, limit)
+    })
+    .await
+    .map_err(|e| format!("Git 提交历史任务失败: {e}"))?
+}
+
+fn parse_task_git_name_status(stdout: &str) -> Vec<TaskGitCommitFile> {
+    stdout
+        .lines()
+        .filter_map(|line| {
+            let fields = line.split('\t').collect::<Vec<_>>();
+            let code = fields.first()?.trim();
+            let status = code.chars().next()?;
+            match status {
+                'R' | 'C' if fields.len() >= 3 => Some(TaskGitCommitFile {
+                    path: fields[2].to_string(),
+                    previous_path: Some(fields[1].to_string()),
+                    status: "R".to_string(),
+                    additions: 0,
+                    deletions: 0,
+                }),
+                'A' | 'D' | 'M' | 'T' | 'U' if fields.len() >= 2 => Some(TaskGitCommitFile {
+                    path: fields[1].to_string(),
+                    previous_path: None,
+                    status: match status {
+                        'A' => "A",
+                        'D' => "D",
+                        _ => "M",
+                    }
+                    .to_string(),
+                    additions: 0,
+                    deletions: 0,
+                }),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+fn parse_task_git_numstat(stdout: &str) -> Vec<(u64, u64)> {
+    stdout
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.splitn(3, '\t');
+            let additions = fields.next()?;
+            let deletions = fields.next()?;
+            fields.next()?;
+            Some((
+                additions.parse().unwrap_or_default(),
+                deletions.parse().unwrap_or_default(),
+            ))
+        })
+        .collect()
+}
+
+fn task_git_commit_files_blocking(
+    root_path: String,
+    commit: String,
+) -> Result<Vec<TaskGitCommitFile>, String> {
+    if !valid_git_revision(&commit) {
+        return Err("Git 提交标识无效".to_string());
+    }
+    let root = task_git_root(&root_path)?;
+    let name_status = task_git_command(
+        &root,
+        &[
+            "diff-tree".to_string(),
+            "--root".to_string(),
+            "--no-commit-id".to_string(),
+            "--name-status".to_string(),
+            "-r".to_string(),
+            "--find-renames".to_string(),
+            commit.clone(),
+            "--".to_string(),
+        ],
+        std::time::Duration::from_secs(30),
+        "读取提交文件",
+    )?;
+    let numstat = task_git_command(
+        &root,
+        &[
+            "show".to_string(),
+            "--format=".to_string(),
+            "--numstat".to_string(),
+            "--find-renames".to_string(),
+            commit,
+            "--".to_string(),
+        ],
+        std::time::Duration::from_secs(30),
+        "读取提交统计",
+    )?;
+    let mut files = parse_task_git_name_status(&name_status);
+    for (file, (additions, deletions)) in files.iter_mut().zip(parse_task_git_numstat(&numstat)) {
+        file.additions = additions;
+        file.deletions = deletions;
+    }
+    Ok(files)
+}
+
+#[tauri::command]
+async fn task_git_commit_files(
+    root_path: String,
+    commit: String,
+) -> Result<Vec<TaskGitCommitFile>, String> {
+    tauri::async_runtime::spawn_blocking(move || task_git_commit_files_blocking(root_path, commit))
+        .await
+        .map_err(|e| format!("Git 提交文件任务失败: {e}"))?
+}
+
+fn valid_workspace_relative_git_path(value: &str) -> bool {
+    let path = Path::new(value);
+    !value.trim().is_empty()
+        && !value.chars().any(|c| matches!(c, '\r' | '\n' | '\0'))
+        && !path.is_absolute()
+        && path.components().all(|component| {
+            matches!(
+                component,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        })
+}
+
+fn truncate_task_git_diff(mut text: String) -> TaskGitDiff {
+    const MAX_DIFF_BYTES: usize = 2 * 1024 * 1024;
+    if text.len() <= MAX_DIFF_BYTES {
+        return TaskGitDiff {
+            text,
+            truncated: false,
+        };
+    }
+    let mut end = MAX_DIFF_BYTES;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
+    TaskGitDiff {
+        text,
+        truncated: true,
+    }
+}
+
+fn task_git_commit_file_diff_blocking(
+    root_path: String,
+    commit: String,
+    path: String,
+) -> Result<TaskGitDiff, String> {
+    if !valid_git_revision(&commit) {
+        return Err("Git 提交标识无效".to_string());
+    }
+    if !valid_workspace_relative_git_path(&path) {
+        return Err("Git 文件路径无效".to_string());
+    }
+    let root = task_git_root(&root_path)?;
+    let output = task_git_command(
+        &root,
+        &[
+            "show".to_string(),
+            "--format=".to_string(),
+            "--no-ext-diff".to_string(),
+            "--no-color".to_string(),
+            "--find-renames".to_string(),
+            "--unified=3".to_string(),
+            commit,
+            "--".to_string(),
+            path,
+        ],
+        std::time::Duration::from_secs(30),
+        "读取提交文件差异",
+    )?;
+    Ok(truncate_task_git_diff(output))
+}
+
+#[tauri::command]
+async fn task_git_commit_file_diff(
+    root_path: String,
+    commit: String,
+    path: String,
+) -> Result<TaskGitDiff, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        task_git_commit_file_diff_blocking(root_path, commit, path)
+    })
+    .await
+    .map_err(|e| format!("Git 提交文件差异任务失败: {e}"))?
 }
 
 fn image_mime_for_path(path: &std::path::Path) -> Option<&'static str> {
@@ -12377,6 +12936,76 @@ async fn save_clipboard_image(
     })
     .await
     .map_err(|e| format!("保存粘贴图片任务失败: {e}"))?
+}
+
+fn task_attachment_extension(mime: &str, file_name: Option<&str>) -> String {
+    if let Some(extension) = file_name
+        .and_then(|name| Path::new(name).extension())
+        .and_then(|extension| extension.to_str())
+    {
+        let extension = extension.trim().to_ascii_lowercase();
+        if !extension.is_empty()
+            && extension.len() <= 16
+            && extension
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric())
+        {
+            return extension;
+        }
+    }
+
+    match mime.split(';').next().unwrap_or_default().trim() {
+        "application/pdf" => "pdf",
+        "application/json" => "json",
+        "application/zip" => "zip",
+        "text/csv" => "csv",
+        "text/html" => "html",
+        "text/markdown" => "md",
+        "text/plain" => "txt",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => "docx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => "xlsx",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation" => "pptx",
+        _ => "bin",
+    }
+    .to_string()
+}
+
+fn save_task_attachment_blocking(
+    bytes_base64: String,
+    mime: String,
+    file_name: Option<String>,
+    cwd: Option<String>,
+) -> Result<String, String> {
+    use base64::Engine;
+
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(bytes_base64.trim())
+        .map_err(|e| format!("解析任务附件失败：{e}"))?;
+    if bytes.is_empty() {
+        return Err("任务附件为空。".to_string());
+    }
+    if bytes.len() > TASK_ATTACHMENT_LIMIT {
+        return Err("任务附件过大，最大支持 10MB。".to_string());
+    }
+
+    let extension = task_attachment_extension(&mime, file_name.as_deref());
+    let dir = storage_paths::managed_artifact_dir(cwd.as_deref(), "task-attachments");
+    let path = write_unique_clipboard_image(&dir, &extension, &bytes)?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+async fn save_task_attachment(
+    bytes_base64: String,
+    mime: String,
+    file_name: Option<String>,
+    cwd: Option<String>,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        save_task_attachment_blocking(bytes_base64, mime, file_name, cwd)
+    })
+    .await
+    .map_err(|e| format!("保存任务附件任务失败: {e}"))?
 }
 
 fn save_session_capture_blocking(
@@ -14824,6 +15453,36 @@ fn ai_cli_timeout_secs(override_secs: Option<u64>) -> u64 {
     configured.max(dynamic)
 }
 
+fn normalize_ai_cli_thinking_level(value: Option<&str>) -> Option<&'static str> {
+    match value?.trim().to_ascii_lowercase().as_str() {
+        "low" => Some("low"),
+        "medium" => Some("medium"),
+        "high" => Some("high"),
+        "xhigh" => Some("xhigh"),
+        _ => None,
+    }
+}
+
+fn append_ai_cli_thinking_args(protocol: &str, value: Option<&str>, args: &mut Vec<String>) {
+    let Some(level) = normalize_ai_cli_thinking_level(value) else {
+        return;
+    };
+    match protocol {
+        // Codex reads reasoning effort from the normal config override path;
+        // this works for both `exec` and `app-server` transports.
+        "codex" => {
+            args.push("-c".into());
+            args.push(format!("model_reasoning_effort=\"{level}\""));
+        }
+        // Claude Code exposes a first-class per-turn effort switch.
+        "claude" => {
+            args.push("--effort".into());
+            args.push(level.into());
+        }
+        _ => {}
+    }
+}
+
 /// Whether to load the machine's global MCP servers for each workflow node.
 /// On by default so workflow nodes share the same MCP tools as a hand-run
 /// `claude` (e.g. pencil `mcp__pencil__...`). Set ULTRAGAMESTUDIO_ENABLE_MCP=0
@@ -15271,6 +15930,68 @@ fn gemini_project_mcp_settings_json(cwd: Option<&str>) -> Option<serde_json::Val
     Some(settings)
 }
 
+fn gemini_thinking_config(model: Option<&str>, level: Option<&str>) -> Option<serde_json::Value> {
+    let model = model?.trim();
+    if model.is_empty() {
+        return None;
+    }
+    let level = normalize_ai_cli_thinking_level(level)?;
+    let lower_model = model.to_ascii_lowercase();
+    if lower_model.contains("gemini-3") || matches!(lower_model.as_str(), "auto" | "pro") {
+        let value = match level {
+            "low" => "LOW",
+            "medium" => "MEDIUM",
+            "high" | "xhigh" => "HIGH",
+            _ => return None,
+        };
+        Some(serde_json::json!({
+            "includeThoughts": true,
+            "thinkingLevel": value,
+        }))
+    } else {
+        let budget = match level {
+            "low" => 1_024,
+            "medium" => 8_192,
+            "high" => 16_384,
+            "xhigh" => 24_576,
+            _ => return None,
+        };
+        Some(serde_json::json!({
+            "includeThoughts": true,
+            "thinkingBudget": budget,
+        }))
+    }
+}
+
+fn gemini_cli_settings_json(
+    cwd: Option<&str>,
+    include_mcp: bool,
+    model: Option<&str>,
+    thinking_level: Option<&str>,
+) -> Option<serde_json::Value> {
+    let mut settings = include_mcp
+        .then(|| gemini_project_mcp_settings_json(cwd))
+        .flatten();
+    if let Some(thinking_config) = gemini_thinking_config(model, thinking_level) {
+        let model = model?.trim();
+        let root = settings.get_or_insert_with(|| serde_json::json!({}));
+        root.as_object_mut()?.insert(
+            "modelConfigs".to_string(),
+            serde_json::json!({
+                "overrides": [{
+                    "match": { "model": model },
+                    "modelConfig": {
+                        "generateContentConfig": {
+                            "thinkingConfig": thinking_config,
+                        },
+                    },
+                }],
+            }),
+        );
+    }
+    settings
+}
+
 fn trust_gemini_mcp_servers(settings: &mut serde_json::Value) {
     if let Some(servers) = settings
         .get_mut("mcpServers")
@@ -15284,11 +16005,16 @@ fn trust_gemini_mcp_servers(settings: &mut serde_json::Value) {
     }
 }
 
-fn write_gemini_project_mcp_settings(cwd: Option<&str>) -> Result<Option<TempFileGuard>, String> {
-    let Some(settings) = gemini_project_mcp_settings_json(cwd) else {
+fn write_gemini_cli_settings(
+    cwd: Option<&str>,
+    include_mcp: bool,
+    model: Option<&str>,
+    thinking_level: Option<&str>,
+) -> Result<Option<TempFileGuard>, String> {
+    let Some(settings) = gemini_cli_settings_json(cwd, include_mcp, model, thinking_level) else {
         return Ok(None);
     };
-    let path = temp_output_path_for_cwd(cwd, "ultragamestudio-gemini-project-mcp", "json");
+    let path = temp_output_path_for_cwd(cwd, "ultragamestudio-gemini-settings", "json");
     let bytes =
         serde_json::to_vec(&settings).map_err(|e| format!("生成 Gemini MCP 配置失败: {e}"))?;
     std::fs::write(&path, bytes).map_err(|e| format!("写入 Gemini MCP 配置失败: {e}"))?;
@@ -15925,6 +16651,60 @@ fn zcode_envelope_from_output(output: &str) -> Option<serde_json::Value> {
     None
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum ZcodeAppServerTerminal {
+    Completed { response: String },
+    Failed { message: String },
+}
+
+/// Read the authoritative terminal event from ZCode's app-server stream.
+///
+/// `state.updated` with `reason: "prompt_completed"` is not a stream boundary:
+/// the current runtime emits it before the subscribed `session/event` backlog,
+/// including all model deltas. Treating that state update as terminal kills the
+/// long-lived app-server before the model output reaches the UI. The
+/// `turn.completed` / `turn.failed` session events are ordered after those
+/// deltas and therefore are the only safe completion boundary.
+fn zcode_app_server_terminal_event(value: &serde_json::Value) -> Option<ZcodeAppServerTerminal> {
+    if value.get("method").and_then(|method| method.as_str()) != Some("session/event") {
+        return None;
+    }
+    let event_type = value
+        .pointer("/params/type")
+        .and_then(|kind| kind.as_str())?;
+    let payload = value.pointer("/params/payload")?;
+    match event_type {
+        "turn.completed" => {
+            let response = payload
+                .get("response")
+                .and_then(|response| response.as_str())
+                .unwrap_or_default()
+                .to_string();
+            match payload
+                .get("resultType")
+                .and_then(|result_type| result_type.as_str())
+                .unwrap_or("success")
+            {
+                "success" => Some(ZcodeAppServerTerminal::Completed { response }),
+                result_type => Some(ZcodeAppServerTerminal::Failed {
+                    message: format!("ZCode 本轮结束：{result_type}"),
+                }),
+            }
+        }
+        "turn.failed" => {
+            let message = payload
+                .pointer("/error/message")
+                .and_then(|message| message.as_str())
+                .or_else(|| payload.get("message").and_then(|message| message.as_str()))
+                .or_else(|| payload.get("error").and_then(|error| error.as_str()))
+                .unwrap_or("ZCode 本轮执行失败")
+                .to_string();
+            Some(ZcodeAppServerTerminal::Failed { message })
+        }
+        _ => None,
+    }
+}
+
 /// Summarize a `tool_use` event into one readable progress line, e.g.
 /// `🔧 Bash: ls app/src` / `🔧 Glob: **/*.tsx` / `🔧 Read: app/src/core/ir.ts`,
 /// so the run log shows *what* the agent is doing, not just the tool name.
@@ -16480,7 +17260,7 @@ fn ai_cli_steer_supported(
         // session — only possible when the bundled runtime entry resolves (same
         // gate `ai_cli` uses to pick the app-server transport over `--prompt
         // --json`). No support probing of the CLI itself: the capability is a
-        // property of the vendored runtime layout, which UGS ships.
+        // property of the protocol-capable npm package layout.
         "zcode" => Ok(cli_runtime::resolve_zcode_runtime_entry(&binary).is_some()),
         _ => Ok(false),
     }
@@ -16510,7 +17290,7 @@ fn set_codex_startup_error(error: &Arc<Mutex<Option<String>>>, message: String) 
 }
 
 /// Write one newline-delimited JSON-RPC 2.0 message to the zcode app-server
-/// (the bundled `vendor/zcode.cjs` runtime's `app-server` stdio protocol).
+/// (the zcode package's `app-server` stdio protocol).
 fn write_zcode_protocol_message(
     stdin: &Arc<Mutex<ChildStdin>>,
     message: &serde_json::Value,
@@ -16918,6 +17698,7 @@ async fn ai_cli(
     adapter: String,
     cli_command: Option<String>,
     model: Option<String>,
+    thinking_level: Option<String>,
     cwd: Option<String>,
     extra_workspace_paths: Option<Vec<String>>,
     permission: Option<String>,
@@ -17032,6 +17813,7 @@ async fn ai_cli(
         // vars and the working directory are applied to the final (outer)
         // command below and inherited by any wrapped child.
         let mut args: Vec<String> = Vec::new();
+        append_ai_cli_thinking_args(protocol, thinking_level.as_deref(), &mut args);
         let mut workdir: Option<std::path::PathBuf> = None;
         let mut disable_autoupdater = false;
         let mut temp_files: Vec<TempFileGuard> = Vec::new();
@@ -17057,7 +17839,7 @@ async fn ai_cli(
         // When true, zcode is launched as the bundled runtime's `app-server`
         // stdio JSON-RPC server (real `session/event` token streaming) instead
         // of the one-shot `--prompt --json` path. Set in the is_zcode branch
-        // only when the vendor bundle is resolvable.
+        // only when an app-server entry is resolvable.
         let mut zcode_app_server = false;
         // The full turn prompt (workspace note + prompt + language directive)
         // for the app-server writer thread; the one-shot path keeps it in argv.
@@ -17139,14 +17921,15 @@ async fn ai_cli(
             // turn always runs without an interactive trust prompt.
             args.push("--skip-trust".into());
 
-            if mcp_enabled() {
-                if let Some(project_mcp_file) =
-                    write_gemini_project_mcp_settings(cwd.as_deref())?
-                {
-                    gemini_system_settings_path =
-                        Some(project_mcp_file.path().to_string_lossy().to_string());
-                    temp_files.push(project_mcp_file);
-                }
+            if let Some(settings_file) = write_gemini_cli_settings(
+                cwd.as_deref(),
+                mcp_enabled(),
+                model.as_deref(),
+                thinking_level.as_deref(),
+            )? {
+                gemini_system_settings_path =
+                    Some(settings_file.path().to_string_lossy().to_string());
+                temp_files.push(settings_file);
             }
 
             if let Some(m) = model
@@ -17455,12 +18238,11 @@ async fn ai_cli(
                 task.push_str("\n\n");
                 task.push_str(&language_directive);
             }
-            // Prefer the bundled runtime's `app-server` stdio JSON-RPC server
-            // (`node <pkg>/vendor/zcode.cjs app-server`), which streams REAL
-            // token deltas via `session/event` — the only zcode surface that
-            // emits machine-readable live output. Fall back to the historical
-            // `--prompt --json` one-shot (single envelope at EOF, no streaming)
-            // when the vendor bundle isn't in the expected npm layout.
+            // Prefer the package's `app-server` stdio JSON-RPC server (served
+            // by either vendor/zcode.cjs or the newer bin/zcode.js bundle),
+            // which streams real token deltas via `session/event`. Fall back
+            // to the historical `--prompt --json` one-shot (single envelope at
+            // EOF, no streaming) when neither npm layout is available.
             if let Some(entry) = cli_runtime::resolve_zcode_runtime_entry(&binary) {
                 zcode_node_entry = Some(entry.to_string_lossy().to_string());
                 zcode_app_server = true;
@@ -17635,10 +18417,10 @@ async fn ai_cli(
             node_args.extend(args.iter().cloned());
             build_launch_command("node", &node_args, &None)
         } else if let Some(entry) = zcode_node_entry.as_deref() {
-            // zcode direct-node launch: either `node <pkg>/vendor/zcode.cjs
-            // app-server` (streaming protocol) or `node <pkg>/bin/zcode.js
-            // --prompt <task> --json --mode <mode>` (one-shot fallback). Same
-            // cmd.exe-length bypass as dsh.
+            // zcode direct-node launch: an app-server entry (streaming
+            // protocol) or `node <pkg>/bin/zcode.js --prompt <task> --json
+            // --mode <mode>` (one-shot fallback). Same cmd.exe-length bypass
+            // as dsh.
             let mut node_args = Vec::with_capacity(args.len() + 1);
             node_args.push(entry.to_string());
             node_args.extend(args.iter().cloned());
@@ -18235,6 +19017,9 @@ async fn ai_cli(
             // tens of seconds). Emitted at most once per run.
             let mut requesting_done = false;
             let mut progress = AiCliProgressBatcher::new(&app2, &run2);
+            if parse_zcode_app_server {
+                progress.emit_now("⏳ 正在启动 ZCode 会话…\n");
+            }
             if let Some(o) = stdout {
                 let mut reader = std::io::BufReader::new(o);
                 let mut line = String::new();
@@ -18439,6 +19224,45 @@ async fn ai_cli(
                                     }
                                     _ => {}
                                 }
+                                if let Some(terminal) = zcode_app_server_terminal_event(&v) {
+                                    if zcode_in_think {
+                                        progress.push("</think>");
+                                        zcode_in_think = false;
+                                    }
+                                    match terminal {
+                                        ZcodeAppServerTerminal::Completed { response } => {
+                                            // A batched subscription may omit some or all
+                                            // token deltas. Complete the live log from the
+                                            // authoritative response without duplicating an
+                                            // already streamed prefix, and always return the
+                                            // authoritative response to the caller.
+                                            if !response.is_empty() {
+                                                if acc.is_empty() {
+                                                    progress.push(&response);
+                                                } else if let Some(suffix) = response.strip_prefix(&acc) {
+                                                    progress.push(suffix);
+                                                }
+                                                result = response;
+                                            }
+                                            if let Some(usage) = payload.and_then(|p| p.get("usage")) {
+                                                if !usage.is_null() {
+                                                    if let Ok(mut current) = claude_usage_reader.lock() {
+                                                        *current = Some(usage.clone());
+                                                    }
+                                                    emit_usage(&app2, &run2, usage);
+                                                }
+                                            }
+                                            received_content_reader.store(true, Ordering::Relaxed);
+                                        }
+                                        ZcodeAppServerTerminal::Failed { message } => {
+                                            if let Ok(mut slot) = claude_stream_error_reader.lock() {
+                                                *slot = Some(message);
+                                            }
+                                        }
+                                    }
+                                    progress.flush();
+                                    stream_result_seen_reader.store(true, Ordering::Relaxed);
+                                }
                             }
                             "state.updated" => {
                                 let reason = v
@@ -18451,38 +19275,11 @@ async fn ai_cli(
                                             progress.emit_now("⏳ 正在请求模型…\n");
                                         }
                                     }
-                                    Some("prompt_completed") => {
-                                        if zcode_in_think {
-                                            progress.push("</think>");
-                                            zcode_in_think = false;
-                                        }
-                                        received_content_reader.store(true, Ordering::Relaxed);
-                                        progress.flush();
-                                        // Signal the wait loop: the turn is
-                                        // logically done (the app-server itself
-                                        // stays alive as a server).
-                                        stream_result_seen_reader.store(true, Ordering::Relaxed);
-                                    }
-                                    Some("prompt_failed") => {
-                                        if zcode_in_think {
-                                            progress.push("</think>");
-                                            zcode_in_think = false;
-                                        }
-                                        let detail = v
-                                            .pointer("/params/error")
-                                            .and_then(|e| e.as_str())
-                                            .or_else(|| {
-                                                v.pointer("/params/message").and_then(|m| m.as_str())
-                                            })
-                                            .unwrap_or("ZCode 本轮执行失败");
-                                        if let Ok(mut slot) = claude_stream_error_reader.lock() {
-                                            if slot.is_none() {
-                                                *slot = Some(detail.to_string());
-                                            }
-                                        }
-                                        progress.flush();
-                                        stream_result_seen_reader.store(true, Ordering::Relaxed);
-                                    }
+                                    // These state updates are emitted before the
+                                    // subscribed model-event backlog. Wait for the
+                                    // ordered `turn.completed` / `turn.failed`
+                                    // session event instead of cutting off deltas.
+                                    Some("prompt_completed") | Some("prompt_failed") => {}
                                     _ => {}
                                 }
                             }
@@ -19548,6 +20345,22 @@ mod tests {
     }
 
     #[test]
+    fn task_attachment_extension_preserves_safe_names_and_falls_back_to_mime() {
+        assert_eq!(
+            task_attachment_extension("application/octet-stream", Some("review.patch")),
+            "patch"
+        );
+        assert_eq!(
+            task_attachment_extension("application/pdf", Some("README")),
+            "pdf"
+        );
+        assert_eq!(
+            task_attachment_extension("application/octet-stream", Some("bad.a-b")),
+            "bin"
+        );
+    }
+
+    #[test]
     fn extract_semver_handles_each_vendor_format() {
         // claude
         assert_eq!(
@@ -19580,6 +20393,54 @@ mod tests {
         assert!(!version_needs_update("v1.2.0", "1.2.0"));
         assert!(!version_needs_update("  1.2.0  ", "1.2.0"));
         assert!(!version_needs_update("0.1.0-rc.6", "0.1.0-rc.6"));
+    }
+
+    #[test]
+    fn ai_cli_thinking_args_match_supported_protocols() {
+        let mut codex = Vec::new();
+        append_ai_cli_thinking_args("codex", Some("xhigh"), &mut codex);
+        assert_eq!(
+            codex,
+            vec![
+                "-c".to_string(),
+                "model_reasoning_effort=\"xhigh\"".to_string()
+            ]
+        );
+
+        let mut claude = Vec::new();
+        append_ai_cli_thinking_args("claude", Some("HIGH"), &mut claude);
+        assert_eq!(claude, vec!["--effort".to_string(), "high".to_string()]);
+    }
+
+    #[test]
+    fn ai_cli_thinking_args_ignore_invalid_or_unsupported_values() {
+        let mut invalid = Vec::new();
+        append_ai_cli_thinking_args("codex", Some("maximum"), &mut invalid);
+        append_ai_cli_thinking_args("gemini", Some("high"), &mut invalid);
+        assert!(invalid.is_empty());
+    }
+
+    #[test]
+    fn gemini_cli_thinking_settings_cover_level_and_budget_models() {
+        let level =
+            gemini_cli_settings_json(None, false, Some("gemini-3.1-pro-preview"), Some("xhigh"))
+                .unwrap();
+        assert_eq!(
+            level.pointer(
+                "/modelConfigs/overrides/0/modelConfig/generateContentConfig/thinkingConfig/thinkingLevel"
+            ),
+            Some(&serde_json::Value::String("HIGH".to_string()))
+        );
+
+        let budget =
+            gemini_cli_settings_json(None, false, Some("gemini-2.5-pro"), Some("medium")).unwrap();
+        assert_eq!(
+            budget.pointer(
+                "/modelConfigs/overrides/0/modelConfig/generateContentConfig/thinkingConfig/thinkingBudget"
+            ),
+            Some(&serde_json::json!(8192))
+        );
+        assert!(gemini_cli_settings_json(None, false, None, Some("high")).is_none());
     }
 
     #[test]
@@ -20420,6 +21281,52 @@ mod tests {
         assert!(zcode_envelope_from_output("just some text").is_none());
         assert!(zcode_envelope_from_output("").is_none());
         assert!(zcode_envelope_from_output("   ").is_none());
+    }
+
+    #[test]
+    fn zcode_app_server_waits_for_ordered_turn_terminal_event() {
+        let premature = serde_json::json!({
+            "method": "state.updated",
+            "params": { "reason": "prompt_completed" }
+        });
+        assert_eq!(zcode_app_server_terminal_event(&premature), None);
+
+        let delta = serde_json::json!({
+            "method": "session/event",
+            "params": {
+                "type": "model.streaming",
+                "payload": { "kind": "text_delta", "delta": "hel" }
+            }
+        });
+        assert_eq!(zcode_app_server_terminal_event(&delta), None);
+
+        let completed = serde_json::json!({
+            "method": "session/event",
+            "params": {
+                "type": "turn.completed",
+                "payload": { "resultType": "success", "response": "hello" }
+            }
+        });
+        assert_eq!(
+            zcode_app_server_terminal_event(&completed),
+            Some(ZcodeAppServerTerminal::Completed {
+                response: "hello".to_string()
+            })
+        );
+
+        let failed = serde_json::json!({
+            "method": "session/event",
+            "params": {
+                "type": "turn.failed",
+                "payload": { "error": { "message": "upstream failed" } }
+            }
+        });
+        assert_eq!(
+            zcode_app_server_terminal_event(&failed),
+            Some(ZcodeAppServerTerminal::Failed {
+                message: "upstream failed".to_string()
+            })
+        );
     }
 
     #[test]
@@ -21844,6 +22751,54 @@ requires_openai_auth = true
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn parse_task_git_commits_reads_graph_metadata() {
+        let stdout = concat!(
+            "abcdef123456\x1fabcdef1\x1fImplement board Git history\x1fDev User\x1f",
+            "2026-09-13T10:00:00+08:00\x1f1789264800\x1fparent1 parent2\x1f",
+            "HEAD -> ow/session-1, origin/ow/session-1\x1e\n"
+        );
+        let commits = parse_task_git_commits(stdout);
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].short_hash, "abcdef1");
+        assert_eq!(commits[0].parents, vec!["parent1", "parent2"]);
+        assert_eq!(
+            commits[0].refs,
+            vec!["HEAD -> ow/session-1", "origin/ow/session-1"]
+        );
+        assert!(commits[0].is_merge);
+    }
+
+    #[test]
+    fn parse_task_git_file_metadata_keeps_renames_and_stats() {
+        let mut files = parse_task_git_name_status(
+            "M\tsrc/app.ts\nA\tsrc/new.ts\nR100\tsrc/old.ts\tsrc/moved.ts\n",
+        );
+        for (file, (additions, deletions)) in files.iter_mut().zip(parse_task_git_numstat(
+            "4\t2\tsrc/app.ts\n9\t0\tsrc/new.ts\n1\t1\tsrc/moved.ts\n",
+        )) {
+            file.additions = additions;
+            file.deletions = deletions;
+        }
+        assert_eq!(files.len(), 3);
+        assert_eq!(files[0].status, "M");
+        assert_eq!((files[0].additions, files[0].deletions), (4, 2));
+        assert_eq!(files[2].status, "R");
+        assert_eq!(files[2].previous_path.as_deref(), Some("src/old.ts"));
+        assert_eq!(files[2].path, "src/moved.ts");
+    }
+
+    #[test]
+    fn task_git_inputs_reject_revision_and_path_injection() {
+        assert!(valid_git_revision("main"));
+        assert!(valid_git_revision("origin/feature/task"));
+        assert!(!valid_git_revision("--all"));
+        assert!(!valid_git_revision("main\n--all"));
+        assert!(valid_workspace_relative_git_path("src/app.ts"));
+        assert!(!valid_workspace_relative_git_path("../outside.txt"));
+        assert!(!valid_workspace_relative_git_path("C:\\outside.txt"));
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -22001,7 +22956,11 @@ pub fn run() {
             setup_comfyui,
             open_external,
             open_workspace_directory,
+            task_developer_tools::open_workspace_in_ide,
+            task_developer_tools::open_workspace_in_terminal,
+            task_developer_tools::task_detect_developer_tools,
             list_workspace_dir,
+            sync_task_artifacts,
             engine_reveal_asset,
             project_environment_scan,
             project_mcp_probe,
@@ -22026,11 +22985,29 @@ pub fn run() {
             workspace_vcs_status_cancel,
             workspace_changes_cached,
             prepare_isolated_workspace,
+            push_workspace_branch,
+            task_git_overview,
+            task_git_commits,
+            task_git_commit_files,
+            task_git_commit_file_diff,
+            task_worktree::task_worktree_review,
+            task_worktree::task_worktree_integrate,
+            task_worktree::task_worktree_push,
+            task_worktree::task_worktree_cleanup,
+            task_worktree::task_create_pull_request,
+            openspec_runtime::openspec_runtime_status,
+            openspec_runtime::openspec_prepare_change,
+            openspec_runtime::openspec_change_status,
+            openspec_runtime::openspec_validate_change,
+            openspec_runtime::openspec_set_task_status,
+            openspec_runtime::openspec_archive_change,
+            openspec_runtime::openspec_list_changes,
             preview_local_file,
             file_exists,
             read_local_file_for_upload,
             knowledge_base_scan_files,
             save_clipboard_image,
+            save_task_attachment,
             save_session_capture,
             fetch_capture_image_data_url,
             fetch_model_asset_data_url,

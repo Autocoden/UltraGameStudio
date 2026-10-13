@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import type { IRGraph } from '@/core/ir';
 import { setActiveGatewaySelection } from '@/lib/gatewayConfig';
-import { PROVIDERS_STORAGE } from '@/lib/apiConfig';
+import { PROVIDERS_STORAGE, syncGatewayFromProviders } from '@/lib/apiConfig';
 import {
   FREE_CHANNEL_AUTO_ID,
   FREE_CHANNEL_AUTO_MODEL,
@@ -181,6 +181,7 @@ describe('model gateway compatibility', () => {
         },
       ]),
     );
+    syncGatewayFromProviders();
     const selection = {
       adapter: 'claude-code',
       modelClass: 'opus',
@@ -223,6 +224,7 @@ describe('model gateway compatibility', () => {
         },
       ]),
     );
+    syncGatewayFromProviders();
 
     const selection = {
       adapter: 'claude-code' as const,
@@ -257,6 +259,7 @@ describe('model gateway compatibility', () => {
         },
       ]),
     );
+    syncGatewayFromProviders();
 
     const selection = {
       adapter: 'codex' as const,
@@ -296,6 +299,7 @@ describe('model gateway compatibility', () => {
         },
       ]),
     );
+    syncGatewayFromProviders();
     const workflow = buildWorkflow([]);
     workflow.meta.gateway = {
       defaults: {
@@ -329,6 +333,7 @@ describe('model gateway compatibility', () => {
         },
       ]),
     );
+    syncGatewayFromProviders();
     const workflow = buildWorkflow([]);
     workflow.meta.gateway = {
       defaults: {
@@ -364,6 +369,7 @@ describe('model gateway compatibility', () => {
         },
       ]),
     );
+    syncGatewayFromProviders();
 
     const workflow = buildWorkflow([]);
     workflow.meta.gateway = {
@@ -585,6 +591,7 @@ describe('model gateway compatibility', () => {
         },
       ]),
     );
+    syncGatewayFromProviders();
 
     const workflow = buildWorkflow([]);
     workflow.meta.gateway = {
@@ -702,6 +709,7 @@ describe('model gateway compatibility', () => {
         },
       ]),
     );
+    syncGatewayFromProviders();
 
     const workflow = buildWorkflow([]);
     const selection = workflowGatewaySelection(workflow);
@@ -735,6 +743,7 @@ describe('model gateway compatibility', () => {
         },
       ]),
     );
+    syncGatewayFromProviders();
     const workflow = buildWorkflow([]);
     workflow.meta.gateway = {
       defaults: {
@@ -765,6 +774,7 @@ describe('model gateway compatibility', () => {
         },
       ]),
     );
+    syncGatewayFromProviders();
     const workflow = buildWorkflow([]);
     workflow.meta.gateway = {
       defaults: {
@@ -794,6 +804,7 @@ describe('model gateway compatibility', () => {
         },
       ]),
     );
+    syncGatewayFromProviders();
     const workflow = buildWorkflow([]);
     workflow.meta.gateway = {
       defaults: {
